@@ -539,7 +539,7 @@ function scheduleDiff(beforeDays, afterDays) {
   return dates.map(date => ({ date, from: b[date] || 'Off', to: a[date] || 'Off' })).filter(x => x.from !== x.to);
 }
 // Inline form (no pop-up): pick a reason, add details, then the change saves and the alert goes out.
-function askReason(boxSel, title, onOk) {
+function askReason(boxSel, title, onOk, onCancel) {
   const box = $(boxSel); if (!box) return;
   box.innerHTML = `<div class="reasonp">
     <h3 style="margin:0 0 4px">${esc(title)}</h3>
@@ -548,7 +548,7 @@ function askReason(boxSel, title, onOk) {
     ${fieldBox('rsnote', 'Details', '', 2, 'What happened, and how the stores you moved will get covered.')}
     <div class="row" style="margin-top:10px"><button class="btn primary" id="rsok" type="button">Save and alert ${esc(vpNames())}</button><button class="link" id="rscancel" type="button">Cancel</button></div></div>`;
   box.hidden = false; wireMics(box); box.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  $('#rscancel').onclick = () => { box.innerHTML = ''; box.hidden = true; viewWeek(); };
+  $('#rscancel').onclick = () => { box.innerHTML = ''; box.hidden = true; (onCancel || viewWeek)(); };
   $('#rsok').onclick = async () => {
     const reason = $('#rsn').value, note = $('#rsnote').value.trim();
     if (!reason) return toast('Pick a reason first.', true);
@@ -672,7 +672,9 @@ async function viewWeek() {
       plan.pivots = [...(plan.pivots || []), { date: sugg.date, from: sugg.from, to: sugg.to, reason: sugg.reason, at: new Date().toISOString() }];
       if (sugg.loses) plan.calls = [...new Set([...(plan.calls || []), sugg.from])];
       plan.calls = plan.calls.filter(c => c !== sugg.to);
-      await S.be.savePlan(plan); toast(`Swapped. ${sugg.to} is in, ${sugg.from} is out.`); viewWeek();
+      await S.be.savePlan(plan);
+      await sendScheduleAlert(who, week, 'Store numbers changed', `Took the app's suggested swap. ${sugg.reason || ''}`.trim(), [{ date: sugg.date, from: sugg.from, to: sugg.to }], 'pivot').catch(() => null);
+      toast(`Swapped. ${sugg.to} is in, ${sugg.from} is out.${needsReason() ? ` ${vpNames()} was told.` : ''}`); viewWeek();
     };
     $('#pvno').onclick = async () => {
       plan.dismissed = [...(plan.dismissed || []), sugg.key];
@@ -816,6 +818,39 @@ function dayCard(d, i, plan, canEdit) {
 async function openVisit(x) {
   S.visit = x; S.V = null; S.vPhotos = []; S.vPlans = [];
   try { S.vPlans = (await Promise.all([S.be.plan(x.email, weekStartOf(x.date)), S.be.plan(x.email, addDays(weekStartOf(x.date), 7))])).filter(Boolean); } catch (e) {}
+  // In person at a store that isn't the one planned for that day (or on a day off): ask why, move the
+  // plan, and alert the VP. Opening a visit that's already started never asks again.
+  if (!x.remote && !x.reasonOk && needsReason() && x.email === S.user.email) {
+    const plan = S.vPlans.find(p => p.weekStart === weekStartOf(x.date));
+    const idx = plan ? plan.days.findIndex(d => d.date === x.date) : -1;
+    const day = idx >= 0 ? plan.days[idx] : null;
+    const vid = `${x.email}_${x.date}_${slug(x.store)}`;
+    const started = S.visits.some(v => v.id === vid) || localGet(vid);
+    const planned = day?.store || (plan && idx < 0 ? 'Off' : null);
+    if (plan && planned && planned !== x.store && day?.status !== 'done' && !started) {
+      S.visit = null; window.scrollTo(0, 0);
+      const v = $('#view');
+      v.innerHTML = `<div class="panel"><p class="eyebrow">${esc(dayLabel(x.date))}</p>
+        <h2 style="margin:0 0 6px">${planned === 'Off' ? `This is your day off` : `Your plan has you at ${esc(planned)}`}</h2>
+        <p style="margin:0 0 12px">You're opening a full-day visit at <b>${esc(x.store)}</b>.${planned !== 'Off' ? ` Going to ${esc(planned)} instead? ` : ''}</p>
+        ${planned !== 'Off' ? `<div class="row" style="margin:0 0 14px"><button class="btn" id="goplan" type="button">Open ${esc(planned)} instead</button></div>` : ''}
+        <div id="visitreason"></div></div>`;
+      const gp = $('#goplan'); if (gp) gp.onclick = () => openVisit({ ...x, store: planned, kind: day.kind, dayIndex: idx });
+      askReason('#visitreason', `Why ${x.store} instead${planned === 'Off' ? ' of a day off' : ` of ${planned}`}?`, async (reason, note) => {
+        if (day) {
+          plan.pivots = [...(plan.pivots || []), { date: x.date, from: day.store, to: x.store, reason: `${reason}${note ? ': ' + note : ''}`, at: new Date().toISOString(), by: S.user.email }];
+          Object.assign(day, { store: x.store, kind: plan.days.some((d, j) => j !== idx && d.store === x.store && d.date < x.date) ? 'second' : 'first', score: S.scores[x.store]?.score ?? null });
+          plan.calls = (plan.calls || []).filter(c => c !== x.store);
+          await S.be.savePlan(plan);
+        }
+        const who = S.users.find(u => u.email === x.email) || S.user;
+        await sendScheduleAlert(who, plan.weekStart, reason, note, [{ date: x.date, from: planned, to: x.store }], 'visit');
+        toast(`${vpNames()} was alerted. Opening ${x.store}.`);
+        openVisit({ ...x, reasonOk: true, kind: day ? day.kind : 'drop-in', dayIndex: day ? idx : undefined });
+      }, () => { S.tab = 'week'; renderShell(); });
+      return;
+    }
+  }
   renderShell(); window.scrollTo(0, 0);
   try { if (x.remote) return; S.vPhotos = await S.be.photos(`${x.email}_${x.date}_${slug(x.store)}${x.remote ? '_remote' : ''}`); if (S.vPhotos.length && S.visit === x) viewVisit(); } catch (e) {}
 }
