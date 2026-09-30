@@ -2,12 +2,12 @@ import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js';
 import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js';
 import {
   STORES, DISTRICTS, canonicalStore, isKnownStore, parseRsa, rangeFromFileName, parseTeamRoster, resolveReportNames,
-  paceFactor, DEFAULT_GOALS, cidOf, status, fmt, goalsFor
+  paceFactor, DEFAULT_GOALS, cidOf, status, fmt, goalsFor, TEAM_FOCUS, pickStoreFocus
 } from './base.js';
 import {
   iso, fromIso, addDays, daysApart, weekStartOf, DAY_NAMES, DAY_LONG, dow, DEFAULT_OFF, validOff, safeOff, VISIT_DAYS, STORE_GOALS,
   parseDaily, needScore, band, pct, environment, buildPlan, pivotSuggestion, ELEMENTS, SEGMENTS, AORS, PRACTICE, VISIT_TYPES, kindToType, visitScore, visitSummary, consultantCoaching, drillFor, draggers, helpers, STORE_TO_RSA, hasCommitment, commitmentText, blackoutFor, offChoicesFor, storeFocus, rsaPicks, consultantWeeks, teamSignals,
-  STORE_METRICS, slug
+  STORE_METRICS, slug, COACHING, METRICS, PLAIN, isOutlet
 } from './ml.js';
 
 const DEMO = !firebaseConfig.apiKey || firebaseConfig.apiKey.startsWith('PASTE');
@@ -131,7 +131,11 @@ async function firebaseBackend() {
     deletePhoto: id => F.deleteDoc(F.doc(db, 'photos', id)),
     timeOff: (e, week) => get('timeoff', `${e}_${week}`),
     timeOffForWeek: week => all('timeoff', ['weekStart', week]),
-    saveTimeOff: t => F.setDoc(F.doc(db, 'timeoff', `${t.email}_${t.weekStart}`), t)
+    saveTimeOff: t => F.setDoc(F.doc(db, 'timeoff', `${t.email}_${t.weekStart}`), t),
+    oneOnOne: id => get('oneonones', id),
+    saveOneOnOne: d => F.setDoc(F.doc(db, 'oneonones', d.id), d),
+    onePrivate: id => get('oneprivate', id),
+    saveOnePrivate: d => F.setDoc(F.doc(db, 'oneprivate', d.id), d)
   };
   return be;
 }
@@ -269,6 +273,41 @@ function demoBackend() {
     { id: 'nc', name: 'Carolinas', leader: 'nc@demo', director: '', stores: ['Greensboro', 'Winston Salem', 'Burlington', 'Danville', 'Outlet Greensboro'] },
     { id: 'gulf', name: 'Gulf Coast', leader: 'gulf@demo', director: '', stores: ['Mobile', "D'Iberville", 'Spanish Fort', 'Pensacola', 'Crestview', 'Ft. Walton'] }
   ];
+  // Last week, for the 1 on 1: a plan and visits for each leader, the RSA copy from the Saturday
+  // before it, and the Jacksonville leader's 1 on 1 from two weeks back with commitments to review.
+  const lw = addDays(week, -7), sat2 = addDays(lw, -1);
+  if (rsaHist[sat] && sat2.slice(0, 7) === sat.slice(0, 7)) {
+    rsaHist[sat2] = { from: monthStart, to: sat2, people: rsaHist[sat].people.map((p, i) => {
+      const h = 24 + rnd() * 10, f = i % 6 === 1 ? 1.55 : i % 6 === 5 ? 0.35 : i % 6 === 4 ? 0.6 : 0.8 + rnd() * 0.4;
+      const hours = Math.max(1, p.hours - h), sales = Math.max(0, p.k.netSales - h * p.k.sph * f);
+      return { cid: p.cid, name: p.name, store: p.store, hours, k: { netSales: sales, sph: sales / hours } };
+    }) };
+  }
+  for (const l of leaders) {
+    const scores = Object.fromEntries(l.stores.map(s => [s, needScore(daily[sat].stores[s], { today: lw })]));
+    const p = { email: l.email, name: l.name, ...buildPlan({ weekStart: lw, stores: l.stores, scores, off: l.off, role: l.role }), builtAt: lw + 'T08:00:00', basisDate: addDays(lw, -1), pivots: [], dismissed: [] };
+    let skipped = false;
+    p.days.forEach(d => {
+      if (!d.store) return;
+      if (l.email === 'east@demo' && !skipped && d.kind !== 'first') { skipped = true; return; }
+      d.status = 'done';
+      const id = `${l.email}_${d.date}_${slug(d.store)}`;
+      if (visits[id]) return;
+      const team = rsa.people.filter(x => x.store === d.store).slice(0, 2);
+      visits[id] = { id, email: l.email, name: l.name, role: l.role, store: d.store, date: d.date, kind: d.kind, vtype: kindToType(d.kind), status: 'done',
+        leaderWin: { name: 'Store leader', text: 'Huddle ran on time with every number posted.' },
+        consultants: team.map((x, j) => ({ cid: x.cid, name: x.name, notes: 'Worked the monthly payment talk track.', drill: j === 0 ? { key: 'financePct', scored: { 0: 'yes', 1: 'partial', 2: 'yes', 3: 'no' } } : {} })),
+        actions: [{ what: 'Finance % of sales', key: 'financePct', from: '48%', to: '55%', how: 'Buying power in the first 10 minutes with every guest', owner: 'Store leader', due: addDays(lw, 6) }, {}, {}], at: d.date };
+    });
+    plans[`${l.email}_${lw}`] = p;
+  }
+  meta.rsaDates = Object.keys(rsaHist).sort().reverse();
+  const ones = {};
+  ones[`east@demo_${addDays(lw, -7)}`] = { id: `east@demo_${addDays(lw, -7)}`, email: 'east@demo', name: users['east@demo'].name, weekStart: addDays(lw, -7), status: 'done', heldAt: addDays(lw, 1) + 'T09:00:00', heldBy: OWNER_EMAIL, heldByName: 'Frank Pina',
+    coaching: '', actions: [
+      { key: 'closeRate', what: 'Close Rate across the market', from: '24%', to: '28%', how: 'No guest leaves without a TO. Leaders track TOs at every huddle.', owner: users['east@demo'].name, due: addDays(lw, 6) },
+      { store: 'Yulee', key: 'financePct', what: 'Yulee: Finance %', from: '44%', to: '55%', how: 'Full-day visit Tuesday. Buying power in the first 10 minutes.', owner: users['east@demo'].name, due: addDays(lw, 6) },
+      { what: 'Full-day visits', from: '3 of 5', to: '5 of 5', how: 'Days off locked by Sunday.', owner: users['east@demo'].name, due: addDays(lw, 6) }], support: 'Help backfill a closing leader at Yulee', supportBy: addDays(lw, 3) };
   let current = 'east@demo';
   const clone = x => structuredClone(x);
   return {
@@ -303,7 +342,11 @@ function demoBackend() {
     async deletePhoto(id) { delete photos[id]; },
     timeOff: async (e, w) => clone(timeoff[`${e}_${w}`] || null),
     timeOffForWeek: async w => clone(Object.values(timeoff).filter(x => x.weekStart === w)),
-    async saveTimeOff(x) { timeoff[`${x.email}_${x.weekStart}`] = clone(x); }
+    async saveTimeOff(x) { timeoff[`${x.email}_${x.weekStart}`] = clone(x); },
+    oneOnOne: async id => clone(ones[id] || null),
+    async saveOneOnOne(d) { ones[d.id] = clone(d); },
+    onePrivate: async id => clone(ones['p_' + id] || null),
+    async saveOnePrivate(d) { ones['p_' + d.id] = clone(d); }
   };
 }
 function latestVisitMap(visits) {
@@ -446,6 +489,7 @@ function renderShell() {
   const tabs = [];
   tabs.push(['brief', 'Daily brief']);
   if (seesAll()) tabs.push(['leaders', 'Leaders']);
+  tabs.push(['one', seesAll() ? '1 on 1s' : 'My 1 on 1']);
   tabs.push(['week', seesAll() ? 'Weekly plans' : 'My week'], ['stores', seesAll() ? 'Stores' : 'My stores'], ['messages', 'Team messages'], ['visits', 'Visit log']);
   if (isAdmin()) tabs.push(['upload', 'Upload'], ['setup', 'Setup']);
   tabs.push(['guide', 'How it works']);
@@ -455,7 +499,7 @@ function renderShell() {
     <div id="view"></div>`;
   document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => { S.tab = b.dataset.tab; S.visit = null; renderShell(); });
   if (S.visit) return viewVisit();
-  ({ brief: viewBrief, leaders: viewLeaders, week: viewWeek, stores: viewStores, messages: viewMessages, visits: viewVisits, upload: viewUpload, setup: viewSetup, guide: viewGuide })[S.tab]();
+  ({ brief: viewBrief, one: viewOne, leaders: viewLeaders, week: viewWeek, stores: viewStores, messages: viewMessages, visits: viewVisits, upload: viewUpload, setup: viewSetup, guide: viewGuide })[S.tab]();
 }
 const dataLine = () => {
   const d = S.meta.latestDaily;
@@ -1425,6 +1469,8 @@ async function viewBrief() {
   const supportDue = S.visits.filter(x => x.email === email && x.status !== 'draft' && String(x.leaderCommit?.support || '').trim())
     .filter(x => !x.leaderCommit.supportBy || x.leaderCommit.supportBy <= addDays(t, 2)).slice(0, 5);
 
+  const one = await latestOne(email);
+  const oneActs = (one?.actions || []).filter(hasCommitment).map(a => ({ a, au: oneFollow(a, stores, email, one.weekStart) }));
   // Today
   const todayDay = plan?.days.find(d => d.date === t);
   const sugg = plan && S.meta.latestDaily > plan.basisDate ? pivotSuggestion({ plan, scores: S.scores, today: t, dismissed: plan.dismissed || [] }) : null;
@@ -1483,6 +1529,11 @@ async function viewBrief() {
     ${li(due.map(({ x, a, au }) => `<li><b>${esc(x.store)}:</b> ${esc(commitmentText(a))} ${au?.v ? `<span class="rv ${au.v === 'partial' ? 'part' : 'not'}">${au.v === 'partial' ? 'Moving' : 'Not yet'}</span> <span class="small">${esc(au.text)}</span>` : '<span class="small muted">Check in with the leader.</span>'}</li>`))}
     ${supportDue.length ? `<p class="eyebrow" style="margin-top:10px">Support you promised</p>${li(supportDue.map(x => `<li><b>${esc(x.store)}:</b> ${esc(x.leaderCommit.support)}${x.leaderCommit.supportBy ? ` (by ${esc(shortDate(x.leaderCommit.supportBy))})` : ''}</li>`))}` : ''}
   </section>
+  ${oneActs.length ? `<section class="panel" style="border-left:6px solid #F68C2C">
+    <h3>From your 1 on 1 <span class="small muted">(week of ${esc(weekRange(one.weekStart))})</span></h3>
+    <ul class="blist">${oneActs.map(({ a, au }) => `<li>${esc(commitmentText(a))} ${au?.v ? `<span class="rv ${au.v === 'yes' ? 'done' : au.v === 'partial' ? 'part' : 'not'}">${au.v === 'yes' ? 'Done' : au.v === 'partial' ? 'Moving' : 'Not yet'}</span> <span class="small">${esc(au.text)}</span>` : ''}</li>`).join('')}</ul>
+    ${String(one.support || '').trim() ? `<p class="small" style="margin:0"><b>Support promised:</b> ${esc(one.support)}${one.supportBy ? ` (by ${esc(shortDate(one.supportBy))})` : ''}</p>` : ''}
+  </section>` : ''}
   <section class="panel">
     <h3>Send to your team</h3>
     <p class="small">Your daily store huddle and market recap are ready to copy and send.</p>
@@ -1494,6 +1545,368 @@ async function viewBrief() {
   v.querySelectorAll('[data-bremote]').forEach(x => x.onclick = () => openVisit({ store: x.dataset.bremote, date: t, email, kind: 'remote', remote: true }));
   v.querySelectorAll('[data-rc]').forEach(x => x.onclick = () => { const o = JSON.parse(x.dataset.rc); openVisit({ ...o, date: t, email, kind: 'remote', remote: true }); });
   $('#bmsg').onclick = () => { S.tab = 'messages'; S.msgType = 'dailyStore'; renderShell(); };
+}
+
+// ---------------------------------------------------------------- VP 1 on 1 with a Market Leader
+// Weekly, VP to Market Leader. Recaps the week that just closed (Sunday to Saturday): which stores and
+// people performed and which didn't, how the leader ran their week, the one lever the market needs
+// pulled, and where the focus goes this week. Ends with commitments from X to Y by a date, and how.
+const ONE_LEVERS = TEAM_FOCUS.filter(k => COACHING[k]);
+const O_OPEN = new Set(['glance', 'wins', 'opps', 'ran', 'prev', 'lever', 'focus', 'coach', 'acts', 'notes']);
+const oneId = (email, ws) => `${email}_${ws}`;
+const weekRange = ws => `${shortDate(ws)} to ${shortDate(addDays(ws, 6))}`;
+const moneyK = n => (n < 0 ? '-$' : '$') + Math.abs(Math.round(n)).toLocaleString('en-US');
+const firstOf = n => titleName(String(n || '').trim().split(/\s+/)[0] || '');
+const plainOf = key => PLAIN[key] || (STORE_METRICS.find(m => m.key === key)?.label || key).toLowerCase();
+const canHoldOne = () => isAdmin();
+
+// Market totals for a period: sales and budget add up; rates are weighted by each store's sales.
+function rollup(stores, daily, per) {
+  const rows = stores.map(s => daily?.stores?.[s]?.[per]).filter(p => p?.k?.netSales != null);
+  if (!rows.length) return null;
+  const w = p => Math.max(p.k.netSales || 0, 1);
+  const wavg = get => { let ww = 0, t = 0; rows.forEach(p => { const v = get(p); if (v != null && isFinite(v)) { ww += w(p); t += v * w(p); } }); return ww ? t / ww : null; };
+  const sales = rows.reduce((t, p) => t + (p.k.netSales || 0), 0);
+  const bud = rows.reduce((t, p) => t + (p.budget?.netSales ?? p.k.netSales ?? 0), 0);
+  const k = { netSales: sales, traffic: rows.reduce((t, p) => t + (p.k.traffic || 0), 0) }, budget = { netSales: bud };
+  for (const m of STORE_METRICS) if (!['netSales', 'traffic'].includes(m.key)) {
+    k[m.key] = wavg(p => p.k[m.key]);
+    const b = wavg(p => p.budget?.[m.key]); if (b != null) budget[m.key] = b;
+  }
+  return { k, budget, n: rows.length, vsBud: { netSales: bud ? (sales / bud - 1) * 100 : null, closeRate: wavg(p => p.vsBud?.closeRate) }, vsLy: { spg: wavg(p => p.vsLy?.spg), netSales: wavg(p => p.vsLy?.netSales) } };
+}
+// The lever: the store number where the market leaves the most on the table, weighted by store volume.
+function marketLevers(stores, daily, per) {
+  return ONE_LEVERS.map(key => {
+    const m = STORE_METRICS.find(x => x.key === key); if (!m) return null;
+    let score = 0; const hits = [];
+    stores.forEach(s => {
+      const p = daily?.stores?.[s]?.[per]; const v = p?.k?.[key]; const goal = p?.budget?.[key] ?? STORE_GOALS[key];
+      if (v == null || goal == null) return;
+      const ratio = m.lower ? (v ? goal / v : 2) : v / goal;
+      if (ratio < 1) { const short = 1 - ratio; score += short * Math.max(p.k.netSales || 0, 1); hits.push({ store: s, value: v, goal, short }); }
+    });
+    return { key, label: m.label, lower: !!m.lower, score, hits: hits.sort((a, b) => b.short - a.short), pillar: COACHING[key].pillar, of: stores.filter(s => daily?.stores?.[s]?.[per]?.k?.[key] != null).length };
+  }).filter(x => x && x.hits.length).sort((a, b) => b.score - a.score);
+}
+// Where a 1 on 1 commitment stands today, from the latest numbers.
+function oneFollow(a, stores, email, ws) {
+  if (!a) return null;
+  if (/full-day visits/i.test(a.what || '') && email && ws) {
+    const w0 = addDays(ws, 7), w1 = addDays(ws, 13), to = numOf(a.to);
+    const n = S.visits.filter(x => x.email === email && !x.remote && x.status !== 'draft' && x.date >= w0 && x.date <= w1).length;
+    return { v: to != null && n >= to ? 'yes' : n ? 'partial' : 'no', text: `${n} full-day visit${n === 1 ? '' : 's'} logged that week.` };
+  }
+  if (!S.daily) return null;
+  if (a.cid && a.rkey) {
+    const p = (S.rsa?.people || []).find(x => x.cid === a.cid); const now = p?.k?.[a.rkey];
+    const from = numOf(a.from), to = numOf(a.to); if (now == null || from == null || to == null) return null;
+    const lower = !!METRICS.find(x => x.key === a.rkey)?.lower;
+    const v = (lower ? now <= to : now >= to) ? 'yes' : (lower ? now < from : now > from) ? 'partial' : 'no';
+    return { v, text: `${titleName(p.name)} is at ${fmtMetric(a.rkey, now)} month to date (was ${a.from}, goal ${a.to}).` };
+  }
+  if (a.store && S.daily.stores[a.store]) return autoFollow(a, S.daily.stores[a.store], {});
+  const mk = { wtd: rollup(stores, S.daily, 'wtd'), mtd: rollup(stores, S.daily, 'mtd') };
+  return autoFollow(a, mk, {});
+}
+
+async function viewOne() {
+  const v = $('#view');
+  const holder = canHoldOne() || S.user.role === 'exec';
+  const mms = holder ? leaders() : [S.user];
+  if (holder && (!S.oneEmail || !mms.some(l => l.email === S.oneEmail))) S.oneEmail = mms.find(l => l.role === 'leader')?.email || mms[0]?.email || null;
+  const email = holder ? S.oneEmail : S.user.email;
+  const who = S.users.find(u => u.email === email) || (email === S.user.email ? S.user : null);
+  if (!who) { v.innerHTML = `<div class="panel"><h2>1 on 1s</h2><p>No Market Leaders set up yet. Add them in Setup and put them on a market.</p></div>`; return; }
+  const weeks = Array.from({ length: 8 }, (_, i) => addDays(weekStartOf(today()), -7 * (i + 1)));
+  if (!S.oneWeek || !weeks.includes(S.oneWeek)) {
+    S.oneWeek = weeks[0];
+    // A Market Leader opens on their most recent held 1 on 1.
+    if (!holder) for (const w of weeks.slice(0, 4)) { const d = await S.be.oneOnOne(oneId(email, w)).catch(() => null); if (d?.status === 'done') { S.oneWeek = w; break; } }
+  }
+  const ws = S.oneWeek, we = addDays(ws, 6);
+  v.innerHTML = '<p class="loading">Pulling last week together…</p>';
+
+  // The week's numbers: the last daily report inside the week (its WTD is the whole week), and the
+  // RSA report at the end of the week minus the one before it.
+  const dd = (S.meta.dailyDates || []).filter(d => d > ws && d <= we).sort().reverse()[0] || null;
+  const daily = dd ? (dd === S.meta.latestDaily ? S.daily : await S.be.daily(dd).catch(() => null)) : null;
+  const per = daily?.periods?.includes('wtd') ? 'wtd' : 'mtd';
+  const rEnd = (S.meta.rsaDates || []).filter(d => d >= ws && d <= we).sort().reverse()[0];
+  const rBase = (S.meta.rsaDates || []).filter(d => d < ws).sort().reverse()[0];
+  const [rsaEnd, rsaBase, plan, prev, saved, thisPlan] = await Promise.all([
+    rEnd ? S.be.rsaAt(rEnd).catch(() => null) : null, rBase ? S.be.rsaAt(rBase).catch(() => null) : null,
+    S.be.plan(email, ws).catch(() => null), S.be.oneOnOne(oneId(email, addDays(ws, -7))).catch(() => null),
+    S.be.oneOnOne(oneId(email, ws)).catch(() => null), S.be.plan(email, addDays(ws, 7)).catch(() => null)
+  ]);
+  const wkRsa = consultantWeeks(rsaEnd, rsaBase);
+  const sameMonth = rsaBase?.to && rsaEnd?.to && rsaBase.to.slice(0, 7) === rsaEnd.to.slice(0, 7);
+  const stores = (who.stores || []).filter(s => daily?.stores?.[s]);
+  const allStores = who.stores || [];
+  const first = firstOf(who.name) || 'them';
+  const vp = S.users.find(u => u.email === saved?.heldBy) || S.user;
+  const mk = rollup(stores, daily, per);
+  const mtd = rollup(stores, daily, 'mtd');
+  const mine = new Set(allStores);
+
+  // Stores: ranked on sales to budget for the week.
+  const storeRows = stores.map(s => {
+    const p = daily.stores[s][per];
+    const f = pickStoreFocus({ k: p.k, budget: p.budget }, STORE_GOALS, 1)[0];
+    return { s, p, f, bud: p.vsBud?.netSales, spg: p.vsLy?.spg, cr: p.vsBud?.closeRate, need: S.scores[s]?.score };
+  }).sort((a, b) => (b.bud ?? -999) - (a.bud ?? -999));
+  const storeWins = storeRows.filter(r => r.bud >= 0 || r.spg >= 5).slice(0, 4);
+  const storeMiss = storeRows.filter(r => r.bud != null && r.bud < -5).reverse().slice(0, 4);
+
+  // People: who performed and who didn't, on the week.
+  const seenC = new Set();
+  const ppl = (rsaEnd?.people || []).filter(p => mine.has(p.store) && !seenC.has(p.cid) && seenC.add(p.cid)).map(p => ({ ...p, wk: wkRsa[p.cid] || {} }));
+  const minFor = s => isOutlet(s) ? DEFAULT_GOALS.outletMinSph : DEFAULT_GOALS.minSph;
+  const worked = ppl.filter(p => p.wk.hours >= 12 && p.wk.sph != null);
+  const topPeople = [...worked].sort((a, b) => b.wk.sph - a.wk.sph).slice(0, 5);
+  const topSet = new Set(topPeople.map(p => p.cid));
+  const lowPeople = [...worked].filter(p => !topSet.has(p.cid) && (p.wk.sph < minFor(p.store) || (p.wk.priorSph && p.wk.sph < p.wk.priorSph * 0.75)))
+    .sort((a, b) => a.wk.sph - b.wk.sph).slice(0, 6);
+  const peopleLine = p => `${titleName(p.name)} (${p.store}): ${moneyK(p.wk.sales)} in ${Math.round(p.wk.hours)} hours, $${Math.round(p.wk.sph)} an hour${p.wk.priorSph ? `, was $${Math.round(p.wk.priorSph)}` : ''}`;
+
+  // How the leader ran the week.
+  const vw = S.visits.filter(x => x.email === email && x.date >= ws && x.date <= we && x.status !== 'draft');
+  const inPerson = vw.filter(x => !x.remote), remote = vw.filter(x => x.remote);
+  const planned = (plan?.days || []).filter(d => d.store).length;
+  const coachedN = vw.reduce((t, x) => t + (x.consultants || []).length, 0);
+  const practiceN = vw.reduce((t, x) => t + (x.consultants || []).filter(c => Object.keys(c.drill?.scored || c.lead?.scored || {}).length).length, 0);
+  const commitN = vw.reduce((t, x) => t + (x.actions || []).filter(hasCommitment).length, 0);
+  const seen = new Set(inPerson.map(x => x.store));
+  const notSeen = allStores.filter(s => !seen.has(s) && !remote.some(r => r.store === s));
+  const dueWk = S.visits.filter(x => x.email === email && x.status !== 'draft').flatMap(x => (x.actions || []).filter(hasCommitment).map(a => ({ x, a })))
+    .filter(({ a }) => a.due && a.due >= ws && a.due <= we).map(o => ({ ...o, au: autoFollow(o.a, S.daily?.stores?.[o.x.store], {}) }));
+  const dueNot = dueWk.filter(o => o.au?.v === 'no').length, dueDone = dueWk.filter(o => o.au?.v === 'yes').length;
+  const missed = Math.max(0, planned - inPerson.length);
+
+  // The lever and where the week goes.
+  const levers = marketLevers(stores, daily, per);
+  const lever = levers[0] || null;
+  const lever2 = levers.find(l => l !== lever && l.pillar !== lever?.pillar) || null;
+  const pace = paceFactor(S.rsa?.to);
+  const leverStores = lever ? lever.hits.slice(0, 2).map(h => h.store) : [];
+  const leverPeople = lever ? leverStores.flatMap(s => draggers(S.rsa?.people || [], s, lever.key, DEFAULT_GOALS, pace, 2).map(d => ({ ...d, store: s }))) : [];
+  const leverHelp = lever ? leverStores.flatMap(s => helpers(S.rsa?.people || [], s, lever.key, DEFAULT_GOALS, pace, 1).map(d => ({ ...d, store: s }))) : [];
+  const drill = lever ? drillFor(lever.key) : null;
+  const focusStores = allStores.filter(s => S.scores[s]).sort((a, b) => (S.scores[b]?.score ?? 0) - (S.scores[a]?.score ?? 0)).slice(0, 3);
+  const onPlan = new Set((thisPlan?.days || []).filter(d => d.store).map(d => d.store));
+  const leverSet = new Set(leverStores);
+  const whereNow = [...new Set([...leverStores, ...focusStores])].slice(0, 3);
+
+  // Wins and opportunities, in plain words.
+  const wins = [
+    ...storeWins.map(r => `${r.s}: ${moneyK(r.p.k.netSales)}, ${pct(r.bud ?? 0)} to budget${r.spg != null ? `, SPG with cancellations ${pct(r.spg)} vs LY` : ''}`),
+    ...topPeople.slice(0, 3).map(peopleLine),
+    ...(planned && missed === 0 ? [`${first} made all ${planned} planned visits`] : []),
+    ...(practiceN >= 3 ? [`${practiceN} stand-up practices run on visits`] : []),
+    ...(dueDone ? [`${dueDone} commitment${dueDone > 1 ? 's' : ''} from visits hit the goal`] : [])
+  ];
+  const opps = [
+    ...storeMiss.map(r => `${r.s}: ${moneyK(r.p.k.netSales)}, ${pct(r.bud)} to budget${r.f && !r.f.stretch ? `. ${r.f.label} at ${fmtMetric(r.f.key, r.f.value)}, goal ${fmtMetric(r.f.key, r.f.goal)}` : ''}`),
+    ...lowPeople.slice(0, 4).map(p => `${peopleLine(p)}${p.wk.sph < minFor(p.store) ? ' (under the minimum)' : ' (slipping)'}`),
+    ...(missed ? [`${missed} planned visit${missed > 1 ? 's' : ''} didn't happen`] : []),
+    ...(notSeen.length ? [`Not seen last week: ${notSeen.join(', ')}`] : []),
+    ...(dueNot ? [`${dueNot} of ${dueWk.length} commitments due last week ${dueNot > 1 ? "aren't" : "isn't"} moving`] : [])
+  ];
+
+  // The coaching conversation, written the way you'd say it. Editable.
+  const coachText = () => {
+    const L = [];
+    const bestS = storeWins[0], bestP = topPeople[0];
+    L.push(`Open with a win: ${bestS ? `${bestS.s} finished ${pct(bestS.bud ?? 0)} to budget` : bestP ? `${titleName(bestP.name)} did $${Math.round(bestP.wk.sph)} an hour` : `${first} got into the stores`}${bestS && bestP ? `, and ${titleName(bestP.name)} did $${Math.round(bestP.wk.sph)} an hour` : ''}. Ask what drove it and how the rest of the market copies it.`);
+    if (mk) L.push(`The number: ${moneyK(mk.k.netSales)} for the week, ${pct(mk.vsBud.netSales ?? 0)} to budget${mk.vsLy.spg != null ? `, SPG with cancellations ${pct(mk.vsLy.spg)} vs LY` : ''}.${mtd?.vsBud?.netSales != null ? ` Month to date ${pct(mtd.vsBud.netSales)}.` : ''}`);
+    if (lever) L.push(`The lever is ${plainOf(lever.key)}. ${lever.hits.length} of ${lever.of} stores are under goal, worst at ${lever.hits.slice(0, 2).map(h => `${h.store} (${fmtMetric(lever.key, h.value)})`).join(' and ')}. Ask: "What are you seeing on the floor that explains ${plainOf(lever.key)} at ${leverStores[0]}?"`);
+    if (storeMiss[0] && storeMiss[0].s !== leverStores[0]) L.push(`${storeMiss[0].s} was ${pct(storeMiss[0].bud)} to budget. Ask: "Walk me through that store last week. Who did you coach and on what?"`);
+    if (planned) L.push(`${first} made ${inPerson.length} of ${planned} planned visits${remote.length ? ` and ${remote.length} remote coaching call${remote.length > 1 ? 's' : ''}` : ''}, coached ${coachedN} ${coachedN === 1 ? 'person' : 'people'} and ran ${practiceN} stand-up practice${practiceN === 1 ? '' : 's'}.${missed ? ` Ask: "What got in the way of the visit${missed > 1 ? 's' : ''} you missed? How do we protect those days?"` : ''}`);
+    if (dueNot) L.push(`${dueNot} commitment${dueNot > 1 ? 's' : ''} from last week's visits ${dueNot > 1 ? "aren't" : "isn't"} moving. Ask: "What's the plan to get ${dueNot > 1 ? 'them' : 'it'} there, and who owns it?"`);
+    if (leverPeople.length) L.push(`People: see ${leverPeople.slice(0, 3).map(d => `${titleName(d.name)} (${d.store})`).join(', ')} first on ${plainOf(lever.key)}.${leverHelp[0] ? ` Use ${titleName(leverHelp[0].name)} as the model.` : ''}`);
+    if (whereNow.length) L.push(`This week: ${whereNow.join(', ')}.${whereNow.filter(s => !onPlan.has(s)).length && thisPlan ? ` ${whereNow.filter(s => !onPlan.has(s)).join(' and ')} ${whereNow.filter(s => !onPlan.has(s)).length > 1 ? "aren't" : "isn't"} on the plan yet. Swap or add a remote call.` : ''}`);
+    L.push(`Close with ${first}'s commitments in their words: from X to Y by a date, and how they'll get there.`);
+    return L.join('\n\n');
+  };
+
+  // Suggested commitments: the lever, the worst store, the people, and visits if they slipped.
+  const due = addDays(ws, 13);
+  const suggest = () => {
+    const out = [];
+    if (lever && mk?.k?.[lever.key] != null) out.push({ key: lever.key, what: `${lever.label} across the market`, from: fmtMetric(lever.key, mk.k[lever.key]), to: fmtMetric(lever.key, mk.budget?.[lever.key] ?? STORE_GOALS[lever.key] ?? lever.hits[0].goal),
+      how: `Run the "${drill.title}" stand-up on every visit this week, starting with ${leverStores.join(' and ')}. ${COACHING[lever.key].doThis} Check it at every huddle call.`, owner: who.name || first, due, suggested: true });
+    const ws1 = storeMiss.find(r => r.f && !r.f.stretch && !leverSet.has(r.s)) || storeMiss.find(r => r.f && !r.f.stretch);
+    if (ws1) out.push({ store: ws1.s, key: ws1.f.key, what: `${ws1.s}: ${ws1.f.label}`, from: fmtMetric(ws1.f.key, ws1.f.value), to: fmtMetric(ws1.f.key, ws1.f.target ?? ws1.f.goal),
+      how: `Full-day visit this week. ${COACHING[ws1.f.key].doThis} Coach the leader to check it every shift.`, owner: who.name || first, due, suggested: true });
+    const d0 = leverPeople[0];
+    if (d0) out.push({ cid: d0.cid, rkey: d0.key, what: `${titleName(d0.name)} (${d0.store}): ${plainOf(d0.key)}`, from: fmtMetric(d0.key, d0.value), to: fmtMetric(d0.key, d0.goal),
+      how: `Coach ${firstOf(d0.name)} in person and practice "${drillFor(lever.key).title}" standing up. Remote check-in midweek through the store leader.`, owner: who.name || first, due, suggested: true });
+    if (missed || (planned && inPerson.length < planned)) out.push({ what: 'Full-day visits', from: `${inPerson.length} of ${planned}`, to: `${planned} of ${planned}`, how: 'Days off set by Sunday. Visit days are protected. If a visit moves, it moves inside the week and the store gets a remote call.', owner: who.name || first, due, suggested: true });
+    return out;
+  };
+
+  const doc = saved || { id: oneId(email, ws), email, name: who.name || email, weekStart: ws, status: 'draft', coaching: '', actions: [{}, {}, {}], support: '', supportBy: '', mmNotes: '', vpNotes: '' };
+  if (!doc.actions) doc.actions = [{}, {}, {}];
+  while (doc.actions.length < 3) doc.actions.push({});
+  if (!saved && canHoldOne()) {
+    doc.coaching = coachText();
+    const sg = suggest(); for (let i = 0; i < 3 && sg[i]; i++) doc.actions[i] = sg[i];
+  }
+  if (holder) { const pv = await S.be.onePrivate(doc.id).catch(() => null); doc.vpNotes = pv?.vpNotes || ''; }
+  S.O = doc;
+  const canEdit = canHoldOne();
+  const dis = canEdit ? '' : 'disabled';
+
+  if (!holder && !saved) {
+    v.innerHTML = `<div class="panel"><p class="eyebrow">1 on 1 · Week of ${esc(weekRange(ws))}</p><h2>Nothing yet for this week</h2><p>Your 1 on 1 shows up here once it's held.</p>
+      <label for="owk" style="max-width:260px">Week<select id="owk">${weeks.map(w => `<option value="${w}" ${w === ws ? 'selected' : ''}>Week of ${esc(weekRange(w))}</option>`).join('')}</select></label></div>`;
+    $('#owk').onchange = e => { S.oneWeek = e.target.value; viewOne(); };
+    return;
+  }
+
+  const sec = (key, num, title, q, body, accent) => `<section class="vsec ${O_OPEN.has(key) ? 'open' : ''}" data-sec="${key}">
+    <button type="button" class="vsec-hd" aria-expanded="${O_OPEN.has(key)}"><span class="vnum ${accent ? 'acc' : ''}">${num}</span><span class="vtl"><b>${title}</b><small>${q}</small></span><span class="chev" aria-hidden="true">›</span></button>
+    <div class="vsec-bd">${body}</div></section>`;
+  const li = arr => arr.length ? `<ul class="blist">${arr.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : '<p class="small muted">Nothing to call out.</p>';
+  const tone = (v, good, bad) => v == null ? '' : v >= good ? 'green' : v <= bad ? 'red' : 'amber';
+  const glance = mk ? `<div class="tiles">
+      ${tileFor('Sales', moneyK(mk.k.netSales), mk.vsBud.netSales != null ? `${pct(mk.vsBud.netSales)} to budget` : '', tone(mk.vsBud.netSales, 0, -5))}
+      ${tileFor('SPG w/ cancellations', mk.k.spg != null ? '$' + Math.round(mk.k.spg) : '--', mk.vsLy.spg != null ? `${pct(mk.vsLy.spg)} vs LY` : '', tone(mk.vsLy.spg, 0, -5))}
+      ${tileFor('Close rate', mk.k.closeRate != null ? mk.k.closeRate.toFixed(1) + '%' : '--', mk.vsBud.closeRate != null ? `${mk.vsBud.closeRate >= 0 ? '+' : ''}${Math.round(mk.vsBud.closeRate)} bps to budget` : '', tone(mk.vsBud.closeRate, 0, -100))}
+      ${tileFor('Finance', mk.k.financePct != null ? mk.k.financePct.toFixed(0) + '%' : '--', `goal ${STORE_GOALS.financePct}%`, tone(mk.k.financePct - STORE_GOALS.financePct, 0, -8))}
+      ${tileFor('Protection attach', mk.k.protectionAttach != null ? mk.k.protectionAttach.toFixed(0) + '%' : '--', `goal ${STORE_GOALS.protectionAttach}%`, tone(mk.k.protectionAttach - STORE_GOALS.protectionAttach, 0, -8))}
+      ${tileFor('Cancels', mk.k.cancelPct != null ? mk.k.cancelPct.toFixed(1) + '%' : '--', 'goal under 4%', mk.k.cancelPct == null ? '' : mk.k.cancelPct <= 4 ? 'green' : mk.k.cancelPct >= 6 ? 'red' : 'amber')}
+    </div>
+    <p class="small">${per === 'wtd' ? `Week to date through ${esc(dayLabel(dd))}` : `Month to date through ${esc(dayLabel(dd))} (the report had no week-to-date columns)`}.${mtd?.vsBud?.netSales != null ? ` Month to date: ${moneyK(mtd.k.netSales)}, ${pct(mtd.vsBud.netSales)} to budget.` : ''}</p>` : `<p>No daily report was uploaded for that week, so there are no store numbers to recap.</p>`;
+  const storeTable = storeRows.length ? `<div class="scroller"><table class="grid"><thead><tr><th>Store</th><th class="num">Sales</th><th class="num">vs budget</th><th class="num">SPG vs LY</th><th class="num">Close vs bud</th><th>Biggest gap</th><th class="num">Need now</th></tr></thead><tbody>
+      ${storeRows.map(r => `<tr><td class="nm">${esc(r.s)}</td><td class="num">${moneyK(r.p.k.netSales)}</td><td class="num ${r.bud >= 0 ? 'up' : r.bud <= -5 ? 'down' : ''}">${r.bud != null ? pct(r.bud) : '--'}</td><td class="num ${r.spg >= 0 ? 'up' : r.spg <= -5 ? 'down' : ''}">${r.spg != null ? pct(r.spg) : '--'}</td><td class="num">${r.cr != null ? (r.cr >= 0 ? '+' : '') + Math.round(r.cr) + ' bps' : '--'}</td><td>${r.f && !r.f.stretch ? `${esc(r.f.label)} ${esc(fmtMetric(r.f.key, r.f.value))} vs ${esc(fmtMetric(r.f.key, r.f.goal))}` : '<span class="muted">At goal</span>'}</td><td class="num">${needChip(r.need)}</td></tr>`).join('')}
+    </tbody></table></div>` : '';
+  const pTable = (arr, empty) => arr.length ? `<ul class="blist">${arr.map(p => `<li><b>${esc(titleName(p.name))}</b> (${esc(p.store)}): $${Math.round(p.wk.sph)} an hour on ${Math.round(p.wk.hours)} hours, ${moneyK(p.wk.sales)}${p.wk.priorSph ? ` <span class="small muted">(was $${Math.round(p.wk.priorSph)})</span>` : ''}</li>`).join('')}</ul>` : `<p class="small muted">${empty}</p>`;
+  const prevActs = (prev?.actions || []).filter(hasCommitment);
+
+  v.innerHTML = `
+  <div class="spread">
+    <div><p class="eyebrow">1 on 1 · Week of ${esc(weekRange(ws))}</p><h2 class="big" style="margin:0">${esc(who.name || who.email)}</h2>
+      <p class="small" style="margin:4px 0 0">${esc(marketsOf(email).map(m => m.name).join(', ') || allStores.length + ' stores')} · ${doc.status === 'done' ? `<span class="pill done">Held ${esc(shortDate(doc.heldAt?.slice(0, 10) || today()))}${doc.heldByName ? ' with ' + esc(doc.heldByName) : ''}</span>` : '<span class="pill check">Not held yet</span>'}</p></div>
+    <div class="row">
+      ${holder ? `<label for="omm" style="margin:0">Market Leader<select id="omm">${mms.map(l => `<option value="${esc(l.email)}" ${l.email === email ? 'selected' : ''}>${esc(whoLabel(l))}</option>`).join('')}</select></label>` : ''}
+      <label for="owk" style="margin:0">Week<select id="owk">${weeks.map(w => `<option value="${w}" ${w === ws ? 'selected' : ''}>Week of ${esc(weekRange(w))}</option>`).join('')}</select></label>
+    </div>
+  </div>
+  ${sec('glance', '1', 'Last week at a glance', 'The market, Sunday to Saturday.', `${glance}${storeTable}`)}
+  ${sec('wins', '2', 'Wins to call out', 'Stores, people, and how the week was run. Start here.', `${li(wins.filter(w => !topPeople.slice(0, 3).some(p => w === peopleLine(p))))}
+    ${pTable(topPeople, 'No consultant numbers for that week yet.').replace('<ul class="blist">', '<p class="eyebrow">Who performed (sales per hour for the week, 12+ hours)</p><ul class="blist">')}`)}
+  ${sec('opps', '3', 'Opportunities', "Who didn't perform, and where the week slipped.", `${li(opps.filter(o => !lowPeople.some(p => o.startsWith(peopleLine(p)))))}
+    ${pTable(lowPeople, 'Nobody under the minimum or slipping last week.').replace('<ul class="blist">', `<p class="eyebrow">Who didn't (under the minimum or down 25%+ from their month)</p><ul class="blist">`)}
+    ${rsaEnd && !sameMonth ? `<p class="small muted">The month turned over during this week, so consultant numbers are month to date through ${esc(shortDate(rsaEnd.to))}.</p>` : ''}`)}
+  ${sec('ran', '4', `How ${esc(first)} ran the week`, 'Visits, coaching and follow-through.', `
+    <div class="tiles">
+      ${tileFor('Visits', `${inPerson.length}${planned ? ' of ' + planned : ''}`, planned ? 'full-day, in person' : 'no plan saved that week', planned ? (missed ? 'red' : 'green') : '')}
+      ${tileFor('Remote coaching', String(remote.length), 'calls logged', remote.length ? 'green' : '')}
+      ${tileFor('People coached', String(coachedN), `${practiceN} stand-up practices`, coachedN >= 5 ? 'green' : coachedN ? 'amber' : 'red')}
+      ${tileFor('Commitments', String(commitN), 'set on visits', '')}
+    </div>
+    ${notSeen.length ? `<div class="warnbox"><b>No visit or call:</b> ${notSeen.map(esc).join(', ')}</div>` : ''}
+    <p class="eyebrow" style="margin-top:10px">Commitments due last week</p>
+    ${dueWk.length ? `<ul class="blist">${dueWk.map(({ x, a, au }) => `<li><b>${esc(x.store)}:</b> ${esc(commitmentText(a))} ${au?.v ? `<span class="rv ${au.v === 'yes' ? 'done' : au.v === 'partial' ? 'part' : 'not'}">${au.v === 'yes' ? 'Done' : au.v === 'partial' ? 'Moving' : 'Not yet'}</span>` : ''}</li>`).join('')}</ul>` : '<p class="small muted">None were due that week.</p>'}`)}
+  ${prevActs.length ? sec('prev', '5', "Last 1 on 1's commitments", 'Where they stand today. Review them first.', `<ul class="blist">${prevActs.map(a => { const au = oneFollow(a, stores, email, prev.weekStart); return `<li>${esc(commitmentText(a))} ${au?.v ? `<span class="rv ${au.v === 'yes' ? 'done' : au.v === 'partial' ? 'part' : 'not'}">${au.v === 'yes' ? 'Done' : au.v === 'partial' ? 'Moving' : 'Not yet'}</span> <span class="small">${esc(au.text)}</span>` : '<span class="small muted">Talk it through.</span>'}</li>`; }).join('')}</ul>`) : ''}
+  ${sec('lever', prevActs.length ? '6' : '5', 'The lever to pull', 'The one number that moves this market the most right now.', lever ? `
+    <div class="fcard" style="border-left:5px solid #F68C2C">
+      <p class="eyebrow">${esc(lever.pillar)}</p>
+      <h3 style="margin:0 0 4px">${esc(lever.label)}</h3>
+      <p style="margin:0 0 8px">${lever.hits.length} of ${lever.of} stores under goal. Market at ${esc(fmtMetric(lever.key, mk.k[lever.key]))}.</p>
+      <p class="small" style="margin:0 0 4px"><b>Where:</b> ${lever.hits.slice(0, 4).map(h => `${esc(h.store)} ${esc(fmtMetric(lever.key, h.value))} vs ${esc(fmtMetric(lever.key, h.goal))}`).join(' · ')}</p>
+      ${leverPeople.length ? `<p class="small" style="margin:0 0 4px"><b>Who's pulling it down:</b> ${leverPeople.map(d => `${esc(titleName(d.name))} (${esc(d.store)}, ${esc(fmtMetric(d.key, d.value))})`).join(', ')}</p>` : ''}
+      ${leverHelp.length ? `<p class="small" style="margin:0 0 4px"><b>Who's carrying it:</b> ${leverHelp.map(d => `${esc(titleName(d.name))} (${esc(d.store)}, ${esc(fmtMetric(d.key, d.value))})`).join(', ')}. Have them show the team.</p>` : ''}
+      <p class="small" style="margin:6px 0 0"><b>How:</b> ${esc(COACHING[lever.key].doThis)}</p>
+      <p class="small" style="margin:4px 0 0"><b>Practice it standing up:</b> ${esc(drill.title)}. ${esc(drill.guest)}</p>
+    </div>
+    ${lever2 ? `<p class="small" style="margin-top:8px"><b>Next lever:</b> ${esc(lever2.label)}, ${lever2.hits.length} of ${lever2.of} stores under goal (${lever2.hits.slice(0, 2).map(h => esc(h.store)).join(', ')}).</p>` : ''}` : '<p>Every store number is at goal for the week. Pick a stretch goal together.</p>', true)}
+  ${sec('focus', prevActs.length ? '7' : '6', 'Where the focus goes this week', 'Stores with the most need right now, and whether they are on the plan.', `
+    ${focusStores.length ? `<ul class="blist">${[...new Set([...leverStores, ...focusStores])].map(s => `<li>${needChip(S.scores[s]?.score)} <b>${esc(s)}</b>: ${esc((S.scores[s]?.parts || []).slice(0, 2).map(p => p.text).join('. '))}${thisPlan ? (onPlan.has(s) ? ' <span class="pill done">On the plan</span>' : ' <span class="pill check">Not on the plan</span>') : ''}${leverSet.has(s) ? ' <span class="pill">Lever store</span>' : ''}</li>`).join('')}</ul>` : '<p class="small muted">No scores yet.</p>'}
+    ${thisPlan ? '' : `<p class="small muted">${esc(first)} has no plan saved for this week yet.</p>`}`)}
+  ${!holder ? '' : sec('coach', prevActs.length ? '8' : '7', `Coaching for ${esc(first)}`, 'Written from the numbers. Change anything.', `
+    ${fieldBox('ocoach', 'Talk track', doc.coaching, 12, '', 'coaching', dis)}
+    ${canEdit ? `<button type="button" class="link" id="oregen">Rewrite from the numbers</button>` : ''}`, true)}
+  ${sec('acts', '✓', 'Commitments', `Up to 3, each from X to Y by a date, and how. ${esc(first)} owns them.`, `
+    ${[0, 1, 2].map(i => { const a = doc.actions[i] || {}; return `<div class="ap"><div class="row" style="justify-content:space-between"><p class="eyebrow" style="margin:0">Commitment ${i + 1}</p>${a.suggested ? '<span class="pill check">Suggested</span>' : ''}</div>
+      ${fieldInput(`ow${i}`, 'What', a.what, `actions.${i}.what`, dis, 'placeholder="The number or behavior" style="width:100%"')}
+      <div class="two">
+        <div>${fieldInput(`of${i}`, 'From (now)', a.from, `actions.${i}.from`, dis, 'placeholder="Where it is now" style="width:100%"')}</div>
+        <div>${fieldInput(`ot${i}`, 'To', a.to, `actions.${i}.to`, dis, 'placeholder="Where it will be" style="width:100%"')}</div>
+      </div>
+      ${fieldBox(`oh${i}`, 'How (the most important part)', a.how, 3, 'What they will do, where, with who, and how often. Specific enough to check.', `actions.${i}.how`, dis)}
+      <div class="row"><div style="flex:1;min-width:180px">${fieldInput(`oo${i}`, 'Owner', a.owner, `actions.${i}.owner`, dis, 'style="width:100%"')}</div>
+      <label for="od${i}" style="margin:0">By<input id="od${i}" type="date" data-field="actions.${i}.due" value="${esc(a.due || '')}" ${dis}></label></div>
+      <p class="small preview" id="opv${i}" ${hasCommitment(a) ? '' : 'hidden'}>${hasCommitment(a) ? esc(commitmentText(a)) : ''}</p></div>`; }).join('')}
+    ${canEdit ? `<button type="button" class="btn" id="osugg">Suggest commitments</button> <span class="small muted">Fills any empty ones from the lever, the stores and the people.</span>` : ''}`, true)}
+  ${sec('notes', '✓', 'Notes', `${esc(first)}'s words, and what they need from you.`, `
+    ${fieldBox('omm_notes', `What ${first} said`, doc.mmNotes, 3, 'Their read on the week and what they will do differently.', 'mmNotes', dis)}
+    ${fieldBox('osupport', `Support ${first} needs from ${esc(firstOf(vp.name) || 'you')}`, doc.support, 2, 'People, schedule, product, training, a call with someone. Be specific.', 'support', dis)}
+    <label for="osby" style="max-width:220px">Support by<input id="osby" type="date" data-field="supportBy" value="${esc(doc.supportBy || '')}" ${dis}></label>
+    ${holder ? fieldBox('ovp', 'Your notes (private: admins and the exec team only)', doc.vpNotes, 3, 'Anything else from the conversation.', 'vpNotes', dis) : ''}`, true)}
+  <div class="vbar"><span class="small" id="osaved">${doc.status === 'done' ? 'Held. Changes still save.' : canEdit ? 'Draft saves as you go' : ''}</span>
+    <button class="btn" id="ocopy" type="button">Copy recap for ${esc(first)}</button>
+    <button class="btn" id="oprint" type="button">Print / PDF</button>
+    ${canEdit ? `<button class="btn primary" id="odone" type="button">${doc.status === 'done' ? 'Update 1 on 1' : 'Mark 1 on 1 held'}</button>` : ''}</div>`;
+
+  // ---- wiring
+  const omm = $('#omm'); if (omm) omm.onchange = () => { S.oneEmail = omm.value; viewOne(); };
+  $('#owk').onchange = e => { S.oneWeek = e.target.value; viewOne(); };
+  v.querySelectorAll('.vsec-hd').forEach(h => h.onclick = () => {
+    const el = h.parentElement, k = el.dataset.sec; el.classList.toggle('open'); h.setAttribute('aria-expanded', el.classList.contains('open'));
+    if (el.classList.contains('open')) O_OPEN.add(k); else O_OPEN.delete(k);
+  });
+  const recap = () => {
+    const acts = doc.actions.filter(hasCommitment);
+    return [`${first}, here's our 1 on 1 for the week of ${weekRange(ws)}.`, '',
+      'Wins', ...wins.slice(0, 5).map(w => `- ${w}`), '',
+      'Opportunities', ...opps.slice(0, 5).map(w => `- ${w}`), '',
+      ...(lever ? [`The lever: ${lever.label}. Focus on ${leverStores.join(' and ')}${leverPeople.length ? `. See ${leverPeople.slice(0, 3).map(d => titleName(d.name)).join(', ')} first` : ''}.`, ''] : []),
+      ...(acts.length ? ['Your commitments', ...acts.map((a, i) => `${i + 1}. ${commitmentText(a)}`), ''] : []),
+      ...(String(doc.support || '').trim() ? [`My part: ${doc.support.trim()}${doc.supportBy ? ` by ${shortDate(doc.supportBy)}` : ''}`, ''] : []),
+      "Let's go.", firstOf(vp.name) || ''].join('\n');
+  };
+  $('#ocopy').onclick = async () => { try { await navigator.clipboard.writeText(recap()); toast('Recap copied. Paste it into a text or Teams.'); } catch (e) { toast('Could not copy. Select the text and copy it.', true); } };
+  $('#oprint').onclick = () => { ['glance', 'wins', 'opps', 'ran', 'prev', 'lever', 'focus', 'coach', 'acts', 'notes'].forEach(k => O_OPEN.add(k)); v.querySelectorAll('.vsec').forEach(s => s.classList.add('open')); setTimeout(() => window.print(), 200); };
+  if (!canEdit) return;
+  wireMics(v);
+  let tmr = null;
+  const save = async (msg) => {
+    clearTimeout(tmr);
+    try { const { vpNotes, ...pub } = doc; await Promise.all([S.be.saveOneOnOne({ ...pub, updatedAt: new Date().toISOString() }), S.be.saveOnePrivate({ id: doc.id, email: doc.email, vpNotes: vpNotes || '' })]); $('#osaved').textContent = msg || (doc.status === 'done' ? 'Held. Changes saved.' : 'Draft saved'); }
+    catch (e) { $('#osaved').textContent = 'Could not save. Check your connection.'; }
+  };
+  const later = () => { clearTimeout(tmr); $('#osaved').textContent = 'Saving…'; tmr = setTimeout(save, 900); };
+  v.querySelectorAll('[data-field]').forEach(el => el.addEventListener('input', () => {
+    setPath(doc, el.dataset.field, el.value);
+    const m = /^actions\.(\d)\./.exec(el.dataset.field);
+    if (m) { const a = doc.actions[+m[1]]; delete a.suggested; const pv = $('#opv' + m[1]); if (pv) { pv.hidden = !hasCommitment(a); pv.textContent = hasCommitment(a) ? commitmentText(a) : ''; } }
+    later();
+  }));
+  $('#oregen').onclick = () => { doc.coaching = coachText(); $('#ocoach').value = doc.coaching; later(); };
+  $('#osugg').onclick = () => {
+    const have = new Set(doc.actions.filter(hasCommitment).map(a => String(a.what).toLowerCase()));
+    let n = 0; const sg = suggest().filter(s => !have.has(s.what.toLowerCase()));
+    for (let i = 0; i < 3 && sg.length; i++) if (!hasCommitment(doc.actions[i])) { doc.actions[i] = sg.shift(); n++; }
+    if (!n) return toast('All 3 are filled. Clear one to get a suggestion.');
+    save(); viewOne();
+  };
+  $('#odone').onclick = async () => {
+    const acts = doc.actions.filter(hasCommitment);
+    if (!acts.length) return toast('Add at least one commitment before you close it out.', true);
+    const bad = acts.findIndex(a => !String(a.from || '').trim() || !String(a.to || '').trim() || !String(a.how || '').trim() || !a.due);
+    if (bad >= 0) { O_OPEN.add('acts'); toast(`Commitment ${doc.actions.indexOf(acts[bad]) + 1} needs From, To, How and a By date.`, true); return; }
+    doc.status = 'done'; doc.heldAt = doc.heldAt || new Date().toISOString(); doc.heldBy = S.user.email; doc.heldByName = S.user.name || S.user.email;
+    await save('Held. Saved.'); toast(`1 on 1 with ${first} saved. Copy the recap to send it.`); viewOne();
+  };
+  if (!saved) save('Draft saved');
+}
+// The Market Leader's latest held 1 on 1, for their daily brief.
+async function latestOne(email) {
+  const ws = addDays(weekStartOf(today()), -7);
+  for (const w of [ws, addDays(ws, -7)]) { const d = await S.be.oneOnOne(oneId(email, w)).catch(() => null); if (d?.status === 'done') return d; }
+  return null;
 }
 
 // ---------------------------------------------------------------- leaders (Frank and exec team)
@@ -1916,6 +2329,12 @@ function viewGuide() {
       <li>Visits are full days in one store. More stores than visit days? The lowest-need stores are marked Call.</li>
       <li>While you're on a full-day visit, coach your other stores remotely from <b>Remote coaching</b> on My week: phone, video or Teams. Log it the same way (numbers, focus items, consultants, from-to commitments), minus the 6 Elements walk.</li>
       <li>You can change any day by hand.</li>
+    </ul>
+    <h3 style="margin-top:18px">Monday: your 1 on 1</h3>
+    <ul>
+      <li>Each week your VP holds a 1 on 1 with you on the week that just closed, Sunday to Saturday. It covers wins and opportunities for your stores and people, who performed and who didn't, how your visits went, and the one lever your market needs to pull.</li>
+      <li>You leave with up to 3 commitments, each from X to Y by a date, with how you'll get there. They show on your <b>Daily brief</b> all week with where each one stands, and on <b>My 1 on 1</b>.</li>
+      <li>Next week's 1 on 1 starts by reviewing them.</li>
     </ul>
     <h3 style="margin-top:18px">During the week: pivot when the numbers move</h3>
     <ul>
