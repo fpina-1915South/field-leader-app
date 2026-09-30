@@ -12,6 +12,10 @@ Firebase is already set up: project `field-leader-1915`, Email/Password sign-in 
 4. **Set up markets and leaders.** In Setup, add each Market Leader and director under Logins with their email, role, stores and default days off (any 2 days; Wed and Thu if you don't pick). Then create your Markets: name each one, pick its stores, and name its Market Leader and director. Their store lists follow the market, and a store belongs to one market. Each leader creates their own password with the same email and picks their days off for any week on My week; the schedule builds as soon as they save.
 5. **Upload.** In Upload, drop in the sales team roster and the store leader list (email, name, role, stores) once, and again whenever they change. Then every morning, drop in the daily report and the RSA report together. The RSA report needs to go in daily, including Saturday: the app compares each day to the day before (the daily brief) and to last Saturday's copy (this week).
 
+## Weekly 1 on 1s
+
+Admins hold a weekly 1 on 1 with each Market Leader on the **1 on 1s** tab, covering the week that just closed (Sunday to Saturday). It builds itself from that week's last daily report and RSA report: wins and opportunities, who performed and who didn't, how the leader ran their visits, the lever the market needs to pull, and where to focus this week. It ends with up to 3 commitments (from X to Y by a date, and how). The Market Leader sees them on My 1 on 1 and on their daily brief, and the next 1 on 1 opens by reviewing them. Your private notes are stored separately and only admins and the exec team can read them.
+
 ## Files
 
 - `index.html`, `app.js`: the app
