@@ -332,6 +332,23 @@ async function boot() {
     renderShell();
   });
 }
+// Field team Frank named. They're added as logins the first time an admin opens the app, so they show
+// in the Market Leader and Director dropdowns right away. Stores come from the markets they're put on.
+const FIELD_TEAM = [
+  { email: 'ocruz@1915south.com', name: 'Orlando Cruz', role: 'director' },
+  { email: 'jmccord@1915south.com', name: 'Jourdain McCord', role: 'leader' },
+  { email: 'msevert@1915south.com', name: 'Meagan Severt', role: 'leader' },
+  { email: 'ccarritz@1915south.com', name: 'Cole Carritz', role: 'leader' },
+  { email: 'jkeene@1915south.com', name: 'Jonathan Keene', role: 'leader' }
+];
+async function seedFieldTeam() {
+  if (S.user?.role !== 'admin') return;
+  for (const t of FIELD_TEAM) {
+    if (S.users.some(u => u.email === t.email)) continue;
+    const u = { ...t, stores: [], off: DEFAULT_OFF };
+    try { await S.be.saveUser(u); S.users.push(u); } catch (e) { console.warn('Could not add', t.email, e); }
+  }
+}
 async function loadShared() {
   $('#app').innerHTML = '<p class="loading">Loading the latest numbers…</p>';
   S.meta = await S.be.meta();
@@ -339,6 +356,7 @@ async function loadShared() {
     S.meta.latestDaily ? S.be.daily(S.meta.latestDaily) : null, S.be.rsa(), S.be.users().catch(() => [S.user]), S.be.visits(), S.be.roster(), S.be.markets().catch(() => []), S.be.storeLeaders().catch(() => [])
   ]);
   Object.assign(S, { daily, rsa, users, visits, roster, markets, storeLeaders });
+  await seedFieldTeam();
   // Consultant week: compare today's RSA upload with the one through last Saturday.
   const sat = addDays(weekStartOf(today()), -1);
   const baseDate = (S.meta.rsaDates || []).filter(d => d <= sat && (!rsa?.to || d < rsa.to)).sort().reverse()[0];
@@ -1806,6 +1824,7 @@ async function saveMarketList(list, msg) {
 }
 function viewSetup() {
   const v = $('#view');
+  if (FIELD_TEAM.some(t => !S.users.some(u => u.email === t.email))) { seedFieldTeam().then(() => { if (S.tab === 'setup') viewSetup(); }); }
   const rank = r => ({ leader: 0, director: 1, admin: 2, exec: 3 }[r] ?? 4);
   const users = S.users.slice().sort((a, b) => rank(a.role) - rank(b.role) || (a.name || a.email).localeCompare(b.name || b.email));
   const edit = S.editUser || null;
