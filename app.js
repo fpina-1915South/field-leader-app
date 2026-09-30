@@ -525,12 +525,12 @@ async function viewWeek() {
   v.innerHTML = '<p class="loading">Loading the plan…</p>';
   let [plan, to] = await Promise.all([S.be.plan(email, week), S.be.timeOff(email, week)]);
   const canEdit = email === S.user.email || isAdmin();
-  if (!plan && week === thisWeek && S.daily && canEdit) {
+  if (!plan && week === thisWeek && canEdit) {
     plan = newPlan(who, week, to?.off);
     await S.be.savePlan(plan);
   }
   // A plan built early (when days off were picked) refreshes with the newest numbers once its week starts.
-  if (plan?.preview && week === thisWeek && canEdit && S.daily && S.meta.latestDaily > plan.basisDate && !plan.days.some(d => d.status === 'done')) {
+  if (plan && week === thisWeek && canEdit && S.daily && (plan.preview ? S.meta.latestDaily > plan.basisDate : !plan.basisDate) && !plan.days.some(d => d.status === 'done')) {
     plan = { ...newPlan(who, week, plan.off), pivots: plan.pivots || [], dismissed: plan.dismissed || [] };
     await S.be.savePlan(plan);
   }
@@ -553,8 +553,8 @@ async function viewWeek() {
     </div>
     <div class="row">${picker}</div>
   </div>
-  ${!S.daily ? `<div class="panel"><h2>Waiting on the first daily report</h2><p>The plan builds from the daily report. Once Frank uploads it, open this page and your week is ready.</p></div>` : ''}
-  ${!plan && S.daily && week > thisWeek ? `<div class="panel"><h2>Pick your days off to build next week</h2><p>Tap your 2 days below and save. Your schedule builds right away from the latest numbers and refreshes on Sunday with Saturday's.</p></div>` : ''}
+  ${!S.daily ? `<div class="warnbox"><b>No numbers yet.</b> Every store is on the plan in order for now. Once the first daily report is uploaded, the week re-ranks so the stores that need you most come first.</div>` : ''}
+  ${!plan && week > thisWeek ? `<div class="panel"><h2>Pick your days off to build next week</h2><p>Tap your 2 days below and save. Your schedule builds right away from the latest numbers and refreshes on Sunday with Saturday's.</p></div>` : ''}
   ${plan?.preview && week > thisWeek ? `<div class="warnbox">Preview built from numbers through ${esc(longDate(plan.basisDate))}. It refreshes Sunday with Saturday's numbers, keeping your days off.</div>` : ''}
   ${!plan && S.daily && week < thisWeek ? `<div class="panel"><h2>No plan for this week</h2><p>Nothing was planned or logged.</p></div>` : ''}
   ${sugg ? pivotCard(sugg) : ''}
@@ -609,6 +609,7 @@ async function viewWeek() {
 // Leaders pick any 2 days off for each week. Saving builds (or rebuilds) that week's plan right away.
 function offPanel(week, off, to, who, canEdit, plan, isCurrent) {
   const days = [0, 1, 2, 3, 4, 5, 6].map(i => addDays(week, i));
+  const storeOn = offStores(week, off, who, plan);
   const set = to ? `Set ${to.by && to.by !== who.email ? 'by ' + esc(to.by) + ' ' : ''}on ${esc(shortDate(to.at.slice(0, 10)))}` : `Not set yet. Using ${esc(who.email === S.user.email ? 'your' : 'the')} default: ${off.map(x => DAY_NAMES[x]).join(' and ')}.`;
   return `<section class="panel" aria-labelledby="offh">
     <div class="spread" style="margin:0 0 10px"><div><h3 id="offh" style="margin:0">Days off, week of ${esc(dayLabel(week))}</h3>
@@ -617,22 +618,35 @@ function offPanel(week, off, to, who, canEdit, plan, isCurrent) {
     <div class="offstrip">${days.map(d => {
       const w = dow(d), isOff = off.includes(w), suggested = [2, 3, 4].includes(w);
       const doneHere = plan?.days.some(x => x.date === d && x.status === 'done');
-      return `<button type="button" class="offday ${isOff ? 'isoff' : ''} ${suggested ? 'sugg' : ''}" data-offday="${w}" aria-pressed="${isOff}" ${canEdit && !(isCurrent && d < today()) && !doneHere ? '' : 'disabled'}><b>${DAY_NAMES[w]}</b><span>${esc(shortDate(d))}</span><em>${isOff ? 'Off' : 'Working'}</em></button>`;
+      return `<button type="button" class="offday ${isOff ? 'isoff' : ''} ${suggested ? 'sugg' : ''}" data-offday="${w}" aria-pressed="${isOff}" ${canEdit && !(isCurrent && d < today()) && !doneHere ? '' : 'disabled'}><b>${DAY_NAMES[w]}</b><span>${esc(shortDate(d))}</span><em>${isOff ? 'Off' : esc(storeOn[d] || 'Working')}</em></button>`;
     }).join('')}</div>
     ${canEdit ? `<div class="row" style="margin-top:12px"><button class="btn primary" id="offsave">${plan ? 'Save and rebuild my schedule' : 'Save and build my schedule'}</button>
       <span class="small">${isCurrent && plan ? 'Visits already logged stay on their days.' : !isCurrent ? 'It refreshes with the newest numbers on Sunday.' : ''}</span></div>` : ''}
   </section>`;
 }
+// Which store each working day goes to: the saved plan's days, or what the plan would be with these days off.
+function offStores(week, off, who, plan) {
+  const out = {};
+  const same = plan && [...(plan.off || [])].sort().join() === [...off].sort().join();
+  const src = same ? plan.days : validOff(off) ? buildPlan({ weekStart: week, stores: who.stores || [], scores: S.scores, off, role: who.role }).days : [];
+  src.forEach(d => { if (d.store) out[d.date] = d.store; });
+  return out;
+}
 function wireOffPanel(week, who, plan, isCurrent) {
   const btn = $('#offsave'); if (!btn) return;
-  $('#view').querySelectorAll('[data-offday]').forEach(b => b.onclick = () => {
+  const all = [...$('#view').querySelectorAll('[data-offday]')];
+  const relabel = () => {
+    const picked = all.filter(b => b.classList.contains('isoff')).map(b => +b.dataset.offday);
+    const map = validOff(picked) ? offStores(week, picked, who, plan) : {};
+    all.forEach(b => { const d = addDays(week, +b.dataset.offday); b.querySelector('em').textContent = b.classList.contains('isoff') ? 'Off' : (map[d] || 'Working'); });
+  };
+  all.forEach(b => b.onclick = () => {
     const on = !b.classList.contains('isoff');
-    b.classList.toggle('isoff', on); b.setAttribute('aria-pressed', on); b.querySelector('em').textContent = on ? 'Off' : 'Working';
+    b.classList.toggle('isoff', on); b.setAttribute('aria-pressed', on); relabel();
   });
   btn.onclick = async () => {
     const picked = [...$('#view').querySelectorAll('.offday.isoff')].map(b => +b.dataset.offday).sort();
     if (!validOff(picked)) return toast('Pick exactly 2 days off.', true);
-    if (!S.daily) return toast('Days off need the first daily report before a schedule can build.', true);
     try {
       await S.be.saveTimeOff({ email: who.email, weekStart: week, off: picked, at: new Date().toISOString(), by: S.user.email });
       let fresh;
