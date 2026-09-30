@@ -1,0 +1,1928 @@
+import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js';
+import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js';
+import {
+  STORES, DISTRICTS, canonicalStore, isKnownStore, parseRsa, rangeFromFileName, parseTeamRoster, resolveReportNames,
+  paceFactor, DEFAULT_GOALS, cidOf, status, fmt, goalsFor
+} from './base.js';
+import {
+  iso, fromIso, addDays, daysApart, weekStartOf, DAY_NAMES, DAY_LONG, dow, DEFAULT_OFF, validOff, safeOff, VISIT_DAYS, STORE_GOALS,
+  parseDaily, needScore, band, pct, environment, buildPlan, pivotSuggestion, ELEMENTS, SEGMENTS, AORS, PRACTICE, VISIT_TYPES, kindToType, visitScore, visitSummary, consultantCoaching, drillFor, draggers, helpers, STORE_TO_RSA, hasCommitment, commitmentText, blackoutFor, offChoicesFor, storeFocus, rsaPicks, consultantWeeks, teamSignals,
+  STORE_METRICS, slug
+} from './ml.js';
+
+const DEMO = !firebaseConfig.apiKey || firebaseConfig.apiKey.startsWith('PASTE');
+const FB = 'https://www.gstatic.com/firebasejs/10.12.2/';
+const ROLES = [['admin', 'Admin'], ['exec', 'Executive (view all)'], ['director', 'Director'], ['leader', 'Market Leader']];
+const FIELD = ['leader', 'director'];
+const roleLabel = r => (ROLES.find(x => x[0] === r) || [r, r])[1];
+const S = { tab: null };
+
+// ---------------------------------------------------------------- helpers
+const $ = sel => document.querySelector(sel);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const today = () => iso(new Date());
+const shortDate = s => { const d = fromIso(s); return `${d.getMonth() + 1}/${d.getDate()}`; };
+const dayLabel = s => `${DAY_NAMES[dow(s)]} ${shortDate(s)}`;
+const longDate = s => fromIso(s).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
+const titleName = n => /^[A-Z\s.'-]+$/.test(n) ? n.toLowerCase().replace(/(^|[\s'-])([a-z])/g, (a, b, c) => b + c.toUpperCase()) : n;
+function toast(msg, bad) {
+  const t = $('#toast'); t.textContent = msg; t.className = 'toast show' + (bad ? ' bad' : '');
+  clearTimeout(toast._t); toast._t = setTimeout(() => t.className = 'toast', 3800);
+}
+function parseCsvText(text) {
+  const rows = []; let row = [], cur = '', q = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (q) { if (ch === '"') { if (text[i + 1] === '"') { cur += '"'; i++; } else q = false; } else cur += ch; }
+    else if (ch === '"') q = true;
+    else if (ch === ',') { row.push(cur); cur = ''; }
+    else if (ch === '\n' || ch === '\r') { if (ch === '\r' && text[i + 1] === '\n') i++; row.push(cur); rows.push(row); row = []; cur = ''; }
+    else cur += ch;
+  }
+  if (cur !== '' || row.length) { row.push(cur); rows.push(row); }
+  const clean = rows.filter(r => r.some(c => c.trim() !== ''));
+  if (!clean.length) return [];
+  const head = clean[0].map(h => h.trim());
+  return clean.slice(1).map(r => Object.fromEntries(head.map((h, i) => [h, r[i] ?? ''])));
+}
+async function readSpreadsheet(file) {
+  if (/\.csv$/i.test(file.name)) return parseCsvText(await file.text());
+  const XLSX = await import('https://cdn.jsdelivr.net/npm/xlsx@0.18.5/+esm');
+  const wb = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: true });
+  // Roster exports keep the team on a "Sales Team" sheet; everything else is the first sheet.
+  const name = wb.SheetNames.find(n => /sales team/i.test(n)) || wb.SheetNames[0];
+  return XLSX.utils.sheet_to_json(wb.Sheets[name], { defval: '' });
+}
+const storeOptions = (selected, list = STORES.map(s => s.name), extra = '') => {
+  const groups = {};
+  list.forEach(n => { const st = STORES.find(x => x.name === n); if (st) (groups[st.district] ||= []).push(st); });
+  return extra + Object.entries(groups).map(([k, arr]) => `<optgroup label="${esc(DISTRICTS[k])}">${arr.map(st =>
+    `<option value="${esc(st.name)}" ${st.name === selected ? 'selected' : ''}>${esc(st.name)}</option>`).join('')}</optgroup>`).join('');
+};
+
+// ---------------------------------------------------------------- Firebase backend
+async function firebaseBackend() {
+  const [{ initializeApp }, A, F] = await Promise.all([
+    import(FB + 'firebase-app.js'), import(FB + 'firebase-auth.js'), import(FB + 'firebase-firestore.js')
+  ]);
+  const app = initializeApp(firebaseConfig);
+  const auth = A.getAuth(app);
+  const db = F.getFirestore(app);
+  const email = () => (auth.currentUser?.email || '').toLowerCase();
+  const get = async (c, id) => { const s = await F.getDoc(F.doc(db, c, id)); return s.exists() ? { id: s.id, ...s.data() } : null; };
+  const all = async (c, ...wheres) => (await F.getDocs(F.query(F.collection(db, c), ...wheres.map(([a, b]) => F.where(a, '==', b))))).docs.map(d => ({ id: d.id, ...d.data() }));
+  const be = {
+    demo: false,
+    onAuth: cb => A.onAuthStateChanged(auth, u => cb(u ? { email: u.email.toLowerCase(), verified: u.emailVerified } : null)),
+    signIn: (e, p) => A.signInWithEmailAndPassword(auth, e, p),
+    async register(e, p) { const c = await A.createUserWithEmailAndPassword(auth, e, p); await A.sendEmailVerification(c.user); },
+    resendVerify: () => A.sendEmailVerification(auth.currentUser),
+    async refresh() { await A.reload(auth.currentUser); await auth.currentUser.getIdToken(true); return auth.currentUser.emailVerified; },
+    reset: e => A.sendPasswordResetEmail(auth, e),
+    signOut: () => A.signOut(auth),
+    async profile() {
+      const e = email();
+      const p = await get('users', e);
+      if (p) return p;
+      if (e === OWNER_EMAIL.toLowerCase()) {
+        const me = { email: e, name: 'Frank Pina', role: 'admin', stores: [], off: DEFAULT_OFF };
+        await F.setDoc(F.doc(db, 'users', e), me);
+        return me;
+      }
+      return null;
+    },
+    meta: async () => (await get('config', 'meta')) || {},
+    daily: date => get('daily', date),
+    async publishDaily(d) {
+      const now = new Date().toISOString();
+      await F.setDoc(F.doc(db, 'daily', d.date), { date: d.date, periods: d.periods, stores: d.stores, by: email(), at: now, file: d.file });
+      const meta = await be.meta();
+      const dates = [...new Set([...(meta.dailyDates || []), d.date])].sort().reverse().slice(0, 60);
+      await F.setDoc(F.doc(db, 'config', 'meta'), { ...meta, dailyDates: dates, latestDaily: dates[0], lastDaily: { by: email(), at: now, file: d.file, date: d.date } });
+    },
+    rsa: () => get('rsa', 'latest'),
+    rsaAt: date => get('rsa', date),
+    // Every upload is kept by date so the app can take this week out of the month-to-date numbers.
+    async publishRsa(r) {
+      const now = new Date().toISOString();
+      const meta = await be.meta();
+      await F.setDoc(F.doc(db, 'rsa', r.to), { ...r, by: email(), at: now });
+      const newest = !meta.lastRsa?.to || r.to >= meta.lastRsa.to;
+      if (newest) await F.setDoc(F.doc(db, 'rsa', 'latest'), { ...r, by: email(), at: now });
+      const dates = [...new Set([...(meta.rsaDates || []), r.to])].sort().reverse().slice(0, 60);
+      await F.setDoc(F.doc(db, 'config', 'meta'), { ...meta, rsaDates: dates, ...(newest ? { lastRsa: { by: email(), at: now, file: r.file, to: r.to, people: r.people.length } } : {}) });
+    },
+    roster: async () => (await get('config', 'roster'))?.people || [],
+    markets: async () => (await get('config', 'markets'))?.markets || [],
+    storeLeaders: async () => (await get('config', 'storeLeaders'))?.leaders || [],
+    saveStoreLeaders: leaders => F.setDoc(F.doc(db, 'config', 'storeLeaders'), { leaders, at: new Date().toISOString() }),
+    saveMarkets: markets => F.setDoc(F.doc(db, 'config', 'markets'), { markets, at: new Date().toISOString() }),
+    saveRoster: people => F.setDoc(F.doc(db, 'config', 'roster'), { people, at: new Date().toISOString() }),
+    users: () => all('users'),
+    saveUser: u => F.setDoc(F.doc(db, 'users', u.email), u),
+    deleteUser: e => F.deleteDoc(F.doc(db, 'users', e)),
+    plan: (e, week) => get('plans', `${e}_${week}`),
+    plansForWeek: week => all('plans', ['weekStart', week]),
+    savePlan: p => F.setDoc(F.doc(db, 'plans', `${p.email}_${p.weekStart}`), p),
+    visits: () => all('visits'),
+    saveVisit: v => F.setDoc(F.doc(db, 'visits', v.id), v),
+    photos: visitId => all('photos', ['visitId', visitId]),
+    savePhoto: ph => F.setDoc(F.doc(db, 'photos', ph.id), ph),
+    deletePhoto: id => F.deleteDoc(F.doc(db, 'photos', id)),
+    timeOff: (e, week) => get('timeoff', `${e}_${week}`),
+    timeOffForWeek: week => all('timeoff', ['weekStart', week]),
+    saveTimeOff: t => F.setDoc(F.doc(db, 'timeoff', `${t.email}_${t.weekStart}`), t)
+  };
+  return be;
+}
+
+// ---------------------------------------------------------------- demo backend (in memory, made-up numbers)
+function demoBackend() {
+  let seed = 7; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  const t = today(), week = weekStartOf(t);
+  const leaders = [
+    { email: 'east@demo', name: 'Demo Market Leader (Jacksonville)', role: 'leader', stores: ['Town Center', 'Orange Park', 'Yulee', 'St. Augustine'], off: DEFAULT_OFF },
+    { email: 'nc@demo', name: 'Demo Market Leader (Carolinas)', role: 'leader', stores: ['Greensboro', 'Winston Salem', 'Burlington', 'Danville', 'Outlet Greensboro'], off: DEFAULT_OFF },
+    { email: 'director@demo', name: 'Demo Director (East)', role: 'director', stores: ['Town Center', 'North', 'Orange Park', 'Brunswick', 'Yulee', 'St. Augustine', 'Outlet Regency'], off: [0, 6] },
+    { email: 'gulf@demo', name: 'Demo Market Leader (Gulf Coast)', role: 'leader', stores: ['Mobile', "D'Iberville", 'Spanish Fort', 'Pensacola', 'Crestview', 'Ft. Walton'], off: [2, 3] }
+  ];
+  const users = {
+    [OWNER_EMAIL]: { email: OWNER_EMAIL, name: 'Frank Pina', role: 'admin', stores: [], off: DEFAULT_OFF },
+    'exec@demo': { email: 'exec@demo', name: 'Demo Executive', role: 'exec', stores: [] }
+  };
+  leaders.forEach(l => users[l.email] = l);
+  // Per-store profile: sales vs budget (MTD, WTD), SPG vs LY, close rate bps, traffic vs LY.
+  const fixed = {
+    'Town Center': [-9, -7, -5, -120, -6], 'Orange Park': [2, 4, 5, 60, 3], 'Yulee': [-6, -4, -3, -80, -18], 'St. Augustine': [-3, -2, 1, 20, 2],
+    'Winston Salem': [-11, -13, -6, -150, -4], 'Burlington': [-4, -6, -2, -60, 1], 'Danville': [-19, -24, -14, -380, -21], 'Greensboro': [3, 6, 4, 90, 5], 'Outlet Greensboro': [-8, -3, -5, -120, -9]
+  };
+  const dailyRows = (date, override = {}) => STORES.flatMap(st => {
+    const f = override[st.name] || fixed[st.name] || [-15 + rnd() * 22, -18 + rnd() * 26, -12 + rnd() * 18, Math.round(-400 + rnd() * 550), -15 + rnd() * 20];
+    const [sb, wb, spg, cr, tr] = f;
+    const ns = 180000 + rnd() * 250000, wk = ns / 4;
+    const bad = sb < -10 ? 1 : 0;
+    const m = (metric, mtd, bud = '', ly = '', wtd = mtd, wbud = bud, wly = ly) => ({ 'Report Date': date, Segment: st.name, Metric: metric,
+      'Day TY': String(/^(Net Sales|Traffic|Cancellations|Gross)/.test(metric) ? Math.round(Number(wtd) / 3) : wtd), 'Day LY': String(wly), 'Day Budget': wbud === '' ? '' : String((Number(wbud) + (rnd() - 0.5) * 16).toFixed(1)),
+      'WTD TY': String(wtd), 'WTD LY': String(wly), 'WTD Budget': String(wbud), 'MTD TY': String(mtd), 'MTD LY': String(ly), 'MTD Budget': String(bud) });
+    return [
+      m('Net Sales (Stores)', ns.toFixed(0), sb.toFixed(1), '', wk.toFixed(0), wb.toFixed(1)),
+      m('Sales per Guest w. Cancellations', (430 + rnd() * 160).toFixed(2), '', spg.toFixed(1)),
+      m('Close Rate', (24 + rnd() * 8 - bad * 4).toFixed(1), String(cr)),
+      m('Traffic', Math.round(900 + rnd() * 700), '', tr.toFixed(1), Math.round(220 + rnd() * 150), '', tr.toFixed(1)),
+      m('Sales per Hour', (320 + rnd() * 140 - bad * 60).toFixed(2)), m('Avg Ticket w. Del.', (1900 + rnd() * 600).toFixed(2)),
+      m('Eff. Margin', (54 + rnd() * 4).toFixed(2)), m('Finance % of Sales', (48 + rnd() * 20 - bad * 6).toFixed(2)),
+      m('Finance Apps to Traffic', (7 + rnd() * 6).toFixed(2)), m('Bedding % of Sales', (12 + rnd() * 10).toFixed(2)),
+      m('Bedding SPH', (40 + rnd() * 30).toFixed(2)), m('Protection % of Sales', (6 + rnd() * 4).toFixed(2)),
+      m('Protection SPH', (22 + rnd() * 18).toFixed(2)), m('Protection Attachment', (46 + rnd() * 22 - bad * 8).toFixed(2)),
+      m('Delivery % of sales', (6 + rnd() * 3).toFixed(2)),
+      m('Cancellations', (-ns * (0.03 + rnd() * 0.05 + bad * 0.03)).toFixed(0)), m('Gross Sales', (ns * 1.08).toFixed(0))
+    ];
+  });
+  const sat = addDays(week, -1), yest = addDays(t, -1) > sat ? addDays(t, -1) : sat;
+  const daily = {};
+  const d1 = parseDaily(dailyRows(sat)); daily[sat] = { date: sat, periods: d1.periods, stores: d1.stores };
+  let meta = { rsaDates: [], dailyDates: Object.keys(daily).sort().reverse(), latestDaily: yest, lastDaily: { by: OWNER_EMAIL, at: new Date().toISOString(), file: `daily-report-${yest}.csv`, date: yest } };
+
+  // Consultants: six per demo store, made-up names.
+  const first = ['Maria', 'Devon', 'Alyssa', 'Marcus', 'Priya', 'Tyler', 'Jasmine', 'Chris', 'Nina', 'Omar', 'Keisha', 'Luis', 'Grace', 'Andre', 'Tessa'];
+  const last = ['Alvarez', 'Brooks', 'Chen', 'Dawson', 'Ellis', 'Foster', 'Grant', 'Hayes', 'Ibarra', 'Jordan', 'Kim', 'Lopez', 'Moss', 'Nolan'];
+  const roster = [], rsaRows = [];
+  leaders.flatMap(l => l.stores).forEach((store, si) => {
+    for (let i = 0; i < 6; i++) {
+      const n = si * 6 + i, name = `${first[n % 15]} ${last[(n * 5 + Math.floor(n / 15)) % 14]}`;
+      const skill = i === 5 ? 0.52 : i === 4 ? 0.72 : 0.82 + rnd() * 0.7;
+      const hours = 110 + rnd() * 40, sph = 400 * skill * (store.startsWith('Outlet') ? 0.55 : 1);
+      const pc = (a, b) => (a + rnd() * (b - a)).toFixed(2) + '%';
+      roster.push({ cid: cidOf(name), name, store, title: i === 0 ? 'ASM' : 'RSA', aliases: [] });
+      rsaRows.push({ 'Sales Associate': name, 'Net Sales': (sph * hours).toFixed(2), 'Cancellation %': pc(1, 9), 'Discount %': pc(4, 17),
+        'Credit Apps #': Math.round(18 * skill * (0.5 + rnd() * 0.6)), 'Eff. Margin': pc(53, 59), 'SPH': sph.toFixed(2),
+        'Avg Ticket w. Del.': (1700 + rnd() * 1000).toFixed(2), 'Fin. % of Sales': pc(45, 78), 'Bed. % of Sales': pc(9, 28),
+        'Prot. % of Sales': pc(4, 11), 'Del. % of Sales': pc(5, 10) });
+    }
+  });
+  const pr = parseRsa(rsaRows);
+  const monthStart = yest.slice(0, 8) + '01';
+  let rsa = { from: monthStart, to: yest, file: `rsa_report_${monthStart}_to_${yest}.csv`, people: pr.people.map(p => ({ ...p, store: roster.find(r => r.cid === p.cid)?.store || null })) };
+  // Saturday's copy of the RSA report. The third consultant in each store has a rough week.
+  const rsaHist = { [yest]: rsa };
+  if (yest !== sat && sat.slice(0, 7) === yest.slice(0, 7)) {
+    rsaHist[sat] = { from: monthStart, to: sat, people: rsa.people.map((p, i) => {
+      const wkHours = 18 + rnd() * 10, factor = i % 6 === 2 ? 0.45 : i % 6 === 3 ? 1.45 : 0.85 + rnd() * 0.3;
+      const hours = Math.max(1, p.hours - wkHours), sales = p.k.netSales - wkHours * p.k.sph * factor;
+      return { cid: p.cid, name: p.name, store: p.store, hours, k: { netSales: sales, sph: sales / hours } };
+    }) };
+  }
+
+  // This week's plans, built from Saturday's numbers, with the past days already visited.
+  const plans = {}, visits = {}, photos = {};
+  const timeoff = { [`nc@demo_${addDays(week, 7)}`]: { email: 'nc@demo', weekStart: addDays(week, 7), off: [2, 4], at: t, by: 'nc@demo' } };
+  const lastVisits = { 'Yulee': addDays(week, -16), 'Town Center': addDays(week, -5), 'Orange Park': addDays(week, -9) };
+  Object.entries(lastVisits).forEach(([store, date]) => {
+    const id = `east@demo_${date}_${slug(store)}`;
+    visits[id] = { id, email: 'east@demo', name: users['east@demo'].name, role: 'leader', store, date, kind: 'first', vtype: 'Priority', status: 'done',
+      leaderWin: { name: 'Store leader', text: 'Ran a tight huddle and knew every number.' }, working: 'Huddle ran on time. Team is presenting finance early.',
+      actions: [{ behavior: 'Leader walks every guest over 20 minutes before they leave', owner: 'Store leader' }, { behavior: 'Protection check at close every night', owner: 'Closing leader' }, {}],
+      checks: { facilities: { 0: 'yes', 1: 'partial' } }, aor: { 'Bedroom': 'needs' }, notes: '', at: date };
+  });
+  { const d = addDays(week, 1), id = `east@demo_${d}_${slug('Yulee')}_remote`;
+    visits[id] = { id, remote: true, email: 'east@demo', name: users['east@demo'].name, role: 'leader', store: 'Yulee', date: d, kind: 'remote', vtype: 'Video call', status: 'done',
+      leaderWin: { name: 'Store leader', text: 'Had the numbers ready before the call.' }, actions: [{ what: 'Finance % of sales', from: '48%', to: '55%', how: 'Bring up financing in the first 10 minutes with every guest', owner: 'Store leader' }, {}, {}], at: d }; }
+  for (const l of leaders) {
+    const lv = latestVisitMap(Object.values(visits));
+    const scores = Object.fromEntries(l.stores.map(s => [s, needScore(daily[sat].stores[s], { lastVisit: lv[s], today: week })]));
+    const p = { email: l.email, name: l.name, ...buildPlan({ weekStart: week, stores: l.stores, scores, off: l.off, role: l.role }), builtAt: week + 'T08:00:00', basisDate: sat, pivots: [], dismissed: [] };
+    p.days.forEach(d => {
+      if (d.date < t && d.store) {
+        d.status = 'done';
+        const id = `${l.email}_${d.date}_${slug(d.store)}`;
+        visits[id] = { id, email: l.email, name: l.name, role: l.role, store: d.store, date: d.date, kind: d.kind, vtype: kindToType(d.kind), status: 'done',
+          leaderWin: { name: 'Store leader', text: 'Every guest greeted at the door within 10 seconds.' },
+          working: 'Leaders are greeting at the door and taking every up in turn.',
+          actions: [{ behavior: 'Finance offered in the first 10 minutes with every guest', owner: 'All consultants' }, { behavior: 'Leader turnover before any guest walks', owner: 'Leader on duty' }, {}],
+          checks: { culture: { 0: 'yes', 1: 'partial', 2: 'yes', 3: 'no' }, facilities: { 0: 'yes', 1: 'yes', 2: 'partial', 3: 'yes', 4: 'yes' } },
+          segs: { 0: { 0: 'yes', 1: 'partial', 2: 'no', 3: 'yes' } }, aor: { 'Front Entrance and Windows': 'pass', 'Dining': 'needs' },
+          notes: 'Two RSAs coached on the monthly payment talk track.', at: d.date };
+      }
+    });
+    plans[`${l.email}_${week}`] = p;
+  }
+  // Mid-week swing: a store the Jacksonville leader already visited fell apart since Sunday,
+  // so the app suggests a pivot for the rest of the week.
+  if (yest !== sat) {
+    const ep = plans[`east@demo_${week}`];
+    const hit = ep.days.filter(d => d.status === 'done').sort((a, b) => (ep.basis[a.store] ?? 0) - (ep.basis[b.store] ?? 0))[0];
+    const d2 = parseDaily(dailyRows(yest, hit ? { [hit.store]: [-21, -32, -15, -420, -5] } : {}));
+    daily[yest] = { date: yest, periods: d2.periods, stores: d2.stores };
+  }
+  const dayBefore = addDays(yest, -1);
+  if (dayBefore > sat && dayBefore.slice(0, 7) === yest.slice(0, 7)) {
+    rsaHist[dayBefore] = { from: monthStart, to: dayBefore, people: rsa.people.map((p, i) => {
+      const dh = 6 + rnd() * 3, f = i % 6 === 2 ? 0.3 : i % 6 === 3 ? 1.8 : 0.7 + rnd() * 0.6;
+      const hours = Math.max(1, p.hours - dh), sales = p.k.netSales - dh * p.k.sph * f;
+      return { cid: p.cid, name: p.name, store: p.store, hours, k: { netSales: sales, sph: sales / hours } };
+    }) };
+  }
+  meta.rsaDates = Object.keys(rsaHist).sort().reverse();
+  let storeLeaders = [];
+  let markets = [
+    { id: 'jax', name: 'Jacksonville', leader: 'east@demo', director: 'director@demo', stores: ['Town Center', 'Orange Park', 'Yulee', 'St. Augustine'] },
+    { id: 'nc', name: 'Carolinas', leader: 'nc@demo', director: '', stores: ['Greensboro', 'Winston Salem', 'Burlington', 'Danville', 'Outlet Greensboro'] },
+    { id: 'gulf', name: 'Gulf Coast', leader: 'gulf@demo', director: '', stores: ['Mobile', "D'Iberville", 'Spanish Fort', 'Pensacola', 'Crestview', 'Ft. Walton'] }
+  ];
+  let current = 'east@demo';
+  const clone = x => structuredClone(x);
+  return {
+    demo: true,
+    demoUsers: () => Object.values(users).filter(u => u.email in users),
+    setDemoUser(e) { current = e; this._cb?.({ email: e, verified: true }); },
+    onAuth(cb) { this._cb = cb; setTimeout(() => cb({ email: current, verified: true }), 0); },
+    signIn: async () => {}, register: async () => {}, resendVerify: async () => {}, refresh: async () => true, reset: async () => {}, signOut: async () => {},
+    profile: async () => clone(users[current]),
+    meta: async () => clone(meta),
+    daily: async d => clone(daily[d] || null),
+    async publishDaily(d) { daily[d.date] = { date: d.date, periods: d.periods, stores: d.stores }; const dates = [...new Set([...meta.dailyDates, d.date])].sort().reverse(); meta = { ...meta, dailyDates: dates, latestDaily: dates[0], lastDaily: { by: current, at: new Date().toISOString(), file: d.file, date: d.date } }; },
+    rsa: async () => clone(rsa),
+    rsaAt: async d => clone(rsaHist[d] || null),
+    async publishRsa(r) { rsaHist[r.to] = clone(r); meta.rsaDates = Object.keys(rsaHist).sort().reverse(); if (!meta.lastRsa?.to || r.to >= meta.lastRsa.to) { rsa = clone(r); meta.lastRsa = { by: current, at: new Date().toISOString(), file: r.file, to: r.to, people: r.people.length }; } },
+    roster: async () => clone(roster),
+    markets: async () => clone(markets),
+    storeLeaders: async () => clone(storeLeaders),
+    async saveStoreLeaders(l) { storeLeaders = clone(l); },
+    async saveMarkets(m) { markets = clone(m); },
+    async saveRoster(p) { roster.splice(0, roster.length, ...clone(p)); },
+    users: async () => clone(Object.values(users)),
+    async saveUser(u) { users[u.email] = clone(u); },
+    async deleteUser(e) { delete users[e]; },
+    plan: async (e, w) => clone(plans[`${e}_${w}`] || null),
+    plansForWeek: async w => clone(Object.values(plans).filter(p => p.weekStart === w)),
+    async savePlan(p) { plans[`${p.email}_${p.weekStart}`] = clone(p); },
+    visits: async () => clone(Object.values(visits)),
+    async saveVisit(v) { visits[v.id] = clone(v); },
+    photos: async id => clone(Object.values(photos).filter(p => p.visitId === id)),
+    async savePhoto(ph) { photos[ph.id] = clone(ph); },
+    async deletePhoto(id) { delete photos[id]; },
+    timeOff: async (e, w) => clone(timeoff[`${e}_${w}`] || null),
+    timeOffForWeek: async w => clone(Object.values(timeoff).filter(x => x.weekStart === w)),
+    async saveTimeOff(x) { timeoff[`${x.email}_${x.weekStart}`] = clone(x); }
+  };
+}
+function latestVisitMap(visits) {
+  const out = {};
+  visits.forEach(v => { if (v.remote) return; if (!out[v.store] || v.date > out[v.store]) out[v.store] = v.date; });
+  return out;
+}
+
+// ---------------------------------------------------------------- boot
+async function boot() {
+  try { S.be = DEMO ? demoBackend() : await firebaseBackend(); }
+  catch (e) { $('#app').innerHTML = `<div class="panel narrow"><h2>Could not load</h2><p>${esc(e.message)}</p></div>`; return; }
+  if (DEMO) {
+    $('#demoBar').hidden = false;
+    const sel = $('#demoRole');
+    sel.innerHTML = S.be.demoUsers().map(u => `<option value="${esc(u.email)}">${esc(roleLabel(u.role))}: ${esc(u.name)}</option>`).join('');
+    sel.value = 'east@demo';
+    sel.onchange = () => { S.tab = null; S.viewEmail = null; S.visit = null; S.be.setDemoUser(sel.value); };
+  }
+  S.be.onAuth(async u => {
+    if (!u) return renderSignIn();
+    if (!u.verified) return renderVerify(u.email);
+    try { S.user = await S.be.profile(); } catch (e) { S.user = null; }
+    if (!S.user) return renderNotRostered(u.email);
+    await loadShared();
+    renderShell();
+  });
+}
+async function loadShared() {
+  $('#app').innerHTML = '<p class="loading">Loading the latest numbers…</p>';
+  S.meta = await S.be.meta();
+  const [daily, rsa, users, visits, roster, markets, storeLeaders] = await Promise.all([
+    S.meta.latestDaily ? S.be.daily(S.meta.latestDaily) : null, S.be.rsa(), S.be.users().catch(() => [S.user]), S.be.visits(), S.be.roster(), S.be.markets().catch(() => []), S.be.storeLeaders().catch(() => [])
+  ]);
+  Object.assign(S, { daily, rsa, users, visits, roster, markets, storeLeaders });
+  // Consultant week: compare today's RSA upload with the one through last Saturday.
+  const sat = addDays(weekStartOf(today()), -1);
+  const baseDate = (S.meta.rsaDates || []).filter(d => d <= sat && (!rsa?.to || d < rsa.to)).sort().reverse()[0];
+  S.rsaBase = baseDate ? await S.be.rsaAt(baseDate).catch(() => null) : null;
+  S.weeks = consultantWeeks(rsa, S.rsaBase);
+  // Yesterday by consultant: today's RSA upload minus the one before it.
+  const prevDate = (S.meta.rsaDates || []).filter(d => rsa?.to && d < rsa.to).sort().reverse()[0];
+  S.rsaPrev = prevDate ? await S.be.rsaAt(prevDate).catch(() => null) : null;
+  S.days = S.rsaPrev ? consultantWeeks(rsa, S.rsaPrev) : {};
+  S.teams = {};
+  for (const st of STORES) if ((rsa?.people || []).some(p => p.store === st.name)) S.teams[st.name] = teamSignals(rsa.people, S.weeks, st.name, DEFAULT_GOALS);
+  S.lastVisit = latestVisitMap(visits);
+  S.scores = scoresFor(daily);
+}
+function scoresFor(daily) {
+  const out = {};
+  if (!daily) return out;
+  for (const st of STORES) if (daily.stores[st.name]) out[st.name] = needScore(daily.stores[st.name], { lastVisit: S.lastVisit[st.name], today: today(), team: S.teams?.[st.name] });
+  return out;
+}
+const isAdmin = () => S.user?.role === 'admin';
+const seesAll = () => ['admin', 'exec'].includes(S.user?.role);
+// Field leaders = Market Leaders and directors. Each store has one Market Leader; directors can overlap.
+const leaders = () => S.users.filter(u => FIELD.includes(u.role) && (u.stores || []).length).sort((a, b) => (a.role === 'leader' ? 0 : 1) - (b.role === 'leader' ? 0 : 1) || (a.name || a.email).localeCompare(b.name || b.email));
+const leaderOf = store => S.users.find(l => l.role === 'leader' && (l.stores || []).includes(store));
+const marketOf = store => (S.markets || []).find(m => (m.stores || []).includes(store));
+const marketsOf = email => (S.markets || []).filter(m => m.leader === email || m.director === email);
+const whoLabel = l => `${l.name || l.email}${l.role === 'director' ? ' (Director)' : ''}`;
+
+// ---------------------------------------------------------------- auth screens
+function renderSignIn(msg = '') {
+  $('#who').innerHTML = '';
+  $('#app').innerHTML = `
+  <form class="panel narrow" id="signin">
+    <h2>Sign in</h2>
+    <p>Use your @${esc(EMAIL_DOMAIN)} email. First time here? Enter your email, choose a password, and tap Create account. You will get a verification email.</p>
+    <label for="em">Email<input type="email" id="em" autocomplete="username" required></label>
+    <label for="pw">Password<input type="password" id="pw" autocomplete="current-password" minlength="8" required></label>
+    ${msg ? `<p class="err">${esc(msg)}</p>` : ''}
+    <div class="row">
+      <button class="btn primary" type="submit">Sign in</button>
+      <button class="btn" type="button" id="reg">Create account</button>
+      <button class="link" type="button" id="forgot">Forgot password</button>
+    </div>
+  </form>`;
+  const em = () => $('#em').value.trim().toLowerCase(), pw = () => $('#pw').value;
+  $('#signin').onsubmit = async e => { e.preventDefault(); try { await S.be.signIn(em(), pw()); } catch (x) { renderSignIn(friendly(x)); } };
+  $('#reg').onclick = async () => {
+    if (!em().endsWith('@' + EMAIL_DOMAIN)) return renderSignIn(`Use your @${EMAIL_DOMAIN} email to create an account.`);
+    if (pw().length < 8) return renderSignIn('Choose a password of at least 8 characters.');
+    try { await S.be.register(em(), pw()); } catch (x) { renderSignIn(friendly(x)); }
+  };
+  $('#forgot').onclick = async () => {
+    if (!em()) return renderSignIn('Type your email first, then tap Forgot password.');
+    try { await S.be.reset(em()); toast('Password reset email sent.'); } catch (x) { renderSignIn(friendly(x)); }
+  };
+}
+function friendly(x) {
+  const c = x?.code || '';
+  if (c.includes('invalid-credential') || c.includes('wrong-password') || c.includes('user-not-found')) return 'Email or password is not right. New here? Tap Create account.';
+  if (c.includes('email-already-in-use')) return 'That email already has an account. Sign in, or tap Forgot password.';
+  if (c.includes('too-many-requests')) return 'Too many tries. Wait a few minutes and try again.';
+  if (c.includes('permission-denied')) return 'You do not have access to that. Ask Frank to check your login.';
+  return x?.message || 'Something went wrong.';
+}
+function renderVerify(email) {
+  $('#who').innerHTML = signOutBtn(); wireSignOut();
+  $('#app').innerHTML = `<div class="panel narrow"><h2>Check your email</h2>
+    <p>We sent a verification link to <b>${esc(email)}</b>. Open it, then come back and tap Continue. Check junk mail if you do not see it.</p>
+    <div class="row"><button class="btn primary" id="cont">Continue</button><button class="btn" id="again">Send it again</button></div></div>`;
+  $('#cont').onclick = async () => { if (await S.be.refresh()) location.reload(); else toast('Not verified yet. Open the link in the email first.', true); };
+  $('#again').onclick = async () => { try { await S.be.resendVerify(); toast('Sent.'); } catch (x) { toast(friendly(x), true); } };
+}
+function renderNotRostered(email) {
+  $('#who').innerHTML = signOutBtn(); wireSignOut();
+  $('#app').innerHTML = `<div class="panel narrow"><h2>You are signed in, but not set up yet</h2>
+    <p><b>${esc(email)}</b> does not have stores assigned. Ask Frank Pina to add you, then refresh this page.</p></div>`;
+}
+const signOutBtn = () => `<button class="link light" id="so">Sign out</button>`;
+function wireSignOut() { const b = $('#so'); if (b) b.onclick = () => S.be.signOut(); }
+
+// ---------------------------------------------------------------- shell
+function renderShell() {
+  const u = S.user;
+  $('#who').innerHTML = `<span>${esc(u.name || u.email)} <small>${esc(roleLabel(u.role))}</small></span>${DEMO ? '' : signOutBtn()}`;
+  wireSignOut();
+  const tabs = [];
+  tabs.push(['brief', 'Daily brief']);
+  if (seesAll()) tabs.push(['leaders', 'Leaders']);
+  tabs.push(['week', seesAll() ? 'Weekly plans' : 'My week'], ['stores', seesAll() ? 'Stores' : 'My stores'], ['messages', 'Team messages'], ['visits', 'Visit log']);
+  if (isAdmin()) tabs.push(['upload', 'Upload'], ['setup', 'Setup']);
+  tabs.push(['guide', 'How it works']);
+  if (!tabs.some(t => t[0] === S.tab)) S.tab = tabs[0][0];
+  $('#app').innerHTML = `
+    <nav class="tabs" aria-label="Sections">${tabs.map(([k, l]) => `<button data-tab="${k}" class="${S.tab === k ? 'on' : ''}">${l}</button>`).join('')}</nav>
+    <div id="view"></div>`;
+  document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => { S.tab = b.dataset.tab; S.visit = null; renderShell(); });
+  if (S.visit) return viewVisit();
+  ({ brief: viewBrief, leaders: viewLeaders, week: viewWeek, stores: viewStores, messages: viewMessages, visits: viewVisits, upload: viewUpload, setup: viewSetup, guide: viewGuide })[S.tab]();
+}
+const dataLine = () => {
+  const d = S.meta.latestDaily;
+  if (!d) return `<span class="warn">No daily report uploaded yet.</span>`;
+  const age = daysApart(d, today());
+  return `Numbers through <b>${esc(longDate(d))}</b>${age > 2 ? ` <span class="warn">(${age} days old)</span>` : ''}${S.rsa?.to ? ` · Consultants through ${esc(shortDate(S.rsa.to))}` : ''}`;
+};
+const needChip = s => s == null ? '<span class="need low">--</span>' : `<span class="need ${band(s)}" title="Need score, 0 to 100">${s}</span>`;
+
+// ---------------------------------------------------------------- the week
+async function viewWeek() {
+  const v = $('#view');
+  const week = S.week || (S.week = weekStartOf(today()));
+  const thisWeek = weekStartOf(today());
+  if (seesAll() && !S.viewEmail) S.viewEmail = leaders()[0]?.email || null;
+  const email = seesAll() ? S.viewEmail : S.user.email;
+  const who = S.users.find(u => u.email === email) || (email === S.user.email ? S.user : null);
+  const picker = seesAll() ? `<label for="lp" style="margin:0">Field leader<select id="lp">${leaders().map(l => `<option value="${esc(l.email)}" ${l.email === email ? 'selected' : ''}>${esc(whoLabel(l))}</option>`).join('')}</select></label>` : '';
+  if (!who || !(who.stores || []).length) {
+    v.innerHTML = `<div class="spread">${picker}</div><div class="panel"><h2>No stores assigned</h2><p>${seesAll() ? 'Assign stores to a Market Leader in Setup.' : 'Ask Frank to assign your stores.'}</p></div>`;
+    wirePicker(); return;
+  }
+  v.innerHTML = '<p class="loading">Loading the plan…</p>';
+  let [plan, to] = await Promise.all([S.be.plan(email, week), S.be.timeOff(email, week)]);
+  const canEdit = email === S.user.email || isAdmin();
+  if (!plan && week === thisWeek && S.daily && canEdit) {
+    plan = newPlan(who, week, to?.off);
+    await S.be.savePlan(plan);
+  }
+  // A plan built early (when days off were picked) refreshes with the newest numbers once its week starts.
+  if (plan?.preview && week === thisWeek && canEdit && S.daily && S.meta.latestDaily > plan.basisDate && !plan.days.some(d => d.status === 'done')) {
+    plan = { ...newPlan(who, week, plan.off), pivots: plan.pivots || [], dismissed: plan.dismissed || [] };
+    await S.be.savePlan(plan);
+  }
+  const t = today();
+  const sugg = plan && week === thisWeek && canEdit && S.meta.latestDaily > plan.basisDate
+    ? pivotSuggestion({ plan, scores: S.scores, today: t, dismissed: plan.dismissed || [] }) : null;
+  const off = safeOff(plan?.off || to?.off || who.off, who.role);
+  const doneCount = plan ? plan.days.filter(d => d.status === 'done').length : 0;
+
+  v.innerHTML = `
+  <div class="spread">
+    <div>
+      <p class="eyebrow">${week === thisWeek ? 'This week' : week < thisWeek ? 'Past week' : 'Next week'}${seesAll() ? ' · ' + esc(who.name || who.email) : ''}${marketsOf(who.email).length ? ' · ' + marketsOf(who.email).map(m => esc(m.name)).join(', ') : ''}</p>
+      <div class="weekhead">
+        <button class="btn tiny" id="prevw" aria-label="Previous week">‹</button>
+        <h2 class="big">${esc(dayLabel(week))} to ${esc(dayLabel(addDays(week, 6)))}</h2>
+        <button class="btn tiny" id="nextw" aria-label="Next week" ${week > thisWeek ? 'disabled' : ''}>›</button>
+      </div>
+      <p class="small" style="margin:4px 0 0">${dataLine()}</p>
+    </div>
+    <div class="row">${picker}</div>
+  </div>
+  ${!S.daily ? `<div class="panel"><h2>Waiting on the first daily report</h2><p>The plan builds from the daily report. Once Frank uploads it, open this page and your week is ready.</p></div>` : ''}
+  ${!plan && S.daily && week > thisWeek ? `<div class="panel"><h2>Pick your days off to build next week</h2><p>Tap your 2 days below and save. Your schedule builds right away from the latest numbers and refreshes on Sunday with Saturday's.</p></div>` : ''}
+  ${plan?.preview && week > thisWeek ? `<div class="warnbox">Preview built from numbers through ${esc(longDate(plan.basisDate))}. It refreshes Sunday with Saturday's numbers, keeping your days off.</div>` : ''}
+  ${!plan && S.daily && week < thisWeek ? `<div class="panel"><h2>No plan for this week</h2><p>Nothing was planned or logged.</p></div>` : ''}
+  ${sugg ? pivotCard(sugg) : ''}
+  ${week >= thisWeek && !plan ? offPanel(week, off, to, who, canEdit, plan, week === thisWeek) : ''}
+  ${plan ? `
+  <div class="cols">
+    <div style="min-width:0">
+      <div class="days">${plan.days.map((d, i) => dayCard(d, i, plan, canEdit)).join('')}</div>
+      <div class="offrow"><span>${doneCount} of ${plan.days.length} visits done</span><span>· Days off: <b>${off.map(x => DAY_LONG[x]).join(' and ')}</b></span></div>
+      ${week === thisWeek ? remotePanel(plan, who, canEdit) : ''}
+      ${(plan.pivots || []).length ? `<div class="panel"><h3>Changes made this week</h3><ul class="small">${plan.pivots.map(p => `<li>${esc(dayLabel(p.date))}: ${esc(p.from || 'open')} to <b>${esc(p.to)}</b>${p.reason ? '. ' + esc(p.reason) : ''}</li>`).join('')}</ul></div>` : ''}
+    </div>
+    <div class="panel" style="align-self:start">
+      <h3>Where you are needed most</h3>
+      <p class="small">Need score from the store numbers (sales and SPG with cancellations against budget and LY, close rate, cancellations, protection, finance), the consultants (below minimum or slipping this week) and days since the last visit. Higher needs you more.</p>
+      <ul class="rank">${who.stores.slice().sort((a, b) => (S.scores[b]?.score ?? -1) - (S.scores[a]?.score ?? -1)).map(s => `
+        <li>${needChip(S.scores[s]?.score)}<span class="nm">${esc(s)}<small>${esc(S.scores[s]?.parts?.[0]?.text || 'No flags')}</small></span><button class="link" data-open="${esc(s)}">Open</button></li>`).join('')}</ul>
+    </div>
+  </div>
+  ${week >= thisWeek ? offPanel(week, off, to, who, canEdit, plan, week === thisWeek) : ''}` : ''}`;
+  wirePicker();
+  $('#prevw').onclick = () => { S.week = addDays(week, -7); viewWeek(); };
+  $('#nextw').onclick = () => { S.week = addDays(week, 7); viewWeek(); };
+  v.querySelectorAll('[data-open]').forEach(b => b.onclick = () => openVisit({ store: b.dataset.open, date: today(), email, kind: 'drop-in' }));
+  v.querySelectorAll('[data-remote]').forEach(b => b.onclick = () => openVisit({ store: b.dataset.remote, date: today(), email, kind: 'remote', remote: true }));
+  wireOffPanel(week, who, plan, week === thisWeek);
+  if (!plan) return;
+  v.querySelectorAll('[data-go]').forEach(b => b.onclick = () => { const d = plan.days[+b.dataset.go]; openVisit({ store: d.store, date: d.date, email, kind: d.kind, dayIndex: +b.dataset.go }); });
+  v.querySelectorAll('[data-swap]').forEach(sel => sel.onchange = async () => {
+    const i = +sel.dataset.swap, d = plan.days[i], to = sel.value;
+    plan.pivots = [...(plan.pivots || []), { date: d.date, from: d.store, to, reason: 'Changed by hand', at: new Date().toISOString() }];
+    Object.assign(d, { store: to, kind: plan.days.some((x, j) => j !== i && x.store === to && x.date < d.date) ? 'second' : 'first', score: S.scores[to]?.score ?? null });
+    plan.calls = (plan.calls || []).filter(c => c !== to);
+    await S.be.savePlan(plan); toast(`${dayLabel(d.date)} is now ${to}.`); viewWeek();
+  });
+  if (sugg) {
+    $('#pvyes').onclick = async () => {
+      // Drop the least-opportunity visit, add the new store, run the rest of the week in priority order.
+      sugg.reorder.forEach(r => Object.assign(plan.days[r.i], { store: r.store, kind: r.kind, score: r.score }));
+      plan.pivots = [...(plan.pivots || []), { date: sugg.date, from: sugg.from, to: sugg.to, reason: sugg.reason, at: new Date().toISOString() }];
+      if (sugg.loses) plan.calls = [...new Set([...(plan.calls || []), sugg.from])];
+      plan.calls = plan.calls.filter(c => c !== sugg.to);
+      await S.be.savePlan(plan); toast(`Swapped. ${sugg.to} is in, ${sugg.from} is out.`); viewWeek();
+    };
+    $('#pvno').onclick = async () => {
+      plan.dismissed = [...(plan.dismissed || []), sugg.key];
+      await S.be.savePlan(plan); toast('Kept your plan.'); viewWeek();
+    };
+  }
+}
+// ---------------------------------------------------------------- days off
+// Leaders pick any 2 days off for each week. Saving builds (or rebuilds) that week's plan right away.
+function offPanel(week, off, to, who, canEdit, plan, isCurrent) {
+  const days = [0, 1, 2, 3, 4, 5, 6].map(i => addDays(week, i));
+  const set = to ? `Set ${to.by && to.by !== who.email ? 'by ' + esc(to.by) + ' ' : ''}on ${esc(shortDate(to.at.slice(0, 10)))}` : `Not set yet. Using ${esc(who.email === S.user.email ? 'your' : 'the')} default: ${off.map(x => DAY_NAMES[x]).join(' and ')}.`;
+  return `<section class="panel" aria-labelledby="offh">
+    <div class="spread" style="margin:0 0 10px"><div><h3 id="offh" style="margin:0">Days off, week of ${esc(dayLabel(week))}</h3>
+      <p class="small" style="margin:2px 0 0">Tap any 2 days. Tuesday, Wednesday or Thursday works best. Your visit schedule builds as soon as you save.</p></div>
+      <span class="small ${to ? 'good' : 'warn'}">${set}</span></div>
+    <div class="offstrip">${days.map(d => {
+      const w = dow(d), isOff = off.includes(w), suggested = [2, 3, 4].includes(w);
+      const doneHere = plan?.days.some(x => x.date === d && x.status === 'done');
+      return `<button type="button" class="offday ${isOff ? 'isoff' : ''} ${suggested ? 'sugg' : ''}" data-offday="${w}" aria-pressed="${isOff}" ${canEdit && !(isCurrent && d < today()) && !doneHere ? '' : 'disabled'}><b>${DAY_NAMES[w]}</b><span>${esc(shortDate(d))}</span><em>${isOff ? 'Off' : 'Working'}</em></button>`;
+    }).join('')}</div>
+    ${canEdit ? `<div class="row" style="margin-top:12px"><button class="btn primary" id="offsave">${plan ? 'Save and rebuild my schedule' : 'Save and build my schedule'}</button>
+      <span class="small">${isCurrent && plan ? 'Visits already logged stay on their days.' : !isCurrent ? 'It refreshes with the newest numbers on Sunday.' : ''}</span></div>` : ''}
+  </section>`;
+}
+function wireOffPanel(week, who, plan, isCurrent) {
+  const btn = $('#offsave'); if (!btn) return;
+  $('#view').querySelectorAll('[data-offday]').forEach(b => b.onclick = () => {
+    const on = !b.classList.contains('isoff');
+    b.classList.toggle('isoff', on); b.setAttribute('aria-pressed', on); b.querySelector('em').textContent = on ? 'Off' : 'Working';
+  });
+  btn.onclick = async () => {
+    const picked = [...$('#view').querySelectorAll('.offday.isoff')].map(b => +b.dataset.offday).sort();
+    if (!validOff(picked)) return toast('Pick exactly 2 days off.', true);
+    if (!S.daily) return toast('Days off need the first daily report before a schedule can build.', true);
+    try {
+      await S.be.saveTimeOff({ email: who.email, weekStart: week, off: picked, at: new Date().toISOString(), by: S.user.email });
+      let fresh;
+      if (isCurrent && plan) fresh = rebuildPlan(plan, who, picked, week);
+      else fresh = { ...newPlan(who, week, picked), preview: !isCurrent, pivots: plan?.pivots || [], dismissed: plan?.dismissed || [] };
+      await S.be.savePlan(fresh);
+      toast(`Days off: ${picked.map(x => DAY_LONG[x]).join(' and ')}. Schedule built.`);
+      viewWeek();
+    } catch (e) { toast(friendly(e), true); }
+  };
+}
+// Keep logged visits on their days, then fill the other work days from today on: stores not seen yet
+// first (highest need first), then second visits to the highest-need stores.
+function rebuildPlan(plan, who, off, week) {
+  const fresh = newPlan(who, week, off);
+  // Logged visits and days already past stay as they were.
+  const done = plan.days.filter(d => d.status === 'done' || d.date < today());
+  const open = fresh.days.map(d => d.date).filter(dt => dt >= today() && !done.some(k => k.date === dt));
+  const byNeed = who.stores.slice().sort((a, b) => (S.scores[b]?.score ?? 0) - (S.scores[a]?.score ?? 0));
+  const seen = new Set(done.filter(d => d.status === 'done').map(d => d.store));
+  const order = [...byNeed.filter(s => !seen.has(s)), ...byNeed];
+  fresh.days = [...done, ...open.map((date, i) => ({ date, store: order[i] || null, kind: seen.has(order[i]) || order.indexOf(order[i]) < i ? 'second' : 'first', status: 'planned', score: S.scores[order[i]]?.score ?? null }))]
+    .sort((a, b) => a.date.localeCompare(b.date));
+  fresh.calls = byNeed.filter(s => !fresh.days.some(d => d.store === s));
+  fresh.pivots = plan.pivots || []; fresh.dismissed = plan.dismissed || [];
+  fresh.builtAt = plan.builtAt; fresh.basisDate = plan.basisDate;
+  return fresh;
+}
+// Remote coaching: while on a full-day visit, coach the other stores by phone or video and log it.
+function remotePanel(plan, who, canEdit) {
+  const t = today(), here = plan.days.find(d => d.date === t)?.store;
+  const wk = plan.weekStart, end = addDays(wk, 6);
+  const remote = S.visits.filter(v => v.remote && v.email === who.email && v.date >= wk && v.date <= end);
+  const stores = (who.stores || []).filter(s => s !== here).sort((a, b) => ((plan.calls || []).includes(b) ? 1 : 0) - ((plan.calls || []).includes(a) ? 1 : 0) || (S.scores[b]?.score ?? 0) - (S.scores[a]?.score ?? 0));
+  return `<div class="panel">
+    <div class="spread" style="margin:0 0 6px"><h3 style="margin:0">Remote coaching</h3><span class="small">${remote.length} logged this week</span></div>
+    <p class="small">Visits are full days. While you're in one store, call or video your other stores and log the coaching here. ${plan.calls?.length ? 'Stores marked Call have no visit this week.' : ''}</p>
+    <div class="remotes">${stores.map(s => {
+      const done = remote.filter(v => v.store === s);
+      return `<div class="rstore"><span class="nm">${needChip(S.scores[s]?.score)} <b>${esc(s)}</b>${(plan.calls || []).includes(s) ? ' <span class="pill check">Call</span>' : ''}</span>
+        <span class="small">${done.length ? `<span class="good">Coached ${done.map(v => DAY_NAMES[dow(v.date)]).join(', ')}</span>` : '<span class="muted">Not yet this week</span>'}</span>
+        ${canEdit ? `<button type="button" class="btn tiny" data-remote="${esc(s)}">${done.some(v => v.date === t) ? 'Open today\'s' : 'Log remote coaching'}</button>` : ''}</div>`;
+    }).join('')}</div></div>`;
+}
+function newPlan(who, week, off) {
+  return { email: who.email, name: who.name || who.email,
+    ...buildPlan({ weekStart: week, stores: who.stores, scores: S.scores, off: safeOff(off || who.off, who.role), role: who.role }),
+    builtAt: new Date().toISOString(), basisDate: S.meta.latestDaily, pivots: [], dismissed: [] };
+}
+function wirePicker() { const lp = $('#lp'); if (lp) lp.onchange = () => { S.viewEmail = lp.value; viewWeek(); }; }
+function pivotCard(s) {
+  return `<div class="pivot" role="region" aria-label="Suggested change">
+    <p class="eyebrow">New numbers since Sunday</p>
+    <h3>Suggested: add ${esc(s.to)} and drop ${esc(s.from)}</h3>
+    <p>${esc(s.reasonTo)}${s.why.length ? ' ' + s.why.map(esc).join('. ') + '.' : ''} ${esc(s.reasonFrom)}${s.loses ? ` ${esc(s.from)} moves to a phone check-in this week.` : ''}</p>
+    <p class="small" style="margin:0 0 4px"><b>Rest of the week, highest priority first:</b></p>
+    <ol class="small" style="margin:0 0 12px;padding-left:20px;color:var(--ink)">${s.reorder.map(r => `<li>${esc(DAY_LONG[dow(r.date)])} ${esc(shortDate(r.date))}: <b>${esc(r.store)}</b> (need ${r.score})${r.store === s.to ? ' <span class="pill set">New</span>' : ''}</li>`).join('')}</ol>
+    <div class="row"><button class="btn accent" id="pvyes">Make the swap</button><button class="btn" id="pvno">Keep my plan</button></div>
+  </div>`;
+}
+function dayCard(d, i, plan, canEdit) {
+  const t = today(), past = d.date < t, isToday = d.date === t;
+  const sc = S.scores[d.store];
+  const kind = d.kind === 'second' ? '<span class="pill check">Check the plan</span>' : d.kind === 'first' ? '<span class="pill set">Set the plan</span>' : '';
+  const state = d.status === 'done' ? '<span class="pill done">Visited</span>' : past ? '<span class="pill off">Not logged</span>' : isToday ? '<span class="pill">Today</span>' : '';
+  const stores = S.users.find(u => u.email === plan.email)?.stores || (plan.email === S.user.email ? S.user.stores : Object.keys(plan.basis));
+  return `<article class="day ${isToday ? 'today' : ''} ${d.status === 'done' ? 'isdone' : ''}">
+    <div class="row" style="justify-content:space-between"><span class="dname">${esc(DAY_LONG[dow(d.date)])} ${esc(shortDate(d.date))}</span>${needChip(sc?.score)}</div>
+    <div class="store">${esc(d.store || 'Open day')}</div>
+    <div class="row">${kind}${state}</div>
+    ${d.status !== 'done' && sc?.parts?.length ? `<ul>${sc.parts.slice(0, 2).map(p => `<li>${esc(p.text)}</li>`).join('')}</ul>` : ''}
+    ${d.status !== 'done' && S.teams?.[d.store] && (S.teams[d.store].below.length || S.teams[d.store].slipping.length) ? `<p class="small" style="margin:0"><b>See first:</b> ${[...S.teams[d.store].below.map(r => esc(titleName(r.name)) + ' (below min)'), ...S.teams[d.store].slipping.map(r => esc(titleName(r.name)) + ' (slipping)')].slice(0, 3).join(', ')}</p>` : ''}
+    <div class="foot">
+      ${d.store ? `<button class="btn tiny ${isToday ? 'primary' : ''}" data-go="${i}">${d.status === 'done' ? 'See visit' : 'Open visit'}</button>` : ''}
+      ${canEdit && d.status !== 'done' && !past ? `<select data-swap="${i}" aria-label="Change store for ${esc(DAY_LONG[dow(d.date)])}"><option value="" disabled selected>Change store</option>${stores.filter(s => s !== d.store).map(s => `<option>${esc(s)}</option>`).join('')}</select>` : ''}
+    </div>
+  </article>`;
+}
+
+// ---------------------------------------------------------------- a visit (also the store detail page)
+async function openVisit(x) {
+  S.visit = x; S.V = null; S.vPhotos = []; S.vPlans = [];
+  try { S.vPlans = (await Promise.all([S.be.plan(x.email, weekStartOf(x.date)), S.be.plan(x.email, addDays(weekStartOf(x.date), 7))])).filter(Boolean); } catch (e) {}
+  renderShell(); window.scrollTo(0, 0);
+  try { if (x.remote) return; S.vPhotos = await S.be.photos(`${x.email}_${x.date}_${slug(x.store)}${x.remote ? '_remote' : ''}`); if (S.vPhotos.length && S.visit === x) viewVisit(); } catch (e) {}
+}
+function tileFor(label, value, sub, cls) { return `<div class="tile ${cls || ''}"><div class="tl">${esc(label)}</div><div class="tv">${value}</div><div class="tg">${sub || ''}</div></div>`; }
+const PERIODS = [['day', 'Prior day'], ['wtd', 'Week to date'], ['mtd', 'Month to date']];
+function storeTiles(snap, period = 'mtd') {
+  const m = snap?.[period] || snap?.mtd;
+  if (!m) return '<p class="muted">No numbers for this store in the latest daily report.</p>';
+  const vsCls = v => v == null ? '' : v >= 0 ? 'green' : v >= -10 ? 'amber' : 'red';
+  const goalCls = (v, g, lower) => v == null ? '' : status({ lower }, v, g);
+  const money = v => v == null ? '--' : '$' + Math.round(v).toLocaleString('en-US');
+  const p1 = v => v == null ? '--' : v.toFixed(1) + '%';
+  const tiles = [];
+  tiles.push(tileFor('Sales', money(m.k.netSales), m.vsBud.netSales != null ? `${pct(m.vsBud.netSales)} to budget` : '', vsCls(m.vsBud.netSales)));
+  tiles.push(tileFor('SPG w/ cancellations', m.k.spg != null ? '$' + m.k.spg.toFixed(2) : '--', m.vsLy.spg != null ? `${pct(m.vsLy.spg)} vs LY` : m.vsBud.spg != null ? `${pct(m.vsBud.spg)} to budget` : '', vsCls(m.vsLy.spg ?? m.vsBud.spg)));
+  tiles.push(tileFor('Close rate', p1(m.k.closeRate), m.vsBud.closeRate != null ? `${m.vsBud.closeRate > 0 ? '+' : ''}${Math.round(m.vsBud.closeRate)} bps to budget` : '', m.vsBud.closeRate == null ? '' : m.vsBud.closeRate >= 0 ? 'green' : m.vsBud.closeRate > -200 ? 'amber' : 'red'));
+  tiles.push(tileFor('Traffic', m.k.traffic != null ? Math.round(m.k.traffic).toLocaleString('en-US') : '--', m.vsLy.traffic != null ? `${pct(m.vsLy.traffic)} vs LY` : '', ''));
+  tiles.push(tileFor('Sales / hour', money(m.k.sph), `goal $${STORE_GOALS.sph}`, goalCls(m.k.sph, STORE_GOALS.sph)));
+  tiles.push(tileFor('Avg ticket', money(m.k.avgTicket), '', ''));
+  tiles.push(tileFor('Finance % of sales', p1(m.k.financePct), `goal ${STORE_GOALS.financePct}%`, goalCls(m.k.financePct, STORE_GOALS.financePct)));
+  tiles.push(tileFor('Apps to traffic', p1(m.k.appsToTraffic), `goal ${STORE_GOALS.appsToTraffic}%`, goalCls(m.k.appsToTraffic, STORE_GOALS.appsToTraffic)));
+  tiles.push(tileFor('Bedding % of sales', p1(m.k.beddingPct), `goal ${STORE_GOALS.beddingPct}%`, goalCls(m.k.beddingPct, STORE_GOALS.beddingPct)));
+  tiles.push(tileFor('Protection attach', p1(m.k.protectionAttach), `goal ${STORE_GOALS.protectionAttach}%`, goalCls(m.k.protectionAttach, STORE_GOALS.protectionAttach)));
+  tiles.push(tileFor('Delivery % of sales', p1(m.k.deliveryPct), `goal ${STORE_GOALS.deliveryPct}%`, goalCls(m.k.deliveryPct, STORE_GOALS.deliveryPct)));
+  tiles.push(tileFor('Cancellations', p1(m.k.cancelPct), `of gross, goal ${STORE_GOALS.cancelPct}% or less`, goalCls(m.k.cancelPct, STORE_GOALS.cancelPct, true)));
+  return `<div class="tiles">${tiles.join('')}</div>`;
+}
+const Speech = window.SpeechRecognition || window.webkitSpeechRecognition;
+let rec = null, recBtn = null;
+const micBtn = id => Speech ? `<button type="button" class="mic" data-mic="${id}" aria-label="Talk to text"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M12 14a3 3 0 0 0 3-3V5a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z"/></svg><span>Talk</span></button><span class="live"></span>` : '';
+function stopMic() { if (rec) { try { rec.stop(); } catch (e) {} } }
+function wireMics(root) {
+  root.querySelectorAll('[data-mic]').forEach(b => b.onclick = () => {
+    if (rec && recBtn === b) return stopMic();
+    stopMic();
+    const box = $('#' + b.dataset.mic), live = b.parentElement.querySelector('.live');
+    rec = new Speech(); recBtn = b;
+    rec.lang = 'en-US'; rec.continuous = true; rec.interimResults = true;
+    rec.onresult = e => {
+      let interim = '';
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const t = e.results[i][0].transcript.trim();
+        if (e.results[i].isFinal) { const cur = box.value.replace(/\s+$/, ''); box.value = box.tagName === 'INPUT' ? (cur ? cur + ' ' : '') + t.replace(/[.]$/, '') : (cur ? cur + (/[.!?]$/.test(cur) ? ' ' : '. ') : '') + t.charAt(0).toUpperCase() + t.slice(1); box.dispatchEvent(new Event('input')); }
+        else interim += t + ' ';
+      }
+      if (live) live.textContent = interim;
+    };
+    rec.onerror = e => {
+      if (e.error === 'not-allowed' || e.error === 'service-not-allowed') toast('Microphone is blocked. Allow it for this site in your browser settings, then tap Talk again.', true);
+      else if (e.error === 'no-speech') toast('Did not hear anything. Tap Talk and try again.', true);
+      else if (e.error !== 'aborted') toast('Talk to text stopped: ' + e.error, true);
+    };
+    rec.onend = () => { b.classList.remove('on'); b.querySelector('span').textContent = 'Talk'; if (live) live.textContent = ''; rec = null; recBtn = null; };
+    try { rec.start(); b.classList.add('on'); b.querySelector('span').textContent = 'Stop'; box.focus(); } catch (x) { toast('Could not start talk to text.', true); rec = null; }
+  });
+}
+// A one-line field with talk to text: type it or say it.
+const fieldInput = (id, label, value, field = '', dis = '', extra = '') => `
+  <div class="fieldhead"><label for="${id}">${esc(label)}</label>${dis ? '' : micBtn(id)}</div>
+  <input id="${id}" value="${esc(value || '')}" ${field ? `data-field="${field}"` : ''} ${dis} ${extra}>`;
+const fieldBox = (id, label, value, rows = 3, hint = '', field = '', dis = '') => `
+  <div class="fieldhead"><label for="${id}">${esc(label)}</label>${dis ? '' : micBtn(id)}</div>
+  ${hint ? `<p class="small" style="margin:0 0 4px">${esc(hint)}</p>` : ''}
+  <textarea id="${id}" rows="${rows}" ${field ? `data-field="${field}"` : ''} ${dis}>${esc(value || '')}</textarea>`;
+
+// ---------------------------------------------------------------- the visit
+// One page the leader works through in the store, top to bottom. It opens already knowing why they
+// are there, what to coach and who to see. Everything autosaves as a draft; Submit closes it out.
+const V_OPEN = new Set(['why', 'win', 'follow', 'focus', 'people', 'photos', 'action', 'leadercommit', 'el2', 'el3']);
+const PHOTO_MAX = 20;
+const PHOTO_ELS = ['assortment', 'visual'];   // these elements always get a photo block
+const REMOTE_TYPES = ['Phone call', 'Video call', 'Teams or text'];
+const DRILL_KEYS = ['sph', 'closeRate', 'avgTicket', 'effMargin', 'financePct', 'appsToTraffic', 'beddingPct', 'protectionPct', 'deliveryPct', 'cancelPct'];
+function blankVisit(x, who) {
+  return { id: `${x.email}_${x.date}_${slug(x.store)}${x.remote ? '_remote' : ''}`, remote: !!x.remote, email: x.email, name: who.name || x.email, role: who.role, store: x.store, date: x.date,
+    kind: x.remote ? 'remote' : x.kind || 'drop-in', vtype: x.remote ? 'Phone call' : kindToType(x.kind), status: 'draft', leaderWin: { name: '', text: '' }, follow: {}, focus: null,
+    consultants: [], checks: {}, segs: {}, aor: {}, elNotes: {}, actions: [{}, {}, {}], reflection: '', working: '', notes: '' };
+}
+const localKey = id => `1915fl_draft_${id}`;
+function localGet(id) { try { return JSON.parse(localStorage.getItem(localKey(id)) || 'null'); } catch (e) { return null; } }
+function localSet(v) { try { localStorage.setItem(localKey(v.id), JSON.stringify(v)); } catch (e) {} }
+function localDrop(id) { try { localStorage.removeItem(localKey(id)); } catch (e) {} }
+
+async function viewVisit() {
+  const x = S.visit, v = $('#view');
+  const who = S.users.find(u => u.email === x.email) || S.user;
+  const id = `${x.email}_${x.date}_${slug(x.store)}${x.remote ? '_remote' : ''}`;
+  const saved = S.visits.find(y => y.id === id);
+  const local = localGet(id);
+  // Take whichever copy is newer: the one on this device (spotty store wifi) or the saved one.
+  const V = S.V && S.V.id === id ? S.V : structuredClone((local && (!saved || (local.at || '') > (saved.at || ''))) ? local : saved || blankVisit(x, who));
+  S.V = V;
+  if (!V.actions?.length) V.actions = [{}, {}, {}];
+  const canLog = (x.email === S.user.email || isAdmin()) && x.date <= today();
+  const later = x.date > today();
+  const snap = S.daily?.stores?.[x.store];
+  const sc = S.scores[x.store];
+  const env = environment(snap);
+  const period = S.vPeriod || (snap?.day ? 'day' : 'mtd');
+  const prior = S.visits.filter(y => y.store === x.store && y.date < x.date && y.id !== id && y.status !== 'draft').sort((a, b) => b.date.localeCompare(a.date))[0]
+    || S.visits.filter(y => y.store === x.store && y.date < x.date && y.id !== id).sort((a, b) => b.date.localeCompare(a.date))[0];
+  const priorSum = prior ? visitSummary(prior) : null;
+  const priorRaw = prior ? (prior.actions || []).filter(hasCommitment) : [];
+  const focusAll = storeFocus(snap, 4);
+  if (!V.focus) V.focus = focusAll.slice(0, 2).map(f => f.key);
+  // Opened from the daily brief: bring in the store number or person that triggered it.
+  if (x.focusKey && canLog && !V.focus.includes(x.focusKey) && focusAll.some(f => f.key === x.focusKey)) V.focus = [x.focusKey, ...V.focus].slice(0, 2);
+  if (x.addCid && canLog && !V.consultants.some(c => c.cid === x.addCid)) {
+    const ap = (S.rsa?.people || []).find(q => q.cid === x.addCid);
+    if (ap) { const rk = x.lever && STORE_TO_RSA[x.lever]; const dk = { creditApps: 'appsToTraffic', protectionSph: 'protectionPct', beddingSph: 'beddingPct' }[rk] || rk;
+      V.consultants.push({ cid: ap.cid, name: ap.name, why: x.why || 'added', lever: x.lever || null, notes: '', practice: {}, ...(dk ? { drill: { key: dk, title: drillFor(dk).title } } : {}) }); }
+    x.addCid = null;
+  }
+  if (canLog && !later && !V.actions.some(hasCommitment)) fillCommitments(V, focusAll);
+  // Wins to celebrate, built from the numbers: store results, last visit's commitments that moved,
+  // and the people carrying the store. The leader win box starts with these; change anything.
+  const winList = (() => {
+    const out = [];
+    if (snap?.mtd) winsFor(snap.mtd).forEach(w => out.push(`${w} this month`));
+    if (snap?.wtd?.vsBud?.netSales >= 0) out.push(`Sales ${pct(snap.wtd.vsBud.netSales)} to budget this week`);
+    priorRaw.forEach(a => { const au = autoFollow(a, snap, V); if (au?.v === 'yes') out.push(`Hit last visit's commitment: ${commitmentText(a).split('. ')[0]}`); else if (au?.v === 'partial') out.push(`Moving on last visit's commitment: ${String(a.what || '').trim()}, ${au.text.charAt(0).toLowerCase() + au.text.slice(1).replace(/\.$/, '')}`); });
+    const seen = new Set();
+    focusAll.concat(storeFocus(snap, 6)).forEach(f => helpers(S.rsa?.people || [], x.store, f.key, DEFAULT_GOALS, paceFactor(S.rsa?.to), 1).forEach(h => {
+      if (seen.has(h.cid) || seen.size >= 3) return; seen.add(h.cid);
+      const nm = titleName(h.name), val = fmtMetric(h.key, h.value);
+      out.push(f.key === 'cancelPct' ? `${nm} has the fewest cancels in the store at ${val}` : h.key === 'creditApps' ? `${nm} leads the store in credit apps with ${val}` : h.key === 'sph' ? `${nm} leads the store at ${val} an hour` : `${nm} leads the store in ${(PLAIN_LABELS[f.key] || f.label).toLowerCase()} at ${val}`); }));
+    (S.teams?.[x.store]?.rising || []).slice(0, 2).forEach(r => out.push(`${titleName(r.name)} is up to $${Math.round(r.wk.sph)} an hour this week, from $${Math.round(r.wk.priorSph)}`));
+    return [...new Set(out)].slice(0, 6);
+  })();
+  if (canLog && !later) {
+    V.leaderWin = V.leaderWin || {};
+    if (!V.leaderWin.name) {
+      const lastName = S.visits.filter(y => y.store === x.store && y.id !== id).sort((a, b) => b.date.localeCompare(a.date)).map(y => y.leaderCommit?.name || y.leaderWin?.name).find(n => n && n !== 'Store leader');
+      const asm = (S.roster || []).find(r => r.store === x.store && r.title === 'ASM')?.name;
+      const listed = (S.storeLeaders || []).find(l => l.store === x.store)?.name;
+      V.leaderWin.name = listed || lastName || (asm ? titleName(asm) : '');
+    }
+    if (!V.leaderWin.text && !V.leaderWin.touched && winList.length) { V.leaderWin.text = winList.map(w => `- ${w}.`).join('\n'); V.leaderWin.suggested = true; }
+  }
+  if (canLog && !later && !V.leaderCommit?.what) {
+    const f = focusAll.find(q => V.focus.includes(q.key));
+    const nextDay = (S.vPlans || []).flatMap(p => p.days || []).filter(d => d.store === x.store && d.date > x.date).map(d => d.date).sort()[0] || addDays(x.date, 7);
+    if (f) V.leaderCommit = { ...(V.leaderCommit || {}), key: f.key, what: `Team ${f.label.toLowerCase()}`, from: fmtMetric(f.key, f.value), to: fmtMetric(f.key, f.target ?? f.goal), by: nextDay, supportBy: V.leaderCommit?.supportBy || nextDay };
+  }
+  const people = S.rsa?.people || [];
+  const picks = rsaPicks(people, x.store, DEFAULT_GOALS, paceFactor(S.rsa?.to), 3, S.weeks || {});
+  if (!V.consultants.length && picks.length && V.status === 'draft' && !saved) V.consultants = picks.map(p => ({ cid: p.cid, name: p.name, why: p.why, notes: '', practice: {} }));
+  const storePeople = people.filter(p => p.store === x.store).sort((a, b) => b.k.sph - a.k.sph);
+  const team = S.teams?.[x.store];
+  const leader = leaderOf(x.store);
+  const tagText = { below: 'Below minimum', slipping: 'Slipping this week', gap: 'Biggest gap', model: 'Recognize and model', added: 'Added', drag: 'Pulling a store number down' };
+  const dis = canLog ? '' : 'disabled';
+  const tri = (path, val, opts = [['yes', 'Yes'], ['partial', 'Partial'], ['no', 'No']]) =>
+    `<div class="tri" role="group">${opts.map(([k, l]) => `<button type="button" data-path="${path}" data-v="${k}" class="${val === k ? 'on' : ''}" ${dis}>${l}</button>`).join('')}</div>`;
+  const sec = (key, num, title, q, body, accent) => `<section class="vsec ${V_OPEN.has(key) ? 'open' : ''}" data-sec="${key}">
+    <button type="button" class="vsec-hd" aria-expanded="${V_OPEN.has(key)}"><span class="vnum ${accent ? 'acc' : ''}">${num}</span><span class="vtl"><b>${title}</b><small>${q}</small></span><span class="chev" aria-hidden="true">›</span></button>
+    <div class="vsec-bd">${body}</div></section>`;
+  const photoCard = ph => `<figure class="pcard">
+      <img src="${ph.data}" alt="${esc(ph.caption || 'Visit photo')}">
+      <figcaption><span class="pill">${esc(ph.el === 'general' ? 'General' : ELEMENTS.find(e => e.key === ph.el)?.t || ph.el)}${ph.item ? ' · ' + esc(ph.item) : ''}</span>
+        ${canLog ? fieldBox(`pc_${ph.id}`, 'Comments', ph.caption, 2, '', '', '').replace('<textarea ', `<textarea data-pcap="${esc(ph.id)}" placeholder="What does this show? What needs to change?" `) : ph.caption ? `<p class="small">${esc(ph.caption)}</p>` : ''}
+        ${canLog ? `<button type="button" class="link" data-delphoto="${esc(ph.id)}" style="color:var(--red);padding-left:0">Remove</button>` : ''}</figcaption></figure>`;
+  const photoStrip = el => { const list = (S.vPhotos || []).filter(p => p.el === el); return list.length ? `<div class="gallery" style="margin-top:10px">${list.map(photoCard).join('')}</div>` : ''; };
+  const photoBtns = (el, item = '') => canLog ? `<span class="row" style="gap:6px"><button type="button" class="btn tiny primary" data-photo="${el}" data-item="${esc(item)}" data-src="cam">Take a photo</button><button type="button" class="btn tiny" data-photo="${el}" data-item="${esc(item)}" data-src="lib">From library</button></span>` : '';
+  const flagged = v => v === 'no' || v === 'partial' || v === 'needs';
+  const kpiCell = (p, key, label, fmtFn, lower) => {
+    const g = goalsFor(DEFAULT_GOALS, x.store)[key], val = p.k?.[key];
+    const cls = val == null || g == null ? '' : status({ lower }, val, g);
+    return `<div class="kc ${cls}"><span>${label}</span><b>${val == null ? '--' : fmtFn(val)}</b></div>`;
+  };
+  const money = n => '$' + Math.round(n).toLocaleString('en-US');
+  const p1 = n => n.toFixed(1) + '%';
+
+  const html = `
+  <div class="spread">
+    <div>
+      <button class="link" id="back" style="padding-left:0">‹ Back</button>
+      <p class="eyebrow">${x.remote ? 'Remote coaching · ' : 'Full-day visit · '}${esc(longDate(x.date))} · ${esc(who.name || who.email)}${leader && leader.email !== who.email ? ' · Market Leader: ' + esc(leader.name || leader.email) : ''}</p>
+      <h2 class="big" style="margin:0">${esc(x.store)}</h2>
+      <p class="small" style="margin:4px 0 0">${dataLine()}</p>
+    </div>
+    <div class="row">
+      <label for="vtype" style="margin:0">Visit type<select id="vtype" ${dis}>${(x.remote ? REMOTE_TYPES : VISIT_TYPES).map(t => `<option ${V.vtype === t ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
+      ${needChip(sc?.score)}
+    </div>
+  </div>
+  ${later ? `<div class="warnbox">This visit is on ${esc(longDate(x.date))}. Use it to prep; you can fill it in that day.</div>` : ''}
+  ${env ? `<div class="env ${env.kind}"><b>${env.kind === 'headwind' ? 'Headwind.' : env.kind === 'tailwind' ? 'Tailwind.' : 'Normal traffic.'}</b> ${esc(env.text)}</div>` : ''}
+
+  ${sec('why', '1', 'Why you are here', 'Numbers are context. Coach the behavior and the numbers follow.', `
+    ${sc?.parts?.length ? `<ul class="whylist">${sc.parts.slice(0, 5).map(p => `<li>${esc(p.text)}</li>`).join('')}</ul>` : '<p class="small">No flags. Use the visit to lock in what is working.</p>'}
+    <div class="ptog" role="group" aria-label="Period">${PERIODS.filter(([k]) => snap?.[k]).map(([k, l]) => `<button type="button" data-period="${k}" class="${period === k ? 'on' : ''}">${l}</button>`).join('')}</div>
+    ${storeTiles(snap, period)}`)}
+
+  ${sec('win', '★', 'Leader win', 'Start here. Celebrate the leader before anything else.', `
+    ${winList.length ? `<div class="wins"><p class="eyebrow" style="margin:0 0 4px">Wins to celebrate</p><ul>${winList.map(w => `<li>${esc(w)}</li>`).join('')}</ul></div>` : '<p class="small muted">No wins in the numbers yet. Find one on the floor and call it out.</p>'}
+    <div style="margin-bottom:10px">${fieldInput('lwname', 'Leader', V.leaderWin?.name, 'leaderWin.name', dis, 'placeholder="Leader name" style="width:100%"')}</div>
+    ${fieldBox('lwtext', 'What you will celebrate with the leader and the team', V.leaderWin?.text, 4, V.leaderWin?.suggested ? 'Started from the wins above. Add what you saw on the floor.' : '', 'leaderWin.text', dis)}`, true)}
+
+  ${sec('follow', '↻', "Last visit's commitments", prior ? `From ${esc(dayLabel(prior.date))}${prior.email !== x.email ? ' (' + esc(prior.name) + ')' : ''}. Review each one with the leader.` : 'No earlier visit to this store.', (priorSum?.commitments.length || priorSum?.leaderCommit || priorSum?.support) ? `
+    ${priorSum.commitments.map((c, i) => { const au = autoFollow(priorRaw[i], snap, V); if (canLog) setPath(V, `follow.${i}`, au?.v ?? null);
+      return `<div class="item"><div class="txt">${esc(c)}</div>${followBadge(au?.v, au)}</div>`; }).join('')}
+    ${priorSum.fixes.length ? `<p class="small" style="margin-top:10px">6 Elements flagged last time: ${priorSum.fixes.map(esc).join(', ')}</p>` : ''}
+    ${(() => { const au = priorSum.leaderCommit ? autoFollow(prior.leaderCommit, snap, V) : null; if (canLog) setPath(V, 'follow.lc', au?.v ?? null); S.lcAuto = au; return ''; })()}
+    ${priorSum.leaderCommit ? `<div class="item"><div class="txt"><b>${esc(priorSum.leaderName || 'Store leader')} committed to:</b> ${esc(priorSum.leaderCommit)}</div>${followBadge(S.lcAuto?.v, S.lcAuto)}</div>` : ''}
+    ${priorSum.support ? `<div class="item"><div class="txt"><b>Support promised by ${esc(prior.name)}:</b> ${esc(priorSum.support)}</div><p class="small muted" style="margin:4px 0 0">Review it with the leader.</p></div>` : ''}`
+    : '<p class="small">Nothing to check. Your action plan today becomes the start of the next visit.</p>', true)}
+
+  ${sec('focus', '2', 'Coach the team on two things', 'The two furthest from goal, and the people behind each one. We move the number through people.', focusAll.length ? `
+    <div class="focus">${focusAll.map((f, i) => { const dr = draggers(people, x.store, f.key, DEFAULT_GOALS, paceFactor(S.rsa?.to)); const hp = helpers(people, x.store, f.key, DEFAULT_GOALS, paceFactor(S.rsa?.to), 2); const on = V.focus.includes(f.key); return `<div class="fcard pick ${on ? 'on' : ''}" data-fcard="${f.key}">
+      <span class="row" style="justify-content:space-between"><span class="eyebrow">${esc(f.coach.pillar)}</span><button type="button" class="btn tiny ${on ? 'primary' : ''}" data-focus="${f.key}" aria-pressed="${on}" ${dis}>${on ? 'Coaching this ✓' : 'Coach this'}</button></span>
+      <b class="fl">${esc(f.label)}</b>
+      <span class="small">Now <b>${esc(fmtMetric(f.key, f.value))}</b>, goal ${esc(fmtMetric(f.key, f.goal))}. ${esc(f.coach.why)}</span>
+      <span class="asks">${f.coach.ask.map(q => `<span>• ${esc(q)}</span>`).join('')}</span>
+      <span class="do"><b>Do this:</b> ${esc(f.coach.doThis)}</span>
+      ${dr.length ? `<div class="drag"><p class="eyebrow" style="margin:0 0 4px">Who's pulling this down</p>${dr.map(d => {
+        const added = V.consultants.some(c => c.cid === d.cid);
+        return `<div class="dragrow"><span><b>${esc(titleName(d.name))}</b> <span class="small">${esc(fmtMetric(d.key, d.value))} vs ${esc(fmtMetric(d.key, d.goal))} goal, ${esc(d.impactText)}</span></span>${canLog ? `<button type="button" class="btn tiny" data-dragc="${esc(d.cid)}" data-lever="${f.key}" ${added ? 'disabled' : ''}>${added ? 'On this visit' : 'Coach'}</button>` : ''}</div>`; }).join('')}
+        ${f.key === 'closeRate' ? '<p class="small muted" style="margin:4px 0 0">Close rate isn\'t in the RSA report by consultant, so this uses sales per hour.</p>' : ''}</div>`
+      : S.rsa ? `<p class="small muted" style="margin:0">Nobody on the team is below goal on this one. It's a process issue, so coach it with the whole team in the huddle.</p>` : ''}
+      ${hp.length ? `<div class="drag help"><p class="eyebrow" style="margin:0 0 4px">Who's carrying this</p>${hp.map(d => {
+        const added = V.consultants.some(c => c.cid === d.cid);
+        return `<div class="dragrow"><span><b>${esc(titleName(d.name))}</b> <span class="small">${esc(fmtMetric(d.key, d.value))} vs ${esc(fmtMetric(d.key, d.goal))} goal, ${esc(d.impactText)}</span></span>${canLog ? `<button type="button" class="btn tiny" data-helpc="${esc(d.cid)}" data-lever="${f.key}" ${added ? 'disabled' : ''}>${added ? 'On this visit' : 'Recognize'}</button>` : ''}</div>`; }).join('')}
+        <p class="small muted" style="margin:4px 0 0">Have them show the team how they do it in the huddle.</p></div>`
+      : S.rsa ? `<p class="small muted" style="margin:6px 0 0">Nobody is above goal on this one yet.</p>` : ''}
+    </div>`; }).join('')}</div>` : '<p class="small muted">No store numbers yet.</p>')}
+
+  ${sec('people', '3', 'Consultants coached', `Who to see first. Coach one thing with each person. Numbers are month to date${S.rsa?.to ? ' through ' + esc(shortDate(S.rsa.to)) : ''}.`, `
+    ${V.consultants.map((c, ci) => {
+      const p = people.find(q => q.cid === c.cid) || { name: c.name, k: {} };
+      const pk = picks.find(q => q.cid === c.cid);
+      const wk = S.weeks?.[c.cid];
+      return `<div class="ccard">
+        <div class="row" style="justify-content:space-between"><h3 style="margin:0">${esc(titleName(c.name))}${p.store && p.store !== x.store ? ` <span class="small muted">(${esc(p.store)})</span>` : ''}</h3><span class="row" style="gap:6px"><span class="tag ${c.why}">${tagText[c.why] || ''}</span>${canLog ? `<button type="button" class="link" data-rmc="${ci}" aria-label="Remove ${esc(titleName(c.name))}">Remove</button>` : ''}</span></div>
+        ${p.k?.sph != null ? `<div class="kpis">
+          ${kpiCell(p, 'sph', 'SPH', money)}${wk?.hours >= 1 && wk.sph != null ? `<div class="kc ${wk.priorSph && wk.sph < wk.priorSph * 0.75 ? 'red' : wk.priorSph && wk.sph > wk.priorSph * 1.25 ? 'green' : ''}"><span>This week</span><b>${money(wk.sph)}</b></div>` : ''}
+          ${kpiCell(p, 'financePct', 'Finance', p1)}${kpiCell(p, 'beddingPct', 'Bedding', p1)}${kpiCell(p, 'protectionPct', 'Protection', p1)}${kpiCell(p, 'creditApps', 'Apps', n => String(Math.round(n)))}${kpiCell(p, 'cancelPct', 'Cancel', p1, true)}
+        </div>` : ''}
+        ${x.remote ? `<div class="segwho"><p class="small" style="margin:0 0 6px"><b>How are you coaching ${esc(titleName(c.name).split(' ')[0])}?</b></p>${tri(`consultants.${ci}.mode`, c.mode || 'direct', [['direct', 'Directly with them'], ['leader', 'Through the store leader']])}</div>` : ''}
+        ${(() => { const cc = consultantCoaching({ p, store: p.store || x.store, why: c.why, wk, goals: DEFAULT_GOALS, pace: paceFactor(S.rsa?.to), teamFocus: focusAll.find(f => V.focus.includes(f.key))?.label, lever: c.lever });
+          const viaLeader = x.remote && c.mode === 'leader';
+          const text = viaLeader ? leaderCoachText(cc, titleName(c.name).split(' ')[0], V.leaderWin?.name || 'the store leader') : cc.text;
+          return `<div class="suggest"><p class="eyebrow">${viaLeader ? 'Coach the leader to coach them' : 'Suggested coaching'}</p><div class="stext">${esc(text)}</div>
+          ${canLog ? `<div class="row" style="margin-top:8px"><button type="button" class="btn tiny primary" data-usec="${ci}">Use this in my notes</button><span class="small muted">or write or say your own below</span></div>` : ''}</div>`; })()}
+        ${(() => {
+          const cc = consultantCoaching({ p, store: p.store || x.store, why: c.why, wk, goals: DEFAULT_GOALS, pace: paceFactor(S.rsa?.to), lever: c.lever });
+          // The practice follows what this person is being coached on, unless the leader picked a different one or already scored it.
+          const scored = Object.keys(c.drill?.scored || {}).length;
+          if (!c.drill?.key || (!c.drill.manual && !scored && c.drill.key !== cc.drillKey)) c.drill = { ...(c.drill || {}), key: cc.drillKey, title: cc.drill.title };
+          const firstName = titleName(c.name).split(' ')[0];
+          const onWhat = cc.items.find(f => !f.stretch) || cc.items[0];
+          const dr = drillFor(c.drill.key), d = c.drill, n = Object.keys(d.scored || {}).length;
+          const opts = DRILL_KEYS.map(k => [k, drillFor(k).title]);
+          if (x.remote && c.mode === 'leader') {
+            const L = V.leaderWin?.name ? titleName(V.leaderWin.name).split(' ')[0] : 'the leader', ld = c.lead || {};
+            return `<div class="drill">
+              <p class="eyebrow" style="margin:0">Practice the coaching conversation with ${esc(L)}</p>
+              <h4>You play ${esc(firstName)}. ${esc(L)} coaches you.</h4>
+              <p class="small">Act like ${esc(firstName)} would. Push back a little. Then have ${esc(L)} run the ${esc(dr.title.toLowerCase())} practice with ${esc(firstName)} on the floor.</p>
+              <p class="small" style="margin:6px 0 0"><b>Score ${esc(L)}'s coaching</b></p>
+              ${COACH_WATCH.map((t, i) => `<div class="item"><div class="txt">${esc(t)}</div>${tri(`consultants.${ci}.lead.scored.${i}`, ld.scored?.[i])}</div>`).join('')}
+              <div class="two">
+                <div>${fieldBox(`lw${ci}`, 'What the leader did well', ld.well, 2, '', `consultants.${ci}.lead.well`, dis)}</div>
+                <div>${fieldBox(`la${ci}`, 'One adjustment for the leader', ld.adjust, 2, '', `consultants.${ci}.lead.adjust`, dis)}</div>
+              </div>
+              <label for="lwhen${ci}" style="max-width:260px;margin-top:8px">${esc(L)} coaches ${esc(firstName)} by<input id="lwhen${ci}" type="date" data-field="consultants.${ci}.lead.by" value="${esc(ld.by || addDays(x.date, 1))}" ${dis}></label>
+              <p class="small muted" style="margin:4px 0 0">Follow up after to hear how it went.</p>
+            </div>`;
+          }
+          return `<div class="drill">
+            <div class="row" style="justify-content:space-between"><p class="eyebrow" style="margin:0">${esc(firstName)}'s stand-up practice${onWhat ? ` on ${esc(onWhat.label.toLowerCase())}` : ''}</p>
+              <select id="dk${ci}" data-drill="${ci}" aria-label="Practice drill" ${dis}>${opts.map(([k, t]) => `<option value="${k}" ${drillFor(k).title === dr.title ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></div>
+            <h4>${esc(dr.title)}</h4>
+            <p class="small"><b>You play the guest:</b> ${esc(dr.guest)}</p>
+            <p class="small" style="margin:6px 0 0"><b>Rep 1. Score what you see</b> <span class="muted dcount" data-total="${dr.watch.length}">(${n} of ${dr.watch.length})</span></p>
+            ${dr.watch.map((t, i) => `<div class="item"><div class="txt">${esc(t)}</div>${tri(`consultants.${ci}.drill.scored.${i}`, d.scored?.[i])}</div>`).join('')}
+            <div class="two">
+              <div>${fieldBox(`dw${ci}`, 'What they did well', d.well, 2, '', `consultants.${ci}.drill.well`, dis)}</div>
+              <div>${fieldBox(`da${ci}`, 'One adjustment', d.adjust, 2, '', `consultants.${ci}.drill.adjust`, dis)}</div>
+            </div>
+            <p class="small" style="margin:8px 0 6px"><b>Rep 2. Run it again with the adjustment</b></p>
+            ${tri(`consultants.${ci}.drill.rerun`, d.rerun, [['better', 'Better'], ['same', 'Same'], ['none', 'Did not rerun']])}
+            <details class="prac" ${Object.keys(c.practice || {}).length ? 'open' : ''} style="margin-top:10px"><summary>Full Core 4 run (optional) <span class="small muted">${Object.keys(c.practice || {}).length} of ${PRACTICE.length} scored</span></summary>
+              ${PRACTICE.map((t, i) => `<div class="item"><div class="txt">${esc(t)}</div>${tri(`consultants.${ci}.practice.${i}`, c.practice?.[i])}</div>`).join('')}
+            </details>
+          </div>`; })()}
+        <div class="cnotes">${fieldBox(`cn${ci}`, `Notes on ${titleName(c.name).split(' ')[0]}`, c.notes, 4, 'What you saw, what you talked about, what they said. Type it or tap Talk.', `consultants.${ci}.notes`, dis)}</div>
+      </div>`;
+    }).join('') || `<p class="small muted">${S.rsa ? 'No consultants matched to this store in the RSA report.' : 'Upload the RSA report to get consultant picks.'}</p>`}
+    ${canLog ? `<div class="addc"><div style="flex:1;min-width:220px">${fieldInput('addc', 'Coach any consultant', '', '', '', 'list="addcList" placeholder="Start typing a name" autocomplete="off" style="width:100%"')}</div>
+      <button type="button" class="btn" id="addcgo">Add</button></div>
+      <datalist id="addcList">${[...storePeople, ...people.filter(p => p.store !== x.store).sort((a, b) => a.name.localeCompare(b.name))].filter(p => !V.consultants.some(c => c.cid === p.cid)).map(p => `<option value="${esc(titleName(p.name))}">${esc(p.store || 'No store')} · $${Math.round(p.k.sph)} SPH</option>`).join('')}</datalist>
+      <p class="small muted" style="margin:4px 0 0">This store's team shows first. Anyone in the RSA report works, and a name not in the report can be coached too.</p>` : ''}
+    <div class="cnotes" style="margin-top:12px">${fieldBox('teamnotes', 'Notes on the team', V.teamNotes, 3, 'Anything about the sales team as a whole: energy, staffing, who is ready for more.', 'teamNotes', dis)}</div>
+    ${team?.rows.length ? `<details style="margin-top:10px"><summary class="small" style="cursor:pointer;font-weight:600;color:var(--navy)">Whole team: month vs this week (${team.rows.length})</summary>
+      <div class="scroller" style="margin-top:8px"><table class="grid"><thead><tr><th>Consultant</th><th class="num">Month SPH</th><th class="num">Before this week</th><th class="num">This week</th><th class="num">Hrs</th><th>Flag</th></tr></thead><tbody>
+      ${team.rows.map(r => `<tr><td class="nm">${esc(titleName(r.name))}</td><td class="num ${r.below ? 'bad' : ''}">$${Math.round(r.sph)}</td><td class="num">${r.wk.priorSph ? '$' + Math.round(r.wk.priorSph) : '--'}</td><td class="num ${r.slipping ? 'bad' : r.rising ? 'good' : ''}">${r.wk.sph != null && r.wk.hours >= 1 ? '$' + Math.round(r.wk.sph) : '--'}</td><td class="num">${r.wk.hours >= 1 ? Math.round(r.wk.hours) : '--'}</td><td>${r.below ? '<span class="tag below">Below min</span>' : r.slipping ? '<span class="tag slipping">Slipping</span>' : r.rising ? '<span class="tag model">Rising</span>' : ''}</td></tr>`).join('')}
+      </tbody></table></div></details>` : ''}`)}
+
+  ${x.remote ? '' : ELEMENTS.map(e => sec('el' + e.n, e.n, e.t, e.q, `
+    ${e.key === 'culture' ? `<p class="small">Score the value segments from something you saw today: watch a team member with a live guest, or run it as a practice with them.</p>` + SEGMENTS.map((g, gi) => { const sm = V.segMeta?.[gi] || {};
+      return `<div class="seggrp"><p class="eyebrow">${esc(g.name)}</p><p class="small">${esc(g.must)}</p>
+      <div class="segwho">
+        ${tri(`segMeta.${gi}.how`, sm.how, [['observed', 'Watched a live guest'], ['practice', 'Practiced with them']])}
+        <label for="segp${gi}" style="margin:8px 0 0">Team member<select id="segp${gi}" data-segp="${gi}" ${dis}><option value="">Choose…</option>${storePeople.map(p => `<option value="${esc(p.cid)}" ${sm.cid === p.cid ? 'selected' : ''}>${esc(titleName(p.name))}</option>`).join('')}${V.consultants.filter(c => !storePeople.some(p => p.cid === c.cid)).map(c => `<option value="${esc(c.cid)}" ${sm.cid === c.cid ? 'selected' : ''}>${esc(titleName(c.name))}</option>`).join('')}</select></label>
+      </div>
+      ${g.items.map((t, i) => `<div class="item"><div class="txt">${esc(t)}</div>${tri(`segs.${gi}.${i}`, V.segs?.[gi]?.[i])}</div>`).join('')}
+      ${fieldBox(`segn${gi}`, 'What you saw', sm.notes, 2, '', `segMeta.${gi}.notes`, dis)}</div>`; }).join('') : ''}
+    ${e.items.map((t, i) => `<div class="item"><div class="txt">${esc(t)}</div>${tri(`checks.${e.key}.${i}`, V.checks?.[e.key]?.[i])}
+      ${PHOTO_ELS.includes(e.key) ? `<div class="iphoto" ${flagged(V.checks?.[e.key]?.[i]) ? '' : 'hidden'}><span class="small warn">Get a photo of this for the team.</span>${photoBtns(e.key, t)}</div>` : ''}</div>`).join('')}
+    ${e.aor ? `<p class="small">Walk every area of responsibility. Heroes leading, clean displays, pricing and POP right.</p>${AORS.map(a => `<div class="item"><div class="txt">${esc(a)}</div>${tri(`aor.${a}`, V.aor?.[a], [['pass', 'Pass'], ['needs', 'Needs work']])}
+      <div class="iphoto" ${flagged(V.aor?.[a]) ? '' : 'hidden'}><span class="small warn">Get a photo of this area.</span>${photoBtns(e.key, a)}</div></div>`).join('')}` : ''}
+    ${PHOTO_ELS.includes(e.key) ? `<div class="elphotos"><div class="spread" style="margin:0 0 6px"><b class="small">Photos and comments for ${esc(e.t)}</b>${photoBtns(e.key)}</div>
+      ${photoStrip(e.key) || '<p class="small muted" style="margin:0">No photos yet. Take one of what you see, good or bad, and say what it shows.</p>'}</div>` : ''}
+    ${fieldBox(`eln${e.n}`, 'Notes', V.elNotes?.[e.key], 2, '', `elNotes.${e.key}`, dis)}
+    ${!PHOTO_ELS.includes(e.key) ? `${canLog ? `<div style="margin-top:8px">${photoBtns(e.key)}</div>` : ''}${photoStrip(e.key)}` : ''}`)).join('')}
+
+  ${x.remote ? `<div class="warnbox">This is a remote visit, so there's no 6 Elements walk or photos. Go over the numbers with the leader, coach the focus items and the consultants, and set commitments.</div>` : sec('photos', '▣', 'Photos', 'Take pictures of what you saw. Tag each one and add a caption.', `
+    ${canLog ? `<div class="photobar">
+      <label for="ptag" style="margin:0">Tag to<select id="ptag">${[['general', 'General'], ...ELEMENTS.map(e => [e.key, `${e.n}. ${e.t}`])].map(([k, l]) => `<option value="${k}" ${S.pTag === k ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></label>
+      <button type="button" class="btn primary" id="pcam">Take a photo</button>
+      <button type="button" class="btn" id="plib">Add from library</button>
+      <span class="small muted">${(S.vPhotos || []).length} of ${PHOTO_MAX}</span></div>` : ''}
+    <div class="gallery">${(S.vPhotos || []).map(photoCard).join('') || '<p class="small muted">No photos yet.</p>'}</div>`)}
+
+  ${sec('action', '✓', 'Action plan', 'Up to 3 commitments, each from X to Y by a date. We fill in suggestions. Change anything.', `
+    ${[0, 1, 2].map(i => { const a = V.actions[i] || {}; return `<div class="ap"><div class="row" style="justify-content:space-between"><p class="eyebrow" style="margin:0">Commitment ${i + 1}</p>${a.suggested ? '<span class="pill check">Suggested</span>' : ''}</div>
+      ${fieldInput(`apw${i}`, 'What', a.what || a.behavior, `actions.${i}.what`, dis, 'placeholder="The behavior or number" style="width:100%"')}
+      <div class="two">
+        <div>${fieldInput(`apf${i}`, 'From (today)', a.from, `actions.${i}.from`, dis, 'placeholder="Where it is now" style="width:100%"')}</div>
+        <div>${fieldInput(`apt${i}`, 'To', a.to, `actions.${i}.to`, dis, 'placeholder="Where it will be" style="width:100%"')}</div>
+      </div>
+      ${fieldBox(`aph${i}`, 'How', a.how, 2, '', `actions.${i}.how`, dis)}
+      <div class="row"><div style="flex:1;min-width:180px">${fieldInput(`apo${i}`, 'Owner', a.owner, `actions.${i}.owner`, dis, 'style="width:100%"')}</div>
+      <label for="apd${i}" style="margin:0">By<input id="apd${i}" type="date" data-field="actions.${i}.due" value="${esc(a.due || '')}" ${dis}></label></div>
+      <p class="small preview" id="apv${i}" ${hasCommitment(a) ? '' : 'hidden'}>${hasCommitment(a) ? esc(commitmentText(a)) : ''}</p></div>`; }).join('')}
+    ${canLog ? `<button type="button" class="btn" id="apsugg">Suggest commitments</button> <span class="small muted">Fills any empty ones from your focus items, 6 Elements fixes and practice results.</span>` : ''}
+    <div style="margin-top:12px">${fieldBox('vwork', 'What is working (goes in the recap message)', V.working, 2, '', 'working', dis)}</div>`, true)}
+
+  ${sec('leadercommit', '✓', 'Store leader notes', `Notes on what the leader commits to, and the support they need from ${who.role === 'director' ? 'their director' : 'their Market Leader'}.`, `
+    <div style="margin-bottom:10px">${fieldInput('lcname', 'Store leader', V.leaderCommit?.name || V.leaderWin?.name, 'leaderCommit.name', dis, 'placeholder="Leader name" style="width:100%"')}</div>
+    <p class="small" style="margin:0 0 6px"><b>I commit to</b> <span class="muted">(in their words, from X to Y by a date. We suggest one; change anything.)</span></p>
+    ${fieldInput('lcwhat', 'What', V.leaderCommit?.what, 'leaderCommit.what', dis, 'placeholder="The behavior or number" style="width:100%"')}
+    <div class="two">
+      <div>${fieldInput('lcfrom', 'From', V.leaderCommit?.from, 'leaderCommit.from', dis, 'placeholder="Where it is now" style="width:100%"')}</div>
+      <div>${fieldInput('lcto', 'To', V.leaderCommit?.to, 'leaderCommit.to', dis, 'placeholder="Where it will be" style="width:100%"')}</div>
+    </div>
+    <label for="lcby" style="max-width:220px">By<input id="lcby" type="date" data-field="leaderCommit.by" value="${esc(V.leaderCommit?.by || '')}" ${dis}></label>
+    ${fieldBox('lcsupport', `Support I need from ${esc(who.name || 'you')}`, V.leaderCommit?.support, 2, 'People, schedule, product, training, a call with someone. Be specific.', 'leaderCommit.support', dis)}
+    <label for="lcsby" style="max-width:220px">Support by<input id="lcsby" type="date" data-field="leaderCommit.supportBy" value="${esc(V.leaderCommit?.supportBy || '')}" ${dis}></label>
+    ${fieldBox('lcnotes', 'Notes', V.leaderCommit?.notes, 3, 'Anything else from the conversation with the leader.', 'leaderCommit.notes', dis)}`, true)}
+
+  ${sec('reflect', '★', 'Your reflection', 'One line before your next stop.', `
+    ${fieldBox('vref', 'What I will coach next visit', V.reflection, 2, '', 'reflection', dis)}
+    ${fieldBox('vnotes', 'Other notes', V.notes, 2, '', 'notes', dis)}`, true)}
+
+  <div class="vscore" id="vscore"></div>
+  ${canLog ? `<div class="vbar"><span class="small" id="vsaved">${V.status === 'done' ? 'Submitted ' + esc(dayLabel(V.date)) : 'Draft saves as you go'}</span>
+    <button class="btn" id="vprint" type="button">Print / PDF</button>
+    <button class="btn primary" id="vsubmit" type="button">${V.status === 'done' ? 'Update visit' : 'Submit visit'}</button></div>` : ''}
+  <input type="file" id="photoIn" accept="image/*" capture="environment" hidden>
+  <input type="file" id="photoLib" accept="image/*" multiple hidden>`;
+  v.innerHTML = html;
+  drawScore();
+  wireVisit(V, canLog, snap);
+}
+// Checks a past commitment against today's numbers. Store numbers use this week if the report has it,
+// otherwise the month. 6 Elements and practice commitments check what was scored on this visit.
+const numOf = t => { const n = parseFloat(String(t ?? '').replace(/[$,%\s]/g, '')); return isFinite(n) ? n : null; };
+function metricKeyFor(a) {
+  if (a?.key && STORE_METRICS.some(m => m.key === a.key)) return a.key;
+  const w = String(a?.what || a?.behavior || '').toLowerCase();
+  const hits = STORE_METRICS.filter(m => w.includes(m.label.toLowerCase().replace(' w/ cancellations', '')) || (PLAIN_LABELS[m.key] && w.includes(PLAIN_LABELS[m.key])));
+  return hits.sort((x, y) => y.label.length - x.label.length)[0]?.key || null;
+}
+const PLAIN_LABELS = { protectionSph: 'protection per hour', beddingSph: 'bedding per hour', spg: 'spg', closeRate: 'close rate', financePct: 'finance', beddingPct: 'bedding', protectionAttach: 'protection attach', protectionPct: 'protection', deliveryPct: 'delivery', cancelPct: 'cancel', appsToTraffic: 'apps', sph: 'sales per hour', avgTicket: 'ticket' };
+const COACH_WATCH = [
+  'Opened with a win before the opportunity',
+  'Used the number, then asked a question before telling',
+  'Showed the behavior or ran it with them, did not just talk about it',
+  'Got a commitment in the consultant\'s words, with a date'];
+// Remote coaching through the store leader: the same plan, written for the leader to deliver.
+function leaderCoachText(cc, first, leader) {
+  const L = titleName(leader).split(' ')[0] || 'the leader';
+  const lines = String(cc.text || '').split('\n').filter(Boolean);
+  const out = [`You're coaching ${L} to coach ${first}. Walk ${L} through this, then practice it with them.`];
+  lines.forEach(l => {
+    if (/^Practice it standing up/.test(l)) out.push(`${L} runs the stand-up practice with ${first} on the floor: ${l.replace(/^Practice it standing up: /, '').replace(/You're the guest\./, `${L} plays the guest.`).replace(/Let [^,]+ run it, give one tip, then run it again\./, `${first} runs it, ${L} gives one tip, then they run it again.`)}`);
+    else if (/commitment this week/.test(l)) out.push(`${L} gets ${first}'s commitment in their own words and checks it before your next visit.`);
+    else out.push(l.replace(/^Open with a win\./, `${L} opens with a win.`).replace(/Sit down with the store leader and write a plan today/, `${L} writes the plan with them today`).replace(/^Coach /, `${L} coaches `).replace(/Ask what's going on before you talk numbers/, `${L} asks what's going on first`).replace(/Tell them\./, `${L} tells them.`));
+  });
+  return out.join('\n');
+}
+function followBadge(v, au) {
+  const lbl = { yes: ['done', 'Done'], partial: ['part', 'Moving'], no: ['not', 'Not yet'] }[v];
+  return `<div class="review">${lbl ? `<span class="rv ${lbl[0]}">${lbl[1]}</span>` : ''}<span class="small">${esc(au?.text || 'Review it with the leader.')}</span></div>`;
+}
+function autoFollow(a, snap, V) {
+  if (!a) return null;
+  const key = metricKeyFor(a);
+  const from = numOf(a.from), to = numOf(a.to);
+  if (key && from != null && to != null && snap) {
+    const per = snap.wtd?.k?.[key] != null ? 'wtd' : 'mtd';
+    const now = snap[per]?.k?.[key]; if (now == null) return null;
+    const m = STORE_METRICS.find(x => x.key === key), lower = !!m?.lower;
+    const better = (x, y) => lower ? x <= y : x >= y;
+    const v = better(now, to) ? 'yes' : (lower ? now < from : now > from) ? 'partial' : 'no';
+    return { v, text: `Now ${fmtMetric(key, now)} ${per === 'wtd' ? 'this week' : 'this month'} (was ${a.from}, goal ${a.to}).` };
+  }
+  const w = String(a.what || '').trim();
+  const el = ELEMENTS.find(e => e.t.toLowerCase() === w.toLowerCase());
+  if (el) {
+    const vals = [...Object.values(V.checks?.[el.key] || {}), ...(el.aor ? Object.values(V.aor || {}) : [])];
+    if (!vals.length) return { v: null, text: `Score ${el.t} on today's walk and this updates.` };
+    const bad = vals.filter(x => x === 'no' || x === 'needs').length, part = vals.filter(x => x === 'partial').length;
+    const v = bad ? 'no' : part ? 'partial' : 'yes';
+    return { v, text: `From today's walk: ${bad} not there, ${part} partial, ${vals.length - bad - part} good.` };
+  }
+  const c = (V.consultants || []).find(x => w.toLowerCase().startsWith(titleName(x.name).toLowerCase() + ':'));
+  const sc = c ? Object.values(c.drill?.scored || {}) : [];
+  if (c && sc.length) {
+    const pts = sc.reduce((t, x) => t + (x === 'yes' ? 1 : x === 'partial' ? 0.5 : 0), 0), tot = drillFor(c.drill.key).watch.length;
+    return { v: pts >= tot ? 'yes' : pts >= tot / 2 ? 'partial' : 'no', text: `Today's practice: ${pts} of ${tot}.` };
+  }
+  return null;
+}
+// Suggested commitments, in "from X to Y" form. Fills only empty slots; returns how many it filled.
+function fillCommitments(V, focusAll) {
+  const sugg = [];
+  // By when: the next planned visit to this store, or a week out.
+  const nextDay = (S.vPlans || []).flatMap(p => p.days || []).filter(d => d.store === V.store && d.date > V.date).map(d => d.date).sort()[0] || addDays(V.date, 7);
+  focusAll.filter(f => V.focus.includes(f.key)).forEach(f => sugg.push({
+    key: f.key, what: f.label, from: fmtMetric(f.key, f.value), to: fmtMetric(f.key, f.target ?? f.goal), how: f.coach.doThis.split('. ')[0].replace(/\.$/, ''), due: nextDay, suggested: true }));
+  const sm = visitSummary(V);
+  sm.fixes.forEach(fx => sugg.push({ what: fx, from: 'Needs work today', to: 'Grand Opening Ready', how: '', due: nextDay, suggested: true }));
+  (V.consultants || []).forEach(c => {
+    const d = c.drill, sc = Object.values(d?.scored || {});
+    if (!d?.key || !sc.length) return;
+    const pts = sc.reduce((a, x) => a + (x === 'yes' ? 1 : x === 'partial' ? 0.5 : 0), 0), tot = drillFor(d.key).watch.length;
+    if (pts < tot) sugg.push({ what: `${titleName(c.name)}: ${drillFor(d.key).title}`, from: `${pts} of ${tot} on today's practice`, to: `${tot} of ${tot}`, how: d.adjust || '', owner: titleName(c.name), due: nextDay, suggested: true });
+  });
+  const have = new Set(V.actions.filter(hasCommitment).map(a => String(a.what || a.behavior).toLowerCase()));
+  let n = 0;
+  for (let i = 0; i < 3; i++) {
+    if (hasCommitment(V.actions[i])) continue;
+    const next = sugg.find(x => !have.has(x.what.toLowerCase()));
+    if (!next) break;
+    have.add(next.what.toLowerCase()); V.actions[i] = { ...(V.actions[i] || {}), ...next }; n++;
+  }
+  return n;
+}
+function winsFor(m) {
+  const out = [];
+  if (m.vsBud.netSales >= 0) out.push(`Sales ${pct(m.vsBud.netSales)} to budget`);
+  if (m.vsLy.spg >= 0) out.push(`SPG with cancellations ${pct(m.vsLy.spg)} vs LY`);
+  if (m.vsBud.closeRate >= 0) out.push(`Close rate +${Math.round(m.vsBud.closeRate)} bps to budget`);
+  if (m.k.financePct >= STORE_GOALS.financePct) out.push(`Finance ${m.k.financePct.toFixed(0)}% of sales`);
+  if (m.k.protectionAttach >= STORE_GOALS.protectionAttach) out.push(`Protection attach ${m.k.protectionAttach.toFixed(0)}%`);
+  return out;
+}
+function drawScore() {
+  const el = $('#vscore'); if (!el || !S.V) return;
+  const s = visitScore(S.V), sm = visitSummary(S.V);
+  el.innerHTML = `<div><p class="eyebrow">Visit score</p><b class="big">${s ? s.pct + '%' : '--'}</b><span class="small"> ${s ? `${s.n} of ${s.t} scored items` : 'Builds as you score. Yes = 1, Partial = half.'}</span></div>
+    ${sm.fixes.length ? `<p class="small" style="margin:6px 0 0">To fix: ${sm.fixes.map(esc).join(', ')}</p>` : ''}`;
+}
+function setPath(o, path, val) {
+  const keys = path.split('.'); let cur = o;
+  keys.slice(0, -1).forEach(k => { if (cur[k] == null || typeof cur[k] !== 'object') cur[k] = {}; cur = cur[k]; });
+  const last = keys[keys.length - 1];
+  if (val === null) delete cur[last]; else cur[last] = val;
+}
+function getPath(o, path) { return path.split('.').reduce((c, k) => (c == null ? undefined : c[k]), o); }
+let vTimer = null;
+function saveDraft(now) {
+  const V = S.V; if (!V) return;
+  V.at = new Date().toISOString(); V.by = S.user.email;
+  V.needScore = S.scores[V.store]?.score ?? null;
+  V.commitments = visitSummary(V).commitments.join('\n');
+  localSet(V);
+  const s = $('#vsaved'); if (s && V.status !== 'done') s.textContent = 'Saving…';
+  clearTimeout(vTimer);
+  vTimer = setTimeout(async () => {
+    try {
+      await S.be.saveVisit(structuredClone(V));
+      const i = S.visits.findIndex(y => y.id === V.id); if (i >= 0) S.visits[i] = structuredClone(V); else S.visits.push(structuredClone(V));
+      const t = $('#vsaved'); if (t) t.textContent = V.status === 'done' ? `Submitted · saved ${new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}` : `Draft saved ${new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}`;
+    } catch (e) { const t = $('#vsaved'); if (t) t.textContent = 'Saved on this device. Will retry when you are back online.'; }
+  }, now ? 0 : 900);
+}
+function wireVisit(V, canLog, snap) {
+  const v = $('#view');
+  $('#back').onclick = () => { stopMic(); if (canLog) saveDraft(true); S.visit = null; S.V = null; renderShell(); };
+  v.querySelectorAll('.vsec-hd').forEach(h => h.onclick = () => {
+    const secEl = h.parentElement, k = secEl.dataset.sec;
+    secEl.classList.toggle('open'); h.setAttribute('aria-expanded', secEl.classList.contains('open'));
+    if (secEl.classList.contains('open')) V_OPEN.add(k); else V_OPEN.delete(k);
+  });
+  v.querySelectorAll('[data-period]').forEach(b => b.onclick = () => { S.vPeriod = b.dataset.period; viewVisit(); });
+  if (!canLog) return;
+  wireMics(v);
+  const vt = $('#vtype'); vt.onchange = () => { V.vtype = vt.value; saveDraft(); };
+  v.querySelectorAll('[data-path]').forEach(b => b.onclick = () => {
+    const path = b.dataset.path, cur = getPath(V, path), val = cur === b.dataset.v ? null : b.dataset.v;
+    setPath(V, path, val);
+    if (/^consultants\.\d+\.mode$/.test(path)) { if (!val) setPath(V, path, 'direct'); saveDraft(); return viewVisit(); }
+    if (path.startsWith('follow.')) { setPath(V, 'followAuto.' + path.slice(7), null); const au = b.closest('.item')?.querySelector('.auto .pill'); if (au) au.remove(); }
+    b.parentElement.querySelectorAll('button').forEach(o => o.classList.toggle('on', o.dataset.v === val));
+    const ip = b.closest('.item')?.querySelector('.iphoto'); if (ip) ip.hidden = !(val === 'no' || val === 'partial' || val === 'needs');
+    const dc = path.includes('.drill.scored.') && b.closest('.drill')?.querySelector('.dcount'); if (dc) dc.textContent = `(${Object.keys(getPath(V, path.split('.').slice(0, 4).join('.')) || {}).length} of ${dc.dataset.total})`;
+    const prac = b.closest('details.prac'); if (prac && path.includes('.practice.')) prac.querySelector('summary .small').textContent = `${Object.keys(getPath(V, path.split('.').slice(0, 3).join('.')) || {}).length} of ${PRACTICE.length} scored`;
+    drawScore(); saveDraft();
+  });
+  v.querySelectorAll('[data-field]').forEach(inp => inp.oninput = inp.onchange = () => { setPath(V, inp.dataset.field, inp.value); if (inp.dataset.field === 'leaderWin.text') { V.leaderWin.touched = true; V.leaderWin.suggested = false; } saveDraft(); });
+  v.querySelectorAll('[data-focus]').forEach(b => b.onclick = () => {
+    const k = b.dataset.focus;
+    if (V.focus.includes(k)) V.focus = V.focus.filter(x => x !== k);
+    else { if (V.focus.length >= 2) return toast('Two focus items at most. Tap one to drop it first.', true); V.focus.push(k); }
+    v.querySelectorAll('[data-focus]').forEach(o => { const on = V.focus.includes(o.dataset.focus); o.classList.toggle('primary', on); o.textContent = on ? 'Coaching this ✓' : 'Coach this'; o.setAttribute('aria-pressed', on); o.closest('.fcard').classList.toggle('on', on); });
+    saveDraft();
+  });
+  v.querySelectorAll('[data-segp]').forEach(sel => sel.onchange = () => {
+    const gi = sel.dataset.segp, p = (S.rsa?.people || []).find(q => q.cid === sel.value) || V.consultants.find(c => c.cid === sel.value);
+    setPath(V, `segMeta.${gi}.cid`, sel.value || null); setPath(V, `segMeta.${gi}.name`, p?.name || null); saveDraft();
+  });
+  v.querySelectorAll('[data-helpc]').forEach(b => b.onclick = () => {
+    const p = (S.rsa?.people || []).find(q => q.cid === b.dataset.helpc); if (!p) return;
+    V.consultants.push({ cid: p.cid, name: p.name, why: 'model', lever: b.dataset.lever, notes: '', practice: {} });
+    V_OPEN.add('people'); saveDraft(); viewVisit(); toast(`${titleName(p.name)} added. Recognize them and have them show the team.`);
+  });
+  v.querySelectorAll('[data-dragc]').forEach(b => b.onclick = () => {
+    const p = (S.rsa?.people || []).find(q => q.cid === b.dataset.dragc); if (!p) return;
+    const lever = b.dataset.lever, rk = STORE_TO_RSA[lever];
+    const drillKey = { creditApps: 'appsToTraffic', protectionSph: 'protectionPct', beddingSph: 'beddingPct' }[rk] || rk;
+    V.consultants.push({ cid: p.cid, name: p.name, why: 'drag', lever, notes: '', practice: {}, drill: { key: drillKey, title: drillFor(drillKey).title } });
+    V_OPEN.add('people'); saveDraft(); viewVisit(); toast(`${titleName(p.name)} added. Coaching starts with ${(STORE_METRICS.find(m => m.key === lever)?.label || lever).toLowerCase()}.`);
+  });
+  v.querySelectorAll('[data-drill]').forEach(sel => sel.onchange = () => {
+    const c = V.consultants[+sel.dataset.drill];
+    c.drill = { key: sel.value, title: drillFor(sel.value).title, well: c.drill?.well || '', adjust: c.drill?.adjust || '', manual: true };
+    saveDraft(); viewVisit();
+  });
+  v.querySelectorAll('[data-rmc]').forEach(b => b.onclick = () => { V.consultants.splice(+b.dataset.rmc, 1); saveDraft(); viewVisit(); });
+  const addGo = () => {
+    const typed = ($('#addc').value || '').trim(); if (!typed) return toast('Type or say a name first.', true);
+    const key = typed.toLowerCase().replace(/[^a-z]/g, '');
+    const all = S.rsa?.people || [];
+    const p = all.find(q => q.name.toLowerCase().replace(/[^a-z]/g, '') === key) || all.find(q => q.name.toLowerCase().replace(/[^a-z]/g, '').startsWith(key));
+    const cid = p ? p.cid : cidOf(typed);
+    if (V.consultants.some(c => c.cid === cid)) return toast('Already on this visit.', true);
+    V.consultants.push({ cid, name: p ? p.name : typed, why: 'added', notes: '', practice: {} });
+    toast(p ? `${titleName(p.name)} added with suggested coaching.` : `${typed} added. Not in the RSA report, so the suggestion is the stand-up practice.`);
+    saveDraft(); viewVisit();
+  };
+  const ab = $('#addcgo'); if (ab) ab.onclick = addGo;
+  const ai = $('#addc'); if (ai) ai.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); addGo(); } };
+  v.querySelectorAll('[data-usec]').forEach(b => b.onclick = () => {
+    const ci = +b.dataset.usec, box = $('#cn' + ci), text = b.closest('.suggest').querySelector('.stext').textContent;
+    box.value = box.value.trim() ? box.value.trim() + '\n\n' + text : text;
+    V.consultants[ci].notes = box.value; saveDraft(); toast('Added to your notes. Edit anything.');
+  });
+  // Photos: shrunk on the phone before saving so they stay small.
+  const pin = $('#photoIn'), plib = $('#photoLib'); let pel = 'general', pitem = '';
+  const room = () => PHOTO_MAX - (S.vPhotos || []).length;
+  const pick = (el, input, item = '') => { if (room() <= 0) return toast(`${PHOTO_MAX} photos per visit. Remove one to add another.`, true); pel = el; pitem = item; input.value = ''; input.click(); };
+  v.querySelectorAll('[data-photo]').forEach(b => b.onclick = () => pick(b.dataset.photo, b.dataset.src === 'lib' ? plib : pin, b.dataset.item || ''));
+  const pt = $('#ptag'); if (pt) pt.onchange = () => { S.pTag = pt.value; };
+  const pc = $('#pcam'); if (pc) pc.onclick = () => pick(S.pTag || 'general', pin);
+  const pl = $('#plib'); if (pl) pl.onclick = () => pick(S.pTag || 'general', plib);
+  const addFiles = async files => {
+    const list = [...files].slice(0, room()); if (!list.length) return;
+    try {
+      for (const f of list) {
+        const data = await shrinkImage(f, 900, 0.6);
+        const ph = { id: `${V.id}_${Date.now()}_${Math.round(Math.random() * 1e4)}`, visitId: V.id, email: V.email, store: V.store, date: V.date, el: pel, item: pitem, caption: '', data };
+        await S.be.savePhoto(ph); S.vPhotos = [...(S.vPhotos || []), ph];
+      }
+      if (pel === 'general') V_OPEN.add('photos'); viewVisit(); toast(list.length > 1 ? `${list.length} photos added. Add a caption to each.` : 'Photo added. Add a caption.');
+    } catch (e) { toast('Could not add that photo. Try again.', true); }
+  };
+  pin.onchange = () => addFiles(pin.files || []);
+  plib.onchange = () => addFiles(plib.files || []);
+  const capTimers = {};
+  v.querySelectorAll('[data-pcap]').forEach(inp => inp.oninput = () => {
+    const ph = S.vPhotos.find(x => x.id === inp.dataset.pcap); if (!ph) return;
+    ph.caption = inp.value; clearTimeout(capTimers[ph.id]);
+    capTimers[ph.id] = setTimeout(() => S.be.savePhoto(ph).catch(() => {}), 800);
+  });
+  v.querySelectorAll('[data-delphoto]').forEach(b => b.onclick = async () => {
+    await S.be.deletePhoto(b.dataset.delphoto); S.vPhotos = S.vPhotos.filter(p => p.id !== b.dataset.delphoto); viewVisit();
+  });
+  const sg = $('#apsugg'); if (sg) sg.onclick = () => {
+    const n = fillCommitments(V, storeFocus(snap, 4));
+    if (!n) return toast('All 3 commitments are filled. Clear one to get a new suggestion.', true);
+    saveDraft(); viewVisit(); toast(`${n} suggested. Change anything.`);
+  };
+  // Editing a suggested commitment makes it yours.
+  v.querySelectorAll('[data-field^="actions."]').forEach(inp => inp.addEventListener('input', () => {
+    const i = +inp.dataset.field.split('.')[1], a = V.actions[i]; if (!a) return;
+    a.suggested = false;
+    const pv = $('#apv' + i); if (pv) { pv.hidden = !hasCommitment(a); pv.textContent = hasCommitment(a) ? commitmentText(a) : ''; }
+  }));
+  $('#vprint').onclick = () => { V_OPEN.clear(); ['why', 'win', 'follow', 'focus', 'people', 'action', 'reflect', 'el1', 'el2', 'el3', 'el4', 'el5', 'el6'].forEach(k => V_OPEN.add(k)); document.querySelectorAll('.vsec').forEach(s => s.classList.add('open')); setTimeout(() => window.print(), 200); };
+  $('#vsubmit').onclick = async () => {
+    stopMic();
+    const sm = visitSummary(V);
+    const partial = V.actions.find(a => hasCommitment(a) && (!String(a.from || '').trim() || !String(a.to || '').trim()));
+    if (partial) { V_OPEN.add('action'); document.querySelector('[data-sec="action"]').classList.add('open'); document.querySelector('[data-sec="action"]').scrollIntoView({ behavior: 'smooth' }); return toast('Each commitment needs a From and a To.', true); }
+    if (!sm.commitments.length) { V_OPEN.add('action'); document.querySelector('[data-sec="action"]').classList.add('open'); document.querySelector('[data-sec="action"]').scrollIntoView({ behavior: 'smooth' }); return toast('Add at least one commitment in the action plan before you submit.', true); }
+    V.status = 'done'; V.submittedAt = V.submittedAt || new Date().toISOString();
+    saveDraft(true);
+    try {
+      const plan = await S.be.plan(V.email, weekStartOf(V.date));
+      if (V.remote) {
+        if (plan) { plan.remoteDone = [...new Set([...(plan.remoteDone || []), V.store])]; await S.be.savePlan(plan); }
+      } else {
+        const day = plan?.days.find(d => d.date === V.date && d.store === V.store);
+        if (day && day.status !== 'done') { day.status = 'done'; await S.be.savePlan(plan); }
+      }
+    } catch (e) {}
+    localDrop(V.id);
+    S.lastVisit = latestVisitMap([...S.visits.filter(y => y.id !== V.id), V]); S.scores = scoresFor(S.daily);
+    toast(V.remote ? 'Remote coaching logged. The recap message is ready in Team messages.' : 'Visit submitted. The recap message is ready in Team messages.');
+    S.msgType = 'recap'; S.msgVisit = V.id;
+    viewVisit();
+  };
+}
+function shrinkImage(file, max, q) {
+  return new Promise((res, rej) => {
+    const img = new Image(), url = URL.createObjectURL(file);
+    img.onload = () => {
+      const r = Math.min(1, max / Math.max(img.width, img.height));
+      const c = document.createElement('canvas'); c.width = Math.round(img.width * r); c.height = Math.round(img.height * r);
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height); URL.revokeObjectURL(url);
+      res(c.toDataURL('image/jpeg', q));
+    };
+    img.onerror = rej; img.src = url;
+  });
+}
+
+const fmtMetric = (key, v) => {
+  const m = STORE_METRICS.find(x => x.key === key) || { fmt: /pct|margin|rate/i.test(key) ? 'pct' : 'money' };
+  if (key === 'creditApps') return String(Math.round(v));
+  return fmt(m, v);
+};
+
+// ---------------------------------------------------------------- stores
+function viewStores() {
+  const v = $('#view');
+  const ls = leaders();
+  let list = seesAll() ? STORES.map(s => s.name) : (S.user.stores || []);
+  if (seesAll() && S.storeFilter?.startsWith('mkt:')) list = (S.markets.find(m => 'mkt:' + m.id === S.storeFilter)?.stores || []);
+  else if (seesAll() && S.storeFilter && S.storeFilter !== '*') list = S.storeFilter === '__none' ? list.filter(s => !leaderOf(s)) : (ls.find(l => l.email === S.storeFilter)?.stores || []);
+  list = list.slice().sort((a, b) => (S.scores[b]?.score ?? -1) - (S.scores[a]?.score ?? -1));
+  const cell = (val, cls = '') => `<td class="num ${cls}">${val}</td>`;
+  const sign = v => v == null ? '' : v >= 0 ? 'good' : v <= -10 ? 'bad' : 'warn';
+  const row = s => {
+    const snap = S.daily?.stores?.[s], m = snap?.mtd, w = snap?.wtd, sc = S.scores[s];
+    const lv = S.lastVisit[s], l = leaderOf(s);
+    return `<tr class="click" data-store="${esc(s)}">
+      <td class="nm">${esc(s)}${seesAll() ? `<br><small class="muted">${esc(marketOf(s)?.name ? marketOf(s).name + ' · ' : '')}${esc(l ? l.name || l.email : 'No Market Leader')}</small>` : ''}</td>
+      <td>${needChip(sc?.score)}</td>
+      ${cell(w?.vsBud.netSales != null ? pct(w.vsBud.netSales) : '--', sign(w?.vsBud.netSales))}
+      ${cell(m?.vsBud.netSales != null ? pct(m.vsBud.netSales) : '--', sign(m?.vsBud.netSales))}
+      ${cell(m?.k.spg != null ? '$' + m.k.spg.toFixed(0) : '--')}
+      ${cell(m?.vsLy.spg != null ? pct(m.vsLy.spg) : '--', sign(m?.vsLy.spg))}
+      ${cell(m?.vsBud.closeRate != null ? Math.round(m.vsBud.closeRate) : '--', m?.vsBud.closeRate == null ? '' : m.vsBud.closeRate >= 0 ? 'good' : m.vsBud.closeRate > -200 ? 'warn' : 'bad')}
+      ${cell(m?.vsLy.traffic != null ? pct(m.vsLy.traffic) : '--')}
+      ${cell(m?.k.protectionAttach != null ? m.k.protectionAttach.toFixed(0) + '%' : '--', m?.k.protectionAttach == null ? '' : m.k.protectionAttach >= STORE_GOALS.protectionAttach ? 'good' : 'warn')}
+      ${cell(m?.k.cancelPct != null ? m.k.cancelPct.toFixed(1) + '%' : '--', m?.k.cancelPct == null ? '' : m.k.cancelPct <= STORE_GOALS.cancelPct ? 'good' : 'warn')}
+      <td class="small">${(() => { const tm = S.teams?.[s]; if (!tm) return '<span class="muted">--</span>'; const bits = []; if (tm.below.length) bits.push(`<span class="bad">${tm.below.length} below</span>`); if (tm.slipping.length) bits.push(`<span class="warn">${tm.slipping.length} slipping</span>`); return bits.join(' · ') || '<span class="good">On track</span>'; })()}</td>
+      <td>${lv ? `${daysApart(lv, today())}d ago` : '<span class="warn">None</span>'}</td>
+      <td class="small" style="white-space:normal;min-width:200px">${esc(sc?.parts?.[0]?.text || '')}</td>
+    </tr>`;
+  };
+  v.innerHTML = `
+  <div class="spread">
+    <div><h2 class="big" style="margin:0">${seesAll() ? 'All stores' : 'My stores'}, ranked by need</h2><p class="small" style="margin:4px 0 0">${dataLine()}</p></div>
+    ${seesAll() ? `<label for="sf" style="margin:0">Show<select id="sf"><option value="*">All stores</option>${ls.map(l => `<option value="${esc(l.email)}" ${S.storeFilter === l.email ? 'selected' : ''}>${esc(l.name || l.email)}</option>`).join('')}<option value="__none" ${S.storeFilter === '__none' ? 'selected' : ''}>No Market Leader</option>${(S.markets || []).length ? `<optgroup label="Markets">${S.markets.map(m => `<option value="mkt:${esc(m.id)}" ${S.storeFilter === 'mkt:' + m.id ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</optgroup>` : ''}</select></label>` : ''}
+  </div>
+  <div class="panel" style="padding:0;overflow:hidden"><div class="scroller"><table class="grid">
+    <thead><tr><th>Store</th><th>Need</th><th class="num">Sales WTD vs bud</th><th class="num">Sales MTD vs bud</th><th class="num">SPG w/ canc</th><th class="num">SPG vs LY</th><th class="num">Close rate bps</th><th class="num">Traffic vs LY</th><th class="num">Prot attach</th><th class="num">Cancel %</th><th>Consultants</th><th>Last visit</th><th>Top reason</th></tr></thead>
+    <tbody>${list.map(row).join('') || '<tr><td colspan="13">No stores.</td></tr>'}</tbody>
+  </table></div></div>
+  <p class="small">Tap a store for its coaching plan. SPG uses SPG with cancellations. Close rate is basis points against budget.</p>`;
+  v.querySelectorAll('[data-store]').forEach(r => r.onclick = () => openVisit({ store: r.dataset.store, date: today(), email: seesAll() ? (leaderOf(r.dataset.store)?.email || S.user.email) : S.user.email, kind: 'drop-in' }));
+  const sf = $('#sf'); if (sf) sf.onchange = () => { S.storeFilter = sf.value; viewStores(); };
+}
+
+// ---------------------------------------------------------------- daily brief
+// The first thing a Market Leader or director opens each morning: yesterday's wins and opportunities
+// for their stores and people, where they're going today, and what's due. It's for them, not the team.
+async function viewBrief() {
+  const v = $('#view');
+  if (seesAll() && !S.viewEmail) S.viewEmail = leaders()[0]?.email || null;
+  const email = seesAll() ? S.viewEmail : S.user.email;
+  const who = S.users.find(u => u.email === email) || (email === S.user.email ? S.user : null);
+  const picker = seesAll() ? `<label for="bp" style="margin:0">Field leader<select id="bp">${leaders().map(l => `<option value="${esc(l.email)}" ${l.email === email ? 'selected' : ''}>${esc(whoLabel(l))}</option>`).join('')}</select></label>` : '';
+  const wirePick = () => { const b = $('#bp'); if (b) b.onchange = () => { S.viewEmail = b.value; viewBrief(); }; };
+  const stores = who?.stores || [];
+  if (!stores.length) { v.innerHTML = `<div class="spread">${picker}</div><div class="panel"><p>No stores assigned yet.</p></div>`; wirePick(); return; }
+  if (!S.daily) { v.innerHTML = `<div class="panel"><h2>Waiting on the first daily report</h2><p>Your brief builds from the daily report and RSA report. Once they're uploaded, it's here every morning.</p></div>`; return; }
+  v.innerHTML = '<p class="loading">Building your brief…</p>';
+  const t = today(), week = weekStartOf(t);
+  const plan = await S.be.plan(email, week).catch(() => null);
+  const asOf = S.meta.latestDaily;
+  const people = S.rsa?.people || [];
+  const hasDay = (S.daily.periods || []).includes('day');
+  const per = snap => (hasDay ? snap?.day : snap?.wtd) || snap?.mtd;
+  const perLabel = hasDay ? `yesterday (${dayLabel(asOf)})` : `the week through ${dayLabel(asOf)}`;
+  const rows = stores.map(s => ({ s, snap: S.daily.stores[s], sc: S.scores[s] })).filter(r => r.snap);
+  const money = n => (n < 0 ? '-$' : '$') + Math.abs(Math.round(n)).toLocaleString('en-US');
+  const pace = paceFactor(S.rsa?.to);
+
+  // Stores: wins and opportunities
+  const storeWins = [], storeOpps = [];
+  rows.forEach(({ s, snap, sc }) => {
+    const p = per(snap), opp = [];
+    if (p?.vsBud.netSales != null) {
+      if (p.vsBud.netSales >= 0) storeWins.push({ s, t: `${money(p.k.netSales)} in sales, ${pct(p.vsBud.netSales)} to budget` });
+      else if (p.vsBud.netSales <= -10) opp.push(`${money(p.k.netSales)} in sales, ${pct(p.vsBud.netSales)} to budget`);
+    }
+    if (p?.vsLy.spg != null && p.vsLy.spg >= 5) storeWins.push({ s, t: `SPG with cancellations ${pct(p.vsLy.spg)} vs LY` });
+    if (p?.vsBud.closeRate != null && p.vsBud.closeRate >= 100) storeWins.push({ s, t: `close rate +${Math.round(p.vsBud.closeRate)} bps to budget` });
+    const f = storeFocus(snap, 1)[0];
+    if (f && !f.stretch) opp.push(`${f.label} at ${fmtMetric(f.key, f.value)}, goal ${fmtMetric(f.key, f.goal)}`);
+    if (opp.length) storeOpps.push({ s, t: opp.join('. '), sc: sc?.score || 0, key: f && !f.stretch ? f.key : null });
+  });
+  storeOpps.sort((a, b) => b.sc - a.sc);
+
+  // People: wins and opportunities
+  const days = S.days || {};
+  const uniq = (arr, k) => { const seen = new Set(); return arr.filter(x => { const id = k(x); if (seen.has(id)) return false; seen.add(id); return true; }); };
+  const inMine = uniq(people.filter(p => stores.includes(p.store)), p => p.cid);
+  const dayTop = inMine.map(p => ({ p, d: days[p.cid] })).filter(x => x.d?.hours >= 4 && x.d.sph != null && x.d.sales > 0).sort((a, b) => b.d.sales - a.d.sales).slice(0, 3);
+  const rising = uniq(stores.flatMap(s => S.teams?.[s]?.rising || []), r => r.cid).filter(r => !dayTop.some(x => x.p.cid === r.cid)).slice(0, 3);
+  const helpersList = [], dragList = [];
+  rows.forEach(({ s, snap }) => storeFocus(snap, 2).forEach(f => {
+    helpers(people, s, f.key, DEFAULT_GOALS, pace, 1).forEach(h => helpersList.push({ s, h, f }));
+    draggers(people, s, f.key, DEFAULT_GOALS, pace, 1).forEach(d => dragList.push({ s, d, f }));
+  }));
+  const below = uniq(stores.flatMap(s => (S.teams?.[s]?.below || []).map(r => ({ s, r }))), o => o.r.cid);
+  const slipping = uniq(stores.flatMap(s => (S.teams?.[s]?.slipping || []).map(r => ({ s, r }))), o => o.r.cid).filter(o => !below.some(b => b.r.cid === o.r.cid));
+
+  // Commitments due by tomorrow that the numbers don't show as done, and support promised
+  const due = S.visits.filter(x => stores.includes(x.store) && x.status !== 'draft')
+    .flatMap(x => (x.actions || []).filter(hasCommitment).map(a => ({ x, a })))
+    .filter(({ a }) => a.due && a.due <= addDays(t, 1))
+    .map(o => ({ ...o, au: autoFollow(o.a, S.daily.stores[o.x.store], {}) }))
+    .filter(o => o.au?.v !== 'yes').sort((a, b) => a.a.due.localeCompare(b.a.due)).slice(0, 8);
+  const supportDue = S.visits.filter(x => x.email === email && x.status !== 'draft' && String(x.leaderCommit?.support || '').trim())
+    .filter(x => !x.leaderCommit.supportBy || x.leaderCommit.supportBy <= addDays(t, 2)).slice(0, 5);
+
+  // Today
+  const todayDay = plan?.days.find(d => d.date === t);
+  const sugg = plan && S.meta.latestDaily > plan.basisDate ? pivotSuggestion({ plan, scores: S.scores, today: t, dismissed: plan.dismissed || [] }) : null;
+  const oppStores = [...new Set([...storeOpps.map(o => o.s), ...below.map(o => o.s), ...slipping.map(o => o.s), ...dragList.map(o => o.s)])];
+  const remoteNext = oppStores.filter(s => s !== todayDay?.store).sort((a, b) => (S.scores[b]?.score ?? 0) - (S.scores[a]?.score ?? 0));
+  const li = arr => arr.length ? `<ul class="blist">${arr.join('')}</ul>` : '<p class="small muted">Nothing here today.</p>';
+  const nm = n => esc(titleName(n));
+  // Opportunities at stores you're not in today get a remote coaching button.
+  const remoteToday = new Set(S.visits.filter(x => x.remote && x.email === email && x.date === t).map(x => x.store));
+  const rbtn = (store, extra = {}) => store === todayDay?.store ? '<span class="pill set">You\'re there today</span>'
+    : remoteToday.has(store) ? '<span class="pill done">Coached remotely today</span>'
+    : `<button type="button" class="btn tiny" data-rc='${esc(JSON.stringify({ store, ...extra }))}'>Coach remotely</button>`;
+
+  v.innerHTML = `
+  <div class="spread">
+    <div><p class="eyebrow">Daily brief · ${esc(longDate(t))}</p><h2 class="big" style="margin:0">Good morning${who.name ? ', ' + esc(who.name.split(' ')[0]) : ''}.</h2>
+      <p class="small" style="margin:4px 0 0">Here's ${esc(perLabel)} across your ${stores.length} stores. ${dataLine()}</p></div>
+    ${picker}
+  </div>
+  <section class="panel today">
+    <h3>Today</h3>
+    ${todayDay?.store ? `<p style="margin:0 0 4px"><b>Full-day visit: ${esc(todayDay.store)}</b> ${needChip(S.scores[todayDay.store]?.score)} ${todayDay.status === 'done' ? '<span class="pill done">Visited</span>' : ''}</p>
+      <p class="small">${esc((S.scores[todayDay.store]?.parts || []).slice(0, 2).map(p => p.text).join('. '))}</p>
+      <div class="row"><button class="btn primary" id="bgo">Open today's visit</button></div>`
+      : `<p style="margin:0">${plan ? 'No store visit on your plan today.' : 'No plan yet this week.'}</p>`}
+    ${sugg ? `<div class="warnbox" style="margin-top:10px"><b>Suggested swap:</b> add ${esc(sugg.to)}, drop ${esc(sugg.from)}. ${esc(sugg.reasonTo || '')} <button class="link" id="bweek">Review it on My week</button></div>` : ''}
+    ${remoteNext.length ? `<p class="small" style="margin:10px 0 0"><b>Remote coaching today</b> (opportunities at stores you're not in): ${remoteNext.map(s => remoteToday.has(s) ? `${esc(s)} <span class="good">✓</span>` : `<button class="link" data-bremote="${esc(s)}">${esc(s)}</button>`).join(' · ')}</p>` : ''}
+  </section>
+  <div class="bgrid">
+    <section class="panel bwin">
+      <h3>Wins to celebrate</h3>
+      <p class="eyebrow">Stores</p>
+      ${li(storeWins.slice(0, 6).map(w => `<li><b>${esc(w.s)}:</b> ${esc(w.t)}</li>`))}
+      <p class="eyebrow">People</p>
+      ${li([
+        ...dayTop.map(x => `<li><b>${nm(x.p.name)}</b> (${esc(x.p.store)}) wrote ${money(x.d.sales)} yesterday, ${money(x.d.sph)} an hour</li>`),
+        ...rising.map(r => `<li><b>${nm(r.name)}</b> is up to ${money(r.wk.sph)} an hour this week, from ${money(r.wk.priorSph)}</li>`),
+        ...helpersList.slice(0, 3).map(({ s, h, f }) => `<li><b>${nm(h.name)}</b> (${esc(s)}) leads the store in ${esc(f.label.toLowerCase())} at ${esc(fmtMetric(h.key, h.value))}</li>`)
+      ].slice(0, 7))}
+      <p class="small muted" style="margin:6px 0 0">Call or text these out today. People repeat what gets recognized.</p>
+    </section>
+    <section class="panel bopp">
+      <h3>Opportunities</h3>
+      <p class="eyebrow">Stores</p>
+      ${li(storeOpps.slice(0, 6).map(o => `<li class="bopp-row"><span>${needChip(o.sc)} <b>${esc(o.s)}:</b> ${esc(o.t)}</span>${rbtn(o.s, o.key ? { focusKey: o.key } : {})}</li>`))}
+      <p class="eyebrow">People</p>
+      ${li([
+        ...below.slice(0, 4).map(({ s, r }) => `<li class="bopp-row"><span><b>${nm(r.name)}</b> (${esc(s)}) is at $${Math.round(r.sph)} an hour, under the minimum</span>${rbtn(s, { addCid: r.cid, why: 'below' })}</li>`),
+        ...slipping.slice(0, 3).map(({ s, r }) => `<li class="bopp-row"><span><b>${nm(r.name)}</b> (${esc(s)}) dropped to $${Math.round(r.wk.sph)} an hour this week, from $${Math.round(r.wk.priorSph)}</span>${rbtn(s, { addCid: r.cid, why: 'slipping' })}</li>`),
+        ...dragList.slice(0, 4).map(({ s, d, f }) => `<li class="bopp-row"><span><b>${nm(d.name)}</b> (${esc(s)}) is pulling down ${esc(f.label.toLowerCase())}: ${esc(fmtMetric(d.key, d.value))} vs ${esc(fmtMetric(d.key, d.goal))} goal</span>${rbtn(s, { addCid: d.cid, why: 'drag', lever: f.key, focusKey: f.key })}</li>`)
+      ].slice(0, 8))}
+    </section>
+  </div>
+  <section class="panel">
+    <h3>Commitments due</h3>
+    ${li(due.map(({ x, a, au }) => `<li><b>${esc(x.store)}:</b> ${esc(commitmentText(a))} ${au?.v ? `<span class="rv ${au.v === 'partial' ? 'part' : 'not'}">${au.v === 'partial' ? 'Moving' : 'Not yet'}</span> <span class="small">${esc(au.text)}</span>` : '<span class="small muted">Check in with the leader.</span>'}</li>`))}
+    ${supportDue.length ? `<p class="eyebrow" style="margin-top:10px">Support you promised</p>${li(supportDue.map(x => `<li><b>${esc(x.store)}:</b> ${esc(x.leaderCommit.support)}${x.leaderCommit.supportBy ? ` (by ${esc(shortDate(x.leaderCommit.supportBy))})` : ''}</li>`))}` : ''}
+  </section>
+  <section class="panel">
+    <h3>Send to your team</h3>
+    <p class="small">Your daily store huddle and market recap are ready to copy and send.</p>
+    <div class="row"><button class="btn primary" id="bmsg">Open team messages</button></div>
+  </section>`;
+  wirePick();
+  const g = $('#bgo'); if (g) g.onclick = () => openVisit({ store: todayDay.store, date: t, email, kind: todayDay.kind, dayIndex: plan.days.indexOf(todayDay) });
+  const w = $('#bweek'); if (w) w.onclick = () => { S.tab = 'week'; renderShell(); };
+  v.querySelectorAll('[data-bremote]').forEach(x => x.onclick = () => openVisit({ store: x.dataset.bremote, date: t, email, kind: 'remote', remote: true }));
+  v.querySelectorAll('[data-rc]').forEach(x => x.onclick = () => { const o = JSON.parse(x.dataset.rc); openVisit({ ...o, date: t, email, kind: 'remote', remote: true }); });
+  $('#bmsg').onclick = () => { S.tab = 'messages'; S.msgType = 'dailyStore'; renderShell(); };
+}
+
+// ---------------------------------------------------------------- leaders (Frank and exec team)
+async function viewLeaders() {
+  const v = $('#view');
+  v.innerHTML = '<p class="loading">Loading plans…</p>';
+  const week = weekStartOf(today());
+  const next = addDays(week, 7);
+  const [plans, nextOff] = await Promise.all([S.be.plansForWeek(week), S.be.timeOffForWeek(next)]);
+  const t = today();
+  const ls = leaders();
+  const unassigned = STORES.filter(s => !leaderOf(s.name)).map(s => s.name);
+  v.innerHTML = `
+  <div class="spread">
+    <div><h2 class="big" style="margin:0">Field leaders this week</h2><p class="small" style="margin:4px 0 0">Week of ${esc(dayLabel(week))} · ${dataLine()}</p></div>
+  </div>
+  ${unassigned.length ? `<div class="warnbox"><b>${unassigned.length} stores have no Market Leader:</b> ${unassigned.map(esc).join(', ')}.${isAdmin() ? ' Assign them in Setup.' : ''}</div>` : ''}
+  <div class="focus">${ls.map(l => {
+    const p = plans.find(x => x.email === l.email);
+    const done = p ? p.days.filter(d => d.status === 'done').length : 0;
+    const due = p ? p.days.filter(d => d.date < t && d.status !== 'done').length : 0;
+    const top = (l.stores || []).slice().sort((a, b) => (S.scores[b]?.score ?? -1) - (S.scores[a]?.score ?? -1))[0];
+    const sugg = p && S.meta.latestDaily > p.basisDate ? pivotSuggestion({ plan: p, scores: S.scores, today: t, dismissed: p.dismissed || [] }) : null;
+    return `<div class="fcard">
+      <div class="row" style="justify-content:space-between"><h3 style="margin:0">${esc(l.name || l.email)}</h3><span class="row" style="gap:6px"><span class="pill ${l.role === 'director' ? 'check' : 'set'}">${l.role === 'director' ? 'Director' : 'Market Leader'}</span>${marketsOf(l.email).map(m => `<span class="pill">${esc(m.name)}</span>`).join('')}<span class="pill">${(l.stores || []).length} stores</span></span></div>
+      <p class="small" style="margin:6px 0">${p ? `<b>${done}</b> of ${p.days.length} visits logged${due ? ` · <span class="warn">${due} not logged</span>` : ''}${(p.pivots || []).length ? ` · ${p.pivots.length} changes` : ''} · ${S.visits.filter(v => v.remote && v.email === l.email && v.date >= week && v.date <= addDays(week, 6)).length} remote` : '<span class="warn">No plan yet this week</span>'}</p>
+      ${p ? `<ul class="small" style="padding-left:18px;margin:4px 0">${p.days.map(d => `<li>${esc(dayLabel(d.date))}: ${esc(d.store || 'Open')} ${d.status === 'done' ? '<span class="good">✓</span>' : d.date < t ? '<span class="warn">not logged</span>' : ''}</li>`).join('')}</ul>` : ''}
+      <p class="small" style="margin:6px 0">Days off this week: <b>${safeOff(p?.off || l.off, l.role).map(x => DAY_NAMES[x]).join(', ')}</b> · Next week: ${(() => { const n = nextOff.find(x => x.email === l.email); return n ? `<b>${n.off.map(x => DAY_NAMES[x]).join(', ')}</b>` : '<span class="warn">not set</span>'; })()}</p>
+      ${top ? `<p class="small" style="margin:6px 0">Highest need: <b>${esc(top)}</b> ${needChip(S.scores[top]?.score)}</p>` : ''}
+      ${sugg ? `<p class="small warn">Pivot waiting: add ${esc(sugg.to)}, drop ${esc(sugg.from)}</p>` : ''}
+      <button class="btn tiny" data-lw="${esc(l.email)}">Open week</button>
+    </div>`;
+  }).join('') || '<div class="panel"><p>No Market Leaders or directors set up yet. Add them in Setup.</p></div>'}</div>`;
+  v.querySelectorAll('[data-lw]').forEach(b => b.onclick = () => { S.viewEmail = b.dataset.lw; S.tab = 'week'; S.week = null; renderShell(); });
+}
+
+// ---------------------------------------------------------------- team messages
+// Written for the Market Leader to copy into Teams, a group text or email. Nothing is sent from the app.
+const MSG_TYPES = [
+  ['dailyStore', 'Daily: store huddle', 'Every morning, to one store. Yesterday, the week, one thing for today, and the top performers this week.'],
+  ['dailyMarket', 'Daily: market recap', 'Every morning, to all your store leaders. Yesterday ranked, and the top performers in the market this week.'],
+  ['kickoff', 'Weekly: store kickoff', 'Sunday, to one store. The month, what is working, 2 focus items, top performers and category leaders, your visit days.'],
+  ['marketUpdate', 'Weekly: market update', 'Sunday, to all your store leaders. The month ranked, the top 5 consultants and category leaders across the market, and your visit schedule.'],
+  ['recap', 'Visit recap', 'After a visit, to that store. What is working and the commitments.']
+];
+async function viewMessages() {
+  const v = $('#view');
+  if (seesAll() && !S.viewEmail) S.viewEmail = leaders()[0]?.email || null;
+  const email = seesAll() ? S.viewEmail : S.user.email;
+  const who = S.users.find(u => u.email === email) || (email === S.user.email ? S.user : null);
+  const stores = who?.stores || [];
+  const picker = seesAll() ? `<label for="mlp" style="margin:0">Field leader<select id="mlp">${leaders().map(l => `<option value="${esc(l.email)}" ${l.email === email ? 'selected' : ''}>${esc(whoLabel(l))}</option>`).join('')}</select></label>` : '';
+  if (!stores.length) { v.innerHTML = `<div class="spread">${picker}</div><div class="panel"><p>No stores assigned yet.</p></div>`; wireMlp(); return; }
+  const type = S.msgType || 'dailyStore';
+  if (!stores.includes(S.msgStore)) S.msgStore = stores.slice().sort((a, b) => (S.scores[b]?.score ?? 0) - (S.scores[a]?.score ?? 0))[0];
+  const week = weekStartOf(today());
+  const plan = await S.be.plan(email, week);
+  const myVisits = S.visits.filter(x => x.email === email).sort((a, b) => b.date.localeCompare(a.date)).slice(0, 20);
+  if (!myVisits.some(x => x.id === S.msgVisit)) S.msgVisit = myVisits[0]?.id || null;
+  const needsStore = ['dailyStore', 'kickoff'].includes(type);
+  const asOf = S.meta.latestDaily || today();
+  const snap = S.daily?.stores?.[S.msgStore];
+  const visitDays = (plan?.days || []).filter(d => d.store === S.msgStore && d.date >= today()).map(d => d.date);
+  const pastDays = (plan?.days || []).filter(d => d.store === S.msgStore && d.date < today() && d.status === 'done').map(d => d.date);
+  const tp = { people: S.rsa?.people || [], weeks: S.weeks || {}, tops: S.msgTops !== false };
+  let text = '';
+  if (!S.daily && type !== 'recap') text = 'Waiting on the first daily report upload.';
+  else if (type === 'dailyStore') text = dailyStore({ store: S.msgStore, snap, asOf, plan, today: today(), sender: who.name, ...tp });
+  else if (type === 'dailyMarket') text = dailyMarket({ stores, daily: S.daily, asOf, plan, today: today(), sender: who.name, ...tp });
+  else if (type === 'kickoff') text = kickoff({ store: S.msgStore, snap, asOf, people: S.rsa?.people || [], goals: DEFAULT_GOALS, pace: paceFactor(S.rsa?.to), visitDays, pastDays, sender: who.name, weekStart: week, ...tp });
+  else if (type === 'marketUpdate') text = marketUpdate({ stores, daily: S.daily, scores: S.scores, plan, sender: who.name, asOf, ...tp });
+  else if (type === 'recap') {
+    const vis = myVisits.find(x => x.id === S.msgVisit);
+    const next = vis ? (plan?.days || []).find(d => d.store === vis.store && d.date > vis.date && d.status !== 'done')?.date : null;
+    text = vis ? visitRecap({ visit: vis, nextVisit: next, sender: who.name }) : 'No visits logged yet. Log a visit, then come back for the recap.';
+  }
+  const info = MSG_TYPES.find(t => t[0] === type);
+  v.innerHTML = `
+  <div class="spread">
+    <div><h2 class="big" style="margin:0">Team messages</h2><p class="small" style="margin:4px 0 0">Written from the latest numbers. Edit anything, then copy and send in Teams, a text or email. ${dataLine()}</p></div>
+    ${picker}
+  </div>
+  <div class="panel">
+    <div class="msgtypes" role="tablist" aria-label="Message type">${MSG_TYPES.map(([k, l]) => `<button type="button" role="tab" aria-selected="${k === type}" class="${k === type ? 'on' : ''}" data-mt="${k}">${esc(l)}</button>`).join('')}</div>
+    <p class="small" style="margin:10px 0">${esc(info[2])}</p>
+    <div class="row" style="margin-bottom:10px">
+      ${needsStore ? `<label for="mstore" style="margin:0">Store<select id="mstore">${stores.map(s => `<option ${s === S.msgStore ? 'selected' : ''}>${esc(s)}</option>`).join('')}</select></label>` : ''}
+      ${type !== 'recap' ? `<label class="check" for="mtops" style="margin:0"><input type="checkbox" id="mtops" ${S.msgTops !== false ? 'checked' : ''}>Include top performers</label>` : ''}
+      ${type === 'recap' && myVisits.length ? `<label for="mvisit" style="margin:0">Visit<select id="mvisit">${myVisits.map(x => `<option value="${esc(x.id)}" ${x.id === S.msgVisit ? 'selected' : ''}>${esc(dayLabel(x.date))}: ${esc(x.store)}${x.remote ? ' (remote)' : ''}</option>`).join('')}</select></label>` : ''}
+    </div>
+    <div class="fieldhead"><label for="msgout">Message</label>${micBtn('msgout')}</div>
+    <textarea id="msgout" rows="18" spellcheck="true">${esc(text)}</textarea>
+    <div class="row" style="margin-top:10px"><button class="btn primary" id="mcopy">Copy message</button><button class="btn" id="mreset">Start over</button><span class="small muted">Nothing is sent from the app.</span></div>
+  </div>`;
+  wireMlp(); wireMics(v);
+  v.querySelectorAll('[data-mt]').forEach(b => b.onclick = () => { S.msgType = b.dataset.mt; viewMessages(); });
+  const ms = $('#mstore'); if (ms) ms.onchange = () => { S.msgStore = ms.value; viewMessages(); };
+  const mv = $('#mvisit'); if (mv) mv.onchange = () => { S.msgVisit = mv.value; viewMessages(); };
+  $('#mreset').onclick = () => viewMessages();
+  const mt = $('#mtops'); if (mt) mt.onchange = () => { S.msgTops = mt.checked; viewMessages(); };
+  $('#mcopy').onclick = async () => {
+    const ta = $('#msgout');
+    try { await navigator.clipboard.writeText(ta.value); toast('Copied. Paste it into Teams, a text or email.'); }
+    catch (e) { ta.focus(); ta.select(); try { document.execCommand('copy'); toast('Copied. Paste it into Teams, a text or email.'); } catch (x) { toast('Text is selected. Press Ctrl+C (or Cmd+C) to copy.'); } }
+  };
+}
+function wireMlp() { const l = $('#mlp'); if (l) l.onchange = () => { S.viewEmail = l.value; viewMessages(); }; }
+
+// ---------------------------------------------------------------- visit log
+function viewVisits() {
+  const v = $('#view');
+  const mine = S.user.stores || [];
+  let list = seesAll() ? S.visits : S.visits.filter(x => x.email === S.user.email || mine.includes(x.store));
+  if (S.visitFilter && S.visitFilter !== '*') list = list.filter(x => x.email === S.visitFilter || x.store === S.visitFilter);
+  list = list.slice().sort((a, b) => b.date.localeCompare(a.date) || a.store.localeCompare(b.store));
+  v.innerHTML = `
+  <div class="spread">
+    <h2 class="big" style="margin:0">Visit log</h2>
+    <label for="vf" style="margin:0">Show<select id="vf"><option value="*">All visits</option>
+      ${seesAll() ? `<optgroup label="Market Leader">${leaders().map(l => `<option value="${esc(l.email)}" ${S.visitFilter === l.email ? 'selected' : ''}>${esc(l.name || l.email)}</option>`).join('')}</optgroup>` : ''}
+      <optgroup label="Store">${(seesAll() ? STORES.map(s => s.name) : mine).map(s => `<option ${S.visitFilter === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}</optgroup></select></label>
+  </div>
+  <div class="panel">${list.map(x => {
+    const sm = visitSummary(x), fixes = sm.fixes;
+    return `<details class="vis"><summary><b>${esc(x.store)}</b><span class="small">${esc(longDate(x.date))}</span><span class="small muted">${esc(x.name)}</span>${x.remote ? '<span class="pill">Remote</span>' : ''}<span class="pill ${x.vtype === 'Follow-Up' ? 'check' : x.vtype === 'Priority' ? 'set' : ''}">${esc(x.vtype || kindToType(x.kind))}</span>${x.status === 'draft' ? '<span class="pill off">Draft</span>' : ''}${sm.score ? `<span class="pill">${sm.score.pct}%</span>` : ''}${fixes.length ? `<span class="pill off">${fixes.length} to fix</span>` : ''}</summary>
+      <div class="vbody">${sm.win ? `<b>Leader win:</b> ${esc(sm.winName ? titleName(sm.winName) + ': ' : '')}${esc(sm.win)}\n` : ''}<b>Working:</b> ${esc(x.working || '--')}
+<b>Commitments:</b>
+${sm.commitments.length ? sm.commitments.map((c, i) => `${i + 1}. ${esc(c)}`).join('\n') : '--'}
+${sm.leaderCommit ? `<b>Leader commits to:</b> ${esc(sm.leaderCommit)}\n` : ''}${sm.support ? `<b>Support needed:</b> ${esc(sm.support)}\n` : ''}${x.leaderCommit?.notes ? `<b>Leader notes:</b> ${esc(x.leaderCommit.notes)}\n` : ''}${Object.entries(x.segMeta || {}).filter(([, m]) => m?.how || m?.name).map(([gi, m]) => { const vals = Object.values(x.segs?.[gi] || {}); const pts = vals.reduce((t, v) => t + (v === 'yes' ? 1 : v === 'partial' ? 0.5 : 0), 0); return `<b>${esc(SEGMENTS[gi]?.name || '')}:</b> ${m.how === 'practice' ? 'practiced with' : 'watched'} ${esc(titleName(m.name || 'a team member'))}${m.how === 'observed' ? ' on a live guest' : ''}${vals.length ? `, ${pts} of ${SEGMENTS[gi].items.length}` : ''}${m.notes ? `. ${esc(m.notes)}` : ''}\n`; }).join('')}${sm.coached.length ? `<b>Consultants coached:</b>\n${sm.coached.map(c => `- ${esc(titleName(c.name))}${c.via ? `: coached through the store leader${c.score ? `, ${c.score}` : ''}` : ''}${c.drill ? `: ${esc(c.drill)}${c.ran ? ` practice, ${c.score}` : ', practice not run'}${c.rerun === 'better' ? ', second rep better' : c.rerun === 'same' ? ', second rep same' : ''}` : ''}${c.adjust ? `. Adjustment: ${esc(c.adjust)}` : ''}${c.notes ? `\n  Notes: ${esc(c.notes)}` : ''}`).join('\n')}\n` : ''}${x.teamNotes ? `<b>Team notes:</b> ${esc(x.teamNotes)}\n` : ''}${x.reflection ? `<b>Coach next visit:</b> ${esc(x.reflection)}\n` : ''}<b>Notes:</b> ${esc(x.notes || '--')}${fixes.length ? `\n<b>6 Elements to fix:</b> ${esc(fixes.join(', '))}` : ''}</div>
+      <button class="btn tiny" data-ov='${esc(JSON.stringify({ store: x.store, date: x.date, email: x.email, kind: x.kind, remote: !!x.remote }))}' style="margin-top:8px">Open</button></details>`;
+  }).join('') || '<p class="muted">No visits logged yet.</p>'}</div>`;
+  $('#vf').onchange = e => { S.visitFilter = e.target.value; viewVisits(); };
+  v.querySelectorAll('[data-ov]').forEach(b => b.onclick = () => openVisit(JSON.parse(b.dataset.ov)));
+}
+
+// ---------------------------------------------------------------- upload (Frank)
+function viewUpload() {
+  const v = $('#view'), m = S.meta;
+  const when = x => x ? `${esc(new Date(x.at).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }))} · ${esc(x.file || '')}` : 'Never';
+  v.innerHTML = `
+  <section class="panel">
+    <h2>Upload the reports</h2>
+    <p>Drop in any of the four files. The app figures out which is which.</p>
+    <ul class="small" style="color:var(--body);padding-left:18px">
+      <li><b>Daily report</b> (every morning, <code>daily-report-YYYY-MM-DD.csv</code>): drives the need scores, the Sunday plan and the mid-week pivots. Keep the WTD and MTD columns in the export. Last upload: ${when(m.lastDaily)}</li>
+      <li><b>RSA report</b> (every morning with the daily report, <code>rsa_report_…_to_….csv</code>): drives the consultant conversations and the consultant side of the need score. Each day's copy is kept, so the app compares this week against the month before it and flags who is slipping. Last upload: ${when(m.lastRsa)}</li>
+      <li><b>Store leader list</b> (when leaders change, the store-leader-logins file): names the store leader on every visit. ${(S.storeLeaders || []).length} on file.</li>
+      <li><b>Sales team roster</b> (when people change, the Paylocity "Sales Team" export): tells the app which store each consultant works in. ${S.roster.length} people on file.</li>
+    </ul>
+    <label class="drop" id="drop" for="file"><input type="file" id="file" accept=".csv,.xlsx,.xls" multiple><span><b>Choose files</b> or drag them here</span></label>
+    <div id="pending"></div>
+  </section>`;
+  const drop = $('#drop'), input = $('#file');
+  input.onchange = () => handleFiles([...input.files]);
+  drop.ondragover = e => { e.preventDefault(); drop.classList.add('over'); };
+  drop.ondragleave = () => drop.classList.remove('over');
+  drop.ondrop = e => { e.preventDefault(); drop.classList.remove('over'); handleFiles([...e.dataTransfer.files]); };
+}
+async function handleFiles(files) {
+  const box = $('#pending');
+  box.innerHTML = '<p class="loading">Reading…</p>';
+  const out = [], read = [];
+  for (const f of files) {
+    try { const rows = await readSpreadsheet(f); read.push({ f, rows, heads: new Set(Object.keys(rows[0] || {}).map(h => h.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_'))) }); }
+    catch (e) { out.push({ file: f.name, error: e.message }); }
+  }
+  // A roster in the same batch is used to match the RSA report.
+  const isRoster = h => h.has('location') && h.has('name');
+  const batchRoster = read.filter(x => isRoster(x.heads)).map(x => prepRoster(x.f.name, x.rows)).find(x => x.people);
+  for (const { f, rows, heads } of read) {
+    try {
+      if (heads.has('segment') && heads.has('metric')) out.push(prepDaily(f.name, rows));
+      else if (heads.has('sales_associate')) out.push(prepRsa(f.name, rows, batchRoster?.people));
+      else if (heads.has('location') && heads.has('name')) out.push(prepRoster(f.name, rows));
+      else if (heads.has('email') && heads.has('stores') && heads.has('role')) out.push(prepStoreLeaders(f.name, rows));
+      else out.push({ file: f.name, error: 'Not a daily report, RSA report, roster or store leader list. Check that the first row has the column names.' });
+    } catch (e) { out.push({ file: f.name, error: e.message }); }
+  }
+  // Roster first so the RSA report matches against the new list.
+  out.sort((a, b) => (a.kind === 'roster' ? -1 : 0) - (b.kind === 'roster' ? -1 : 0));
+  const good = out.filter(x => !x.error);
+  box.innerHTML = (good.length > 1 ? `<div class="row" style="margin:0 0 12px"><button class="btn accent" id="puball">Publish all ${good.length}</button><span class="small muted">Or publish them one at a time below.</span></div>` : '') + out.map((x, i) => `<div class="panel" style="background:var(--soft)" id="pf${i}">
+    <h3>${esc(x.file)}</h3>
+    ${x.error ? `<p class="err">${esc(x.error)}</p>` : `<p class="small">${x.summary}</p>${x.extra || ''}<button class="btn primary" data-pub="${i}">Publish ${esc(x.label)}</button>`}
+  </div>`).join('');
+  const pa = $('#puball');
+  if (pa) pa.onclick = async () => {
+    pa.disabled = true; pa.textContent = 'Publishing…';
+    try { for (const x of good) await x.publish(); toast(`${good.length} files published.`); await loadShared(); S.tab = 'upload'; renderShell(); }
+    catch (e) { toast(friendly(e), true); pa.disabled = false; pa.textContent = `Publish all ${good.length}`; }
+  };
+  box.querySelectorAll('[data-pub]').forEach(b => b.onclick = async () => {
+    const x = out[+b.dataset.pub];
+    b.disabled = true; b.textContent = 'Publishing…';
+    try { await x.publish(); toast(`${x.label[0].toUpperCase() + x.label.slice(1)} published.`); b.textContent = 'Published'; await loadShared(); S.tab = 'upload'; renderShell(); }
+    catch (e) { toast(friendly(e), true); b.disabled = false; b.textContent = `Publish ${x.label}`; }
+  });
+}
+function prepDaily(file, rows) {
+  const d = parseDaily(rows);
+  if (d.missing.length) return { file, error: `Missing columns: ${d.missing.join(', ')}.` };
+  const n = Object.keys(d.stores).length;
+  const missingStores = STORES.filter(s => !d.stores[s.name]).map(s => s.name);
+  return { file, kind: 'daily', label: 'daily report',
+    summary: `Daily report through <b>${esc(longDate(d.date))}</b> · ${n} stores · periods found: ${d.periods.map(p => p.toUpperCase()).join(', ')}${!d.periods.includes('wtd') ? ' <span class="warn">(no WTD columns, the plan will use month to date only)</span>' : ''}`,
+    extra: (missingStores.length ? `<p class="small warn">Not in this file: ${missingStores.map(esc).join(', ')}</p>` : '') + (d.unknown.length ? `<p class="small warn">Rows skipped (store name not recognized): ${d.unknown.map(esc).join(', ')}</p>` : ''),
+    publish: () => S.be.publishDaily({ date: d.date, periods: d.periods, stores: d.stores, file }) };
+}
+function prepRsa(file, rows, rosterOverride) {
+  const r = parseRsa(rows);
+  if (r.missing.length) return { file, error: `Missing columns: ${r.missing.join(', ')}.` };
+  const range = rangeFromFileName(file) || { from: null, to: S.meta.latestDaily || today() };
+  const roster = rosterOverride || S.roster;
+  const res = resolveReportNames(r.people, roster);
+  const people = res.matched.map(({ p, d }) => ({ ...p, name: d.name || p.name, store: d.store }));
+  const sugg = res.unmatched.filter(p => res.suggestions[p.cid] && res.suggestions[p.cid].how !== 'possible');
+  sugg.forEach(p => { const d = roster.find(x => x.cid === res.suggestions[p.cid].cid); people.push({ ...p, store: d.store }); });
+  const left = res.unmatched.filter(p => !sugg.includes(p));
+  return { file, kind: 'rsa', label: 'RSA report',
+    summary: `RSA report ${range.from ? esc(shortDate(range.from)) + ' to ' : 'through '}${esc(shortDate(range.to))} · <b>${people.length}</b> consultants matched to a store${left.length ? ` · <span class="warn">${left.length} not on the roster</span>` : ''}`,
+    extra: left.length ? `<p class="small">Not matched (left out of coaching until the roster has them): ${left.map(p => esc(titleName(p.name))).join(', ')}</p>` : '',
+    publish: () => S.be.publishRsa({ from: range.from, to: range.to, file, people }) };
+}
+// Store leader list (store-leader-logins export): one leader per store. Names the leader on visits.
+function prepStoreLeaders(file, rows) {
+  const leaders = [], bad = new Set();
+  rows.forEach(r => {
+    const o = {}; for (const [k, v] of Object.entries(r)) o[k.trim().toLowerCase()] = String(v ?? '').trim();
+    if (!o.name || !o.stores) return;
+    o.stores.split(/[;|,]/).map(x => x.trim()).filter(Boolean).forEach(st => {
+      const store = canonicalStore(st);
+      if (!isKnownStore(store)) { bad.add(st); return; }
+      leaders.push({ store, name: o.name, email: (o.email || '').toLowerCase() });
+    });
+  });
+  const covered = new Set(leaders.map(l => l.store));
+  const missing = STORES.filter(s => !covered.has(s.name)).map(s => s.name);
+  return { file, kind: 'leaders', label: 'store leader list',
+    summary: `Store leaders · <b>${leaders.length}</b> across ${covered.size} stores`,
+    extra: (missing.length ? `<p class="small warn">No leader listed for: ${missing.map(esc).join(', ')}</p>` : '') + (bad.size ? `<p class="small warn">Rows skipped (store not recognized): ${[...bad].map(esc).join(', ')}</p>` : ''),
+    publish: async () => { await S.be.saveStoreLeaders(leaders); S.storeLeaders = leaders; } };
+}
+function prepRoster(file, rows) {
+  const r = parseTeamRoster(rows);
+  if (r.missing.length) return { file, error: `Missing columns: ${r.missing.join(', ')}.` };
+  const old = new Map(S.roster.map(p => [p.cid, p]));
+  const people = r.people.map(p => ({ ...p, aliases: old.get(p.cid)?.aliases || [] }));
+  return { file, kind: 'roster', label: 'roster', people,
+    summary: `Roster · <b>${people.length}</b> people in ${new Set(people.map(p => p.store)).size} stores${r.open.length ? ` · ${r.open.length} open seats` : ''}`,
+    extra: r.badStores.length ? `<p class="small warn">Rows skipped (store not recognized): ${r.badStores.map(esc).join(', ')}</p>` : '',
+    publish: async () => { await S.be.saveRoster(people); S.roster = people; } };
+}
+
+// ---------------------------------------------------------------- setup (Frank): logins and store assignment
+// ---------------------------------------------------------------- markets
+// Name a market, give it its stores, a Market Leader and a director. Their store lists follow the markets.
+function marketsSection(groups) {
+  const ms = S.markets || [];
+  const em = S.editMarket;
+  const m = em ? (ms.find(x => x.id === em) || { id: '', name: '', leader: '', director: '', stores: [] }) : null;
+  const byRole = r => S.users.filter(u => u.role === r).sort((a, b) => (a.name || a.email).localeCompare(b.name || b.email));
+  const nameOf = e => { const u = S.users.find(x => x.email === e); return u ? u.name || u.email : ''; };
+  const unassigned = STORES.filter(st => !ms.some(x => x.stores.includes(st.name))).map(st => st.name);
+  return `<section class="panel">
+    <div class="spread" style="margin:0 0 8px"><h2 style="margin:0">Markets</h2><button class="btn primary" id="addmkt" type="button">Add a market</button></div>
+    <p class="small">Name each market, pick its stores, and name its Market Leader and director. Their store lists and weekly plans follow the market. A store belongs to one market.</p>
+    ${unassigned.length ? `<div class="warnbox"><b>${unassigned.length} stores are not in a market:</b> ${unassigned.map(esc).join(', ')}</div>` : ''}
+    ${m ? `<form class="panel" id="mform" style="background:var(--soft)">
+      <h3>${em === '__new' ? 'Add a market' : 'Edit ' + esc(m.name)}</h3>
+      <div class="focus" style="gap:0 16px">
+        <div style="margin:0 0 12px">${fieldInput('mname', 'Market name', m.name, '', '', 'required placeholder="For example: Jacksonville" style="width:100%"')}</div>
+        <label for="mleader">Market Leader<select id="mleader"><option value="">None yet</option>${byRole('leader').map(u => `<option value="${esc(u.email)}" ${m.leader === u.email ? 'selected' : ''}>${esc(u.name || u.email)}</option>`).join('')}</select></label>
+        <label for="mdirector">Director<select id="mdirector"><option value="">None yet</option>${byRole('director').map(u => `<option value="${esc(u.email)}" ${m.director === u.email ? 'selected' : ''}>${esc(u.name || u.email)}</option>`).join('')}</select></label>
+      </div>
+      <p class="small" style="margin:0 0 8px">Not on the list? Add them under Logins below with the Market Leader or Director role, then come back.</p>
+      <p class="small" style="margin:4px 0"><b>Stores</b> (greyed out = in another market; checking it moves it here)</p>
+      <div class="storepick">${Object.entries(groups).map(([k, arr]) => `<div class="grp">${esc(DISTRICTS[k])}</div>${arr.map(st => {
+        const other = ms.find(x => x.id !== m.id && x.stores.includes(st.name));
+        return `<label class="check" for="ms_${st.id}" ${other ? `title="Now in ${esc(other.name)}" style="opacity:.6"` : ''}><input type="checkbox" id="ms_${st.id}" value="${esc(st.name)}" ${m.stores.includes(st.name) ? 'checked' : ''}>${esc(st.name)}${other ? ` <small class="muted">(${esc(other.name)})</small>` : ''}</label>`;
+      }).join('')}`).join('')}</div>
+      <div class="row" style="margin-top:14px"><button class="btn primary" type="submit">Save market</button><button class="link" type="button" id="mcancel">Cancel</button>
+        ${em !== '__new' ? `<button class="link" type="button" id="mdel" style="margin-left:auto;color:var(--red)">Delete market</button>` : ''}</div>
+      <div id="mdelconfirm"></div>
+    </form>` : ''}
+    <div class="scroller"><table class="grid"><thead><tr><th>Market</th><th>Market Leader</th><th>Director</th><th>Stores</th><th></th></tr></thead><tbody>
+      ${ms.map(x => `<tr><td class="nm">${esc(x.name)}</td><td>${esc(nameOf(x.leader)) || '<span class="warn">None</span>'}</td><td>${esc(nameOf(x.director)) || '<span class="muted">None</span>'}</td>
+        <td style="white-space:normal;min-width:220px">${x.stores.map(esc).join(', ') || '<span class="muted">--</span>'}</td><td><button class="btn tiny" type="button" data-em="${esc(x.id)}">Edit</button></td></tr>`).join('') || '<tr><td colspan="5">No markets yet. Add your first one.</td></tr>'}
+    </tbody></table></div>
+  </section>`;
+}
+function wireMarkets() {
+  const v = $('#view');
+  wireMics(v);
+  $('#addmkt').onclick = () => { S.editMarket = '__new'; viewSetup(); };
+  v.querySelectorAll('[data-em]').forEach(b => b.onclick = () => { S.editMarket = b.dataset.em; viewSetup(); });
+  const f = $('#mform'); if (!f) return;
+  $('#mcancel').onclick = () => { S.editMarket = null; viewSetup(); };
+  const del = $('#mdel');
+  if (del) del.onclick = () => {
+    const m = S.markets.find(x => x.id === S.editMarket);
+    $('#mdelconfirm').innerHTML = `<div class="warnbox">Delete ${esc(m.name)}? Its stores become unassigned and come off its leaders' lists. Visits stay in the log. <button class="btn tiny" type="button" id="mdelyes">Delete</button></div>`;
+    $('#mdelyes').onclick = () => saveMarketList(S.markets.filter(x => x.id !== m.id), 'Market deleted.');
+  };
+  f.onsubmit = e => {
+    e.preventDefault();
+    const name = $('#mname').value.trim(); if (!name) return toast('Give the market a name.', true);
+    const stores = [...f.querySelectorAll('.storepick input:checked')].map(x => x.value);
+    const id = S.editMarket === '__new' ? slug(name) + '-' + Date.now().toString(36) : S.editMarket;
+    const doc = { id, name, leader: $('#mleader').value, director: $('#mdirector').value, stores };
+    const list = (S.markets || []).filter(x => x.id !== id).map(x => ({ ...x, stores: x.stores.filter(st => !stores.includes(st)) }));
+    list.push(doc); list.sort((a, b) => a.name.localeCompare(b.name));
+    saveMarketList(list, `${name} saved.`);
+  };
+}
+// Saves the markets, then updates each Market Leader's and director's store list to match.
+async function saveMarketList(list, msg) {
+  try {
+    const before = new Set((S.markets || []).flatMap(m => [m.leader, m.director]).filter(Boolean));
+    await S.be.saveMarkets(list);
+    S.markets = list;
+    const members = new Set(list.flatMap(m => [m.leader, m.director]).filter(Boolean));
+    for (const u of S.users.filter(x => members.has(x.email) || before.has(x.email))) {
+      const stores = [...new Set(list.filter(m => m.leader === u.email || m.director === u.email).flatMap(m => m.stores))];
+      if (stores.join('|') !== (u.stores || []).join('|')) { u.stores = stores; await S.be.saveUser(u); if (u.email === S.user.email) S.user = u; }
+    }
+    S.editMarket = null; toast(msg); viewSetup();
+  } catch (e) { toast(friendly(e), true); }
+}
+function viewSetup() {
+  const v = $('#view');
+  const rank = r => ({ leader: 0, director: 1, admin: 2, exec: 3 }[r] ?? 4);
+  const users = S.users.slice().sort((a, b) => rank(a.role) - rank(b.role) || (a.name || a.email).localeCompare(b.name || b.email));
+  const edit = S.editUser || null;
+  const u = edit ? (S.users.find(x => x.email === edit) || { email: '', name: '', role: 'leader', stores: [], off: DEFAULT_OFF }) : null;
+  const taken = s => S.users.find(l => l.role === 'leader' && l.email !== u?.email && (l.stores || []).includes(s));
+  const groups = {};
+  STORES.forEach(st => (groups[st.district] ||= []).push(st));
+  v.innerHTML = `
+  ${marketsSection(groups)}
+  <section class="panel">
+    <div class="spread" style="margin:0 0 8px"><h2 style="margin:0">Logins and store assignment</h2><button class="btn primary" id="adduser">Add a person</button></div>
+    <p class="small">Market Leaders and directors see their own stores, weekly plan and visits. Each store has one Market Leader; directors can share stores with them. Executives see everything, read only. People create their own password with their @${esc(EMAIL_DOMAIN)} email; they get in once they are listed here.</p>
+    ${u ? `<form class="panel" id="uform" style="background:var(--soft)">
+      <h3>${edit === '__new' ? 'Add a person' : 'Edit ' + esc(u.name || u.email)}</h3>
+      <div class="focus" style="gap:0 16px">
+        <label for="uemail">Work email<input id="uemail" type="email" value="${esc(u.email)}" ${edit !== '__new' ? 'readonly' : ''} required></label>
+        <div style="margin:0 0 12px">${fieldInput('uname', 'Name', u.name, '', '', 'required style="width:100%"')}</div>
+        <label for="urole">Role<select id="urole">${ROLES.map(([k, l]) => `<option value="${k}" ${u.role === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+      </div>
+      ${marketsOf(u.email).length ? `<p class="small" style="margin:4px 0"><b>Stores</b> come from their market${marketsOf(u.email).length > 1 ? 's' : ''}: ${marketsOf(u.email).map(m => `${esc(m.name)} (${m.stores.length})`).join(', ')}. Change them in Markets above.</p><div hidden>` : '<div>'}
+      <p class="small" style="margin:4px 0"><b>Stores</b> (greyed out = already has a Market Leader. For a Market Leader, checking it moves it here. Directors can share stores.)</p>
+      <div class="storepick">${Object.entries(groups).map(([k, arr]) => `<div class="grp">${esc(DISTRICTS[k])}</div>${arr.map(st => {
+        const t = taken(st.name);
+        return `<label class="check" for="st_${st.id}" ${t ? `title="Now with ${esc(t.name || t.email)}" style="opacity:.6"` : ''}><input type="checkbox" id="st_${st.id}" value="${esc(st.name)}" ${(u.stores || []).includes(st.name) ? 'checked' : ''}>${esc(st.name)}</label>`;
+      }).join('')}`).join('')}</div></div>
+      <p class="small" style="margin:12px 0 4px"><b>Default days off</b> (pick 2; Tue, Wed or Thu works best. They can change any week from their own page.)</p>
+      <div class="dayspick">${DAY_LONG.map((n, i) => `<label class="check" for="uo${i}"><input type="checkbox" id="uo${i}" value="${i}" ${safeOff(u.off).includes(i) ? 'checked' : ''}>${n}</label>`).join('')}</div>
+      <div class="row" style="margin-top:14px"><button class="btn primary" type="submit">Save</button><button class="link" type="button" id="ucancel">Cancel</button>
+        ${edit !== '__new' && u.email !== OWNER_EMAIL ? `<button class="link" type="button" id="udel" style="margin-left:auto;color:var(--red)">Remove access</button>` : ''}</div>
+      <div id="delconfirm"></div>
+    </form>` : ''}
+    <div class="scroller"><table class="grid"><thead><tr><th>Name</th><th>Role</th><th>Stores</th><th>Default off</th><th></th></tr></thead><tbody>
+      ${users.map(x => `<tr><td class="nm">${esc(x.name || x.email)}<br><small class="muted">${esc(x.email)}</small></td><td>${esc(roleLabel(x.role))}</td>
+        <td style="white-space:normal;min-width:220px">${(x.stores || []).map(esc).join(', ') || '<span class="muted">--</span>'}</td>
+        <td>${FIELD.includes(x.role) ? safeOff(x.off, x.role).map(i => DAY_NAMES[i]).join(', ') : ''}</td>
+        <td><button class="btn tiny" data-eu="${esc(x.email)}">Edit</button></td></tr>`).join('')}
+    </tbody></table></div>
+  </section>`;
+  $('#adduser').onclick = () => { S.editUser = '__new'; viewSetup(); };
+  wireMarkets();
+  wireMics(v);
+  v.querySelectorAll('[data-eu]').forEach(b => b.onclick = () => { S.editUser = b.dataset.eu; viewSetup(); });
+  if (!u) return;
+  $('#ucancel').onclick = () => { S.editUser = null; viewSetup(); };
+  const del = $('#udel');
+  if (del) del.onclick = () => {
+    $('#delconfirm').innerHTML = `<div class="warnbox">Remove ${esc(u.name || u.email)}? They lose access and their stores become unassigned. Their visits stay in the log. <button class="btn tiny" type="button" id="delyes">Remove</button></div>`;
+    $('#delyes').onclick = async () => { await S.be.deleteUser(u.email); S.users = S.users.filter(x => x.email !== u.email); S.editUser = null; toast('Access removed.'); viewSetup(); };
+  };
+  $('#uform').onsubmit = async e => {
+    e.preventDefault();
+    const email = $('#uemail').value.trim().toLowerCase();
+    if (!email.endsWith('@' + EMAIL_DOMAIN) && !DEMO) return toast(`Use a @${EMAIL_DOMAIN} email.`, true);
+    const stores = marketsOf(email).length ? (S.users.find(x => x.email === email)?.stores || []) : [...v.querySelectorAll('#uform .storepick input:checked')].map(x => x.value);
+    const off = [...v.querySelectorAll('.dayspick input:checked')].map(x => +x.value);
+    const role = $('#urole').value;
+    if (FIELD.includes(role) && !validOff(off)) return toast('Pick exactly 2 default days off.', true);
+    const doc = { ...(S.users.find(x => x.email === email) || {}), email, name: $('#uname').value.trim(), role, stores, off };
+    try {
+      // A store has one Market Leader: take moved stores off any other Market Leader. Directors can overlap.
+      for (const other of S.users.filter(x => role === 'leader' && x.role === 'leader' && x.email !== email && (x.stores || []).some(s => stores.includes(s)))) {
+        other.stores = other.stores.filter(s => !stores.includes(s)); await S.be.saveUser(other);
+      }
+      await S.be.saveUser(doc);
+      S.users = [...S.users.filter(x => x.email !== email), doc];
+      if (email === S.user.email) S.user = doc;
+      S.editUser = null; toast('Saved.'); viewSetup();
+    } catch (x) { toast(friendly(x), true); }
+  };
+}
+
+// ---------------------------------------------------------------- how it works
+function viewGuide() {
+  $('#view').innerHTML = `<section class="panel guide">
+    <p class="eyebrow">Field Leader Guide</p>
+    <h2 class="big">Where to go, and what to coach when you get there</h2>
+    <p>For Market Leaders and directors. The app builds your week, points you to the stores and people that need you, and walks you through the visit. You should never need to build a spreadsheet.</p>
+    <h3 style="margin-top:18px">Every morning: your daily brief</h3>
+    <ul>
+      <li>Open the app and start on <b>Daily brief</b>. It covers yesterday for your stores and your people: wins to celebrate, opportunities, commitments due, and where you're going today.</li>
+      <li>Then open <b>Team messages</b>, copy the daily huddle for each store and the market recap, and send them to your team.</li>
+    </ul>
+    <h3 style="margin-top:18px">Sunday: your week is built for you</h3>
+    <ul>
+      <li>Pick your 2 days off for each week on <b>My week</b> (tap the › arrow for next week). Any 2 days work; Tuesday, Wednesday or Thursday works best. Your schedule builds as soon as you save.</li>
+      <li>If you don't pick, the plan uses your default days off (Wednesday and Thursday unless Frank set others).</li>
+      <li>Open <b>My week</b> on Sunday. The plan is built from Saturday's numbers: 5 visit days around your 2 days off.</li>
+      <li>Every store gets a visit. Extra days go to the stores that need you most, as a second visit late in the week. Visit 1 sets the plan, visit 2 checks it.</li>
+      <li>Visits are full days in one store. More stores than visit days? The lowest-need stores are marked Call.</li>
+      <li>While you're on a full-day visit, coach your other stores remotely from <b>Remote coaching</b> on My week: phone, video or Teams. Log it the same way (numbers, focus items, consultants, from-to commitments), minus the 6 Elements walk.</li>
+      <li>You can change any day by hand.</li>
+    </ul>
+    <h3 style="margin-top:18px">During the week: pivot when the numbers move</h3>
+    <ul>
+      <li>Frank uploads the daily report and RSA report each morning. If a store got worse since Sunday and now needs you more than a store still ahead on your plan, you get a suggested swap.</li>
+      <li>The swap always drops the visit with the least opportunity left this week, and the remaining days re-rank so the highest-need store is next.</li>
+      <li>You decide: <b>Make the swap</b> or <b>Keep my plan</b>. Either way it is recorded.</li>
+    </ul>
+    <h3 style="margin-top:18px">In the store: open the visit and work top to bottom</h3>
+    <ol>
+      <li><b>Why you are here.</b> Why this store is on your plan, and the scorecard for the prior day, week or month. Read the traffic line first. If traffic is way down, look at the schedule before you coach effort.</li>
+      <li><b>Leader win.</b> Start by celebrating the leader.</li>
+      <li><b>Last visit's commitments.</b> Mark each one done, partial or not done before anything new.</li>
+      <li><b>Two focus items.</b> The app picks the two furthest from goal. Tap to swap one. Keep it to two.</li>
+      <li><b>Consultants coached.</b> Who to see first is already there: below minimum, slipping this week, biggest gap, and the top seller to recognize. Run the stand-up practice with them.</li>
+      <li><b>The 6 Elements walk.</b> Score each item Yes, Partial or No. Element 1 includes the 3 value segments. Element 3 is the AOR walk. Add photos where they help.</li>
+      <li><b>Photos.</b> Take or add photos, tag each one to an element and add a caption.</li>
+      <li><b>Action plan.</b> Up to 3 commitments, each from X to Y (where it is today, where it will be by the next visit), with how, an owner and a date. They are suggested for you; change anything. The next visit starts with these.</li>
+      <li><b>Your reflection</b>, then <b>Submit visit</b>. The recap message is ready in Team messages.</li>
+    </ol>
+    <p class="small">Everything saves as you go, even if the store wifi drops. Tap Talk on any box to say it instead of typing.</p>
+    <h3 style="margin-top:18px">How the need score works</h3>
+    <p>0 to 100, higher needs you more. Store points come from sales against budget (month and week), SPG with cancellations against LY, close rate against budget, cancellations over 4%, protection attach under 60%, finance under 55% of sales, and days since the last visit. Consultant points come from the daily RSA report: each consultant below the SPH minimum, and each consultant slipping this week (at least 12 hours on the floor and this week's SPH under 75% of their month before it).</p>
+    <h3 style="margin-top:18px">Where to take things</h3>
+    <ul><li>Numbers that look wrong (traffic counters, missing stores, a consultant in the wrong store): Frank.</li><li>Schedule problems you cannot solve inside your stores: Frank.</li><li>Talent and retention conversations: Frank and Leah.</li></ul>
+    <p class="small" style="margin-top:14px">This page never emails anyone. You deliver the coaching.</p>
+  </section>`;
+}
+
+boot();
