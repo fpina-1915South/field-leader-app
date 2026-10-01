@@ -4,7 +4,7 @@
 import {
   normalizeHeader, toNumber, parseDate, slug, canonicalStore, isKnownStore, REGIONS, STORE_METRICS,
   COACHING, METRICS, pickFocus, pickStoreFocus, goalsFor, DEFAULT_GOALS, isOutlet, minSphFor, fmt, weeklyTarget
-} from './base.js?v=202610011005';
+} from './base.js?v=202610011608';
 
 const numOrNull = v => (v === '' || v === null || v === undefined ? null : toNumber(v));
 
@@ -694,3 +694,92 @@ export function consultantCoaching({ p, store, why = 'added', wk = null, goals =
   return { items, strength, drillKey, drill, commit, text: lines.join('\n') };
 }
 export { COACHING, METRICS, STORE_METRICS, fmt, isOutlet, slug };
+
+// ---------------------------------------------------------------- consultant trends (YTD, last month, MTD, this week)
+// The RSA report gives ratios. Turn them back into running totals so periods can be added and subtracted
+// (this week = today's month-to-date minus last Saturday's), then back into ratios.
+const PCT_SUMS = [['fin', 'financePct'], ['bed', 'beddingPct'], ['prot', 'protectionPct'], ['del', 'deliveryPct'], ['mar', 'effMargin'], ['can', 'cancelPct'], ['dis', 'discountPct']];
+export function toSums(p) {
+  if (!p?.k) return null;
+  const k = p.k, sales = k.netSales ?? 0, hours = p.hours ?? (k.sph ? sales / k.sph : 0);
+  const s = { sales, hours, apps: k.creditApps ?? null, tickets: k.avgTicket ? sales / k.avgTicket : null };
+  PCT_SUMS.forEach(([a, m]) => { s[a] = k[m] != null ? k[m] / 100 * sales : null; });
+  return s;
+}
+const comb = (a, b, sign) => { if (!a) return b && sign > 0 ? { ...b } : null; if (!b) return { ...a }; const o = {}; for (const x of Object.keys(a)) o[x] = a[x] != null && b[x] != null ? a[x] + sign * b[x] : null; return o; };
+export const addSums = (a, b) => comb(a, b, 1);
+export const subSums = (a, b) => comb(a, b, -1);
+export function fromSums(s) {
+  if (!s || !(s.hours >= 1)) return null;
+  const sales = s.sales, ok = sales > 0, pc = v => ok && v != null ? v / sales * 100 : null;
+  const k = { netSales: sales, sph: sales / s.hours, avgTicket: s.tickets > 0.5 ? sales / s.tickets : null, appsPer40: s.apps != null ? s.apps / s.hours * 40 : null };
+  PCT_SUMS.forEach(([a, m]) => { k[m] = pc(s[a]); });
+  k.beddingSph = k.beddingPct != null ? k.sph * k.beddingPct / 100 : null;
+  k.protectionSph = k.protectionPct != null ? k.sph * k.protectionPct / 100 : null;
+  return { k, hours: s.hours };
+}
+const monthOf = d => d ? d.slice(0, 7) : '';
+// src = { mtd, base, baseMonthEnd, lastMonth, ytd, ytdSnap, monthEnds: [reports] }. All are RSA uploads (people lists).
+// Returns { [cid]: { ytd, lastMonth, mtd, wtd } } plus labels.
+export function consultantTrends(src) {
+  const by = r => new Map((r?.people || []).map(p => [p.cid, p]));
+  const M = by(src.mtd), B = by(src.base), BE = by(src.baseMonthEnd), L = by(src.lastMonth), Y = by(src.ytd), YS = by(src.ytdSnap);
+  const ends = (src.monthEnds || []).map(by);
+  const mtdMonth = monthOf(src.mtd?.to);
+  const out = {};
+  const cids = new Set([...M.keys(), ...Y.keys(), ...L.keys()]);
+  for (const cid of cids) {
+    const m = toSums(M.get(cid));
+    // This week: same month = MTD minus Saturday. Week started last month = (last month's final minus Saturday) + MTD.
+    let w = null;
+    if (src.base && monthOf(src.base.to) === mtdMonth) w = m && B.get(cid) ? subSums(m, toSums(B.get(cid))) : null;
+    else if (src.base && src.baseMonthEnd) w = addSums(m, BE.get(cid) && B.get(cid) ? subSums(toSums(BE.get(cid)), toSums(B.get(cid))) : null);
+    else if (src.weekStartsThisMonth) w = m;
+    // Year to date: an uploaded YTD report, rolled forward with this month if it stops before it.
+    let y = null;
+    if (src.ytd) {
+      const ys = toSums(Y.get(cid));
+      if (!src.ytd.to || src.ytd.to >= (src.mtd?.to || '')) y = ys;
+      else if (monthOf(src.ytd.to) === mtdMonth) { const sn = toSums(YS.get(cid)); y = src.ytdSnap && m && sn ? addSums(ys, subSums(m, sn)) : ys; }
+      else y = addSums(ys, m);
+    } else if (ends.length) {
+      y = m; ends.forEach(e => { y = addSums(y, toSums(e.get(cid))); });
+    }
+    out[cid] = { ytd: fromSums(y), lastMonth: fromSums(toSums(L.get(cid))), mtd: fromSums(m), wtd: fromSums(w) };
+  }
+  return out;
+}
+// Rows shown on a consultant card. better: which way is good.
+export const TREND_ROWS = [
+  { key: 'sph', label: 'SPH', say: 'SPH', fmt: 'money' }, { key: 'avgTicket', label: 'Avg ticket', say: 'average ticket', fmt: 'money' },
+  { key: 'financePct', label: 'Finance', say: 'finance', fmt: 'pct' }, { key: 'appsPer40', label: 'Apps / 40 hrs', say: 'credit apps', fmt: 'num' },
+  { key: 'beddingPct', label: 'Bedding', say: 'bedding', fmt: 'pct' }, { key: 'protectionPct', label: 'Protection', say: 'protection', fmt: 'pct' },
+  { key: 'deliveryPct', label: 'Delivery', say: 'delivery', fmt: 'pct' }, { key: 'effMargin', label: 'Margin', say: 'margin', fmt: 'pct' },
+  { key: 'cancelPct', label: 'Cancel', say: 'cancellations', fmt: 'pct', lower: true }
+];
+export const trendFmt = (r, v) => v == null ? '--' : r.fmt === 'money' ? '$' + Math.round(v).toLocaleString('en-US') : r.fmt === 'pct' ? v.toFixed(1) + '%' : v.toFixed(1);
+// Recent (this week if 8+ hours, else this month) against the longer baseline (YTD, else last month).
+// Returns a direction per row and the biggest win and slip, so the leader can open with a question.
+export function trendRead(t) {
+  if (!t) return { rows: {}, up: null, down: null };
+  const useWk = t.wtd?.hours >= 8;
+  const recentP = useWk ? 'wtd' : 'mtd';
+  const baseP = t.ytd ? 'ytd' : t.lastMonth ? 'lastMonth' : null;
+  const rows = {}; let up = null, down = null;
+  if (!baseP || !t[recentP]) return { rows, up, down, recentP, baseP };
+  for (const r of TREND_ROWS) {
+    // This week when it has the number, otherwise this month.
+    const per = useWk && t.wtd.k[r.key] != null ? 'wtd' : 'mtd';
+    const a = t[baseP].k[r.key], b = t[per]?.k?.[r.key];
+    if (a == null || b == null || !a) continue;
+    let ch = (b - a) / Math.abs(a);
+    if (r.fmt === 'pct') ch = (b - a) / Math.max(Math.abs(a), 5);
+    const good = r.lower ? ch < 0 : ch > 0, big = Math.abs(ch) >= 0.1;
+    rows[r.key] = big ? (good ? 'up' : 'down') : 'flat';
+    const score = Math.abs(ch);
+    if (big && good && r.key !== 'appsPer40' && (!up || score > up.score)) up = { ...r, score, from: a, to: b, per };
+    if (big && !good && r.key !== 'appsPer40' && (!down || score > down.score)) down = { ...r, score, from: a, to: b, per };
+  }
+  return { rows, up, down, recentP, baseP };
+}
+export const TREND_LABEL = { ytd: 'this year', lastMonth: 'last month', mtd: 'this month', wtd: 'this week' };

@@ -1,15 +1,16 @@
-import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610011005';
-import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610011005';
+import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610011608';
+import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610011608';
 import {
   STORES, DISTRICTS, canonicalStore, isKnownStore, parseRsa, rangeFromFileName, parseTeamRoster, resolveReportNames,
   paceFactor, DEFAULT_GOALS, cidOf, status, fmt, goalsFor, TEAM_FOCUS, pickStoreFocus
-} from './base.js?v=202610011005';
+} from './base.js?v=202610011608';
 import {
   iso, fromIso, addDays, daysApart, weekStartOf, DAY_NAMES, DAY_LONG, dow, DEFAULT_OFF, validOff, safeOff, VISIT_DAYS, STORE_GOALS,
   parseDaily, needScore, band, pct, environment, buildPlan, pivotSuggestion, ELEMENTS, SEGMENTS, AORS, PRACTICE, VISIT_TYPES, kindToType, visitScore, visitSummary, consultantCoaching, drillFor, draggers, helpers, STORE_TO_RSA, hasCommitment, commitmentText, blackoutFor, offChoicesFor, storeFocus, rsaPicks, consultantWeeks, teamSignals,
   STORE_METRICS, slug, COACHING, METRICS, PLAIN, isOutlet, driveMin, driveText, MAX_SPLIT_MIN, LEVERS, leverStatus, suggestLever,
+  consultantTrends, TREND_ROWS, trendFmt, trendRead, TREND_LABEL,
   OFFER_DEFAULT, PLAY, PLAY_CHECKS, PLAY_CHECKS_REMOTE, offerActive, offerMath, FLIQ_CHECKS, FLIQ_CHECKS_REMOTE, FLIQ_DAILY
-} from './ml.js?v=202610011005';
+} from './ml.js?v=202610011608';
 
 const DEMO = !firebaseConfig.apiKey || firebaseConfig.apiKey.startsWith('PASTE');
 const FB = 'https://www.gstatic.com/firebasejs/10.12.2/';
@@ -103,6 +104,13 @@ async function firebaseBackend() {
     },
     rsa: () => get('rsa', 'latest'),
     rsaAt: date => get('rsa', date),
+    rsaYtd: () => get('rsa', 'ytd'),
+    async publishRsaYtd(r) {
+      const now = new Date().toISOString();
+      await F.setDoc(F.doc(db, 'rsa', 'ytd'), { ...r, by: email(), at: now });
+      const meta = await be.meta();
+      await F.setDoc(F.doc(db, 'config', 'meta'), { ...meta, lastRsaYtd: { by: email(), at: now, file: r.file, from: r.from, to: r.to, people: r.people.length } });
+    },
     // Every upload is kept by date so the app can take this week out of the month-to-date numbers.
     async publishRsa(r) {
       const now = new Date().toISOString();
@@ -218,7 +226,10 @@ function demoBackend() {
     rsaHist[sat] = { from: monthStart, to: sat, people: rsa.people.map((p, i) => {
       const wkHours = 18 + rnd() * 10, factor = i % 6 === 2 ? 0.45 : i % 6 === 3 ? 1.45 : 0.85 + rnd() * 0.3;
       const hours = Math.max(1, p.hours - wkHours), sales = p.k.netSales - wkHours * p.k.sph * factor;
-      return { cid: p.cid, name: p.name, store: p.store, hours, k: { netSales: sales, sph: sales / hours } };
+      const k = { ...p.k, netSales: sales, sph: sales / hours };
+      if (i % 6 === 2) { k.financePct = Math.min(95, (p.k.financePct || 50) * 1.25); k.protectionPct = (p.k.protectionPct || 6) * 1.3; }
+      if (i % 6 === 3) { k.beddingPct = (p.k.beddingPct || 15) * 0.8; }
+      return { cid: p.cid, name: p.name, store: p.store, hours, k };
     }) };
   }
 
@@ -306,6 +317,12 @@ function demoBackend() {
     });
     plans[`${l.email}_${lw}`] = p;
   }
+  // Year to date through the end of last month, and last month's final copy. Every person's year
+  // runs a little different from this month so the trend columns have something to say.
+  const lmEnd = addDays(monthStart, -1), lmStart = lmEnd.slice(0, 8) + '01';
+  const tilt = (p, i, f) => { const k = { ...p.k }; ['financePct', 'protectionPct', 'beddingPct', 'deliveryPct'].forEach((m, j) => { if (k[m] != null) k[m] = Math.round(k[m] * (((i + j) % 3 === 0) ? 1 + f : ((i + j) % 3 === 1) ? 1 - f : 1) * 100) / 100; }); return k; };
+  rsaHist[lmEnd] = { from: lmStart, to: lmEnd, file: `rsa_report_${lmStart}_to_${lmEnd}.csv`, people: rsa.people.map((p, i) => { const hours = 150 + (i % 5) * 8, k = tilt(p, i, 0.15); k.sph = p.k.sph * (i % 4 === 0 ? 0.8 : 1.05); k.netSales = k.sph * hours; return { cid: p.cid, name: p.name, store: p.store, hours, k }; }) };
+  let rsaYtd = lmEnd.slice(5, 7) === '12' ? null : { from: lmEnd.slice(0, 4) + '-01-01', to: lmEnd, file: `rsa_report_${lmEnd.slice(0, 4)}-01-01_to_${lmEnd}.csv`, people: rsa.people.map((p, i) => { const hours = 1300 + (i % 7) * 40, k = tilt(p, i, 0.3); k.sph = p.k.sph * (i % 4 === 1 ? 1.2 : 0.9); k.netSales = k.sph * hours; k.creditApps = Math.round((p.k.creditApps || 10) * 8); return { cid: p.cid, name: p.name, store: p.store, hours, k }; }) };
   meta.rsaDates = Object.keys(rsaHist).sort().reverse();
   const ones = {};
   let offerDoc = null;
@@ -331,6 +348,8 @@ function demoBackend() {
     async publishDaily(d) { daily[d.date] = { date: d.date, periods: d.periods, stores: d.stores }; const dates = [...new Set([...meta.dailyDates, d.date])].sort().reverse(); meta = { ...meta, dailyDates: dates, latestDaily: dates[0], lastDaily: { by: current, at: new Date().toISOString(), file: d.file, date: d.date } }; },
     rsa: async () => clone(rsa),
     rsaAt: async d => clone(rsaHist[d] || null),
+    rsaYtd: async () => clone(rsaYtd),
+    async publishRsaYtd(r) { rsaYtd = clone(r); meta.lastRsaYtd = { by: current, at: new Date().toISOString(), file: r.file, from: r.from, to: r.to, people: r.people.length }; },
     async publishRsa(r) { rsaHist[r.to] = clone(r); meta.rsaDates = Object.keys(rsaHist).sort().reverse(); if (!meta.lastRsa?.to || r.to >= meta.lastRsa.to) { rsa = clone(r); meta.lastRsa = { by: current, at: new Date().toISOString(), file: r.file, to: r.to, people: r.people.length }; } },
     roster: async () => clone(roster),
     markets: async () => clone(markets),
@@ -408,6 +427,24 @@ async function seedFieldTeam() {
     try { await S.be.saveUser(u); S.users.push(u); } catch (e) { console.warn('Could not add', t.email, e); }
   }
 }
+// Year to date, last month, this month and this week for every consultant, from the kept RSA copies.
+async function loadTrends(rsa) {
+  if (!rsa?.to) return {};
+  const dates = S.meta.rsaDates || [], mm = rsa.to.slice(0, 7);
+  const finalOf = month => dates.filter(d => d.slice(0, 7) === month).sort().reverse()[0];
+  const cache = {}, at = d => d ? (cache[d] ||= S.be.rsaAt(d).catch(() => null)) : null;
+  const [y, mo] = mm.split('-').map(Number);
+  const prev = mo === 1 ? `${y - 1}-12` : `${y}-${String(mo - 1).padStart(2, '0')}`;
+  const base = S.rsaBase;
+  const baseEndDate = base && base.to.slice(0, 7) !== mm ? finalOf(base.to.slice(0, 7)) : null;
+  let ytd = await (S.be.rsaYtd ? S.be.rsaYtd().catch(() => null) : null);
+  if (ytd && ytd.to?.slice(0, 4) !== mm.slice(0, 4)) ytd = null;
+  const ytdSnapDate = ytd && ytd.to < rsa.to && ytd.to.slice(0, 7) === mm && dates.includes(ytd.to) ? ytd.to : null;
+  const endDates = ytd ? [] : Array.from({ length: mo - 1 }, (_, i) => finalOf(`${y}-${String(i + 1).padStart(2, '0')}`)).filter(Boolean);
+  const [baseMonthEnd, lastMonth, ytdSnap, ...monthEnds] = await Promise.all([at(baseEndDate && baseEndDate > base.to ? baseEndDate : null), at(finalOf(prev)), at(ytdSnapDate), ...endDates.map(at)]);
+  S.trendInfo = { lastMonth: lastMonth?.to || null, ytd: ytd ? { from: ytd.from, to: ytd.to, uploaded: true } : monthEnds.length ? { from: monthEnds.map(r => r?.from || r?.to).filter(Boolean).sort()[0], to: rsa.to, uploaded: false } : null };
+  return consultantTrends({ mtd: rsa, base, baseMonthEnd, lastMonth, ytd, ytdSnap, monthEnds: monthEnds.filter(Boolean), weekStartsThisMonth: weekStartOf(today()) >= mm + '-01' });
+}
 async function loadShared() {
   $('#app').innerHTML = '<p class="loading">Loading the latest numbers…</p>';
   S.meta = await S.be.meta();
@@ -427,6 +464,7 @@ async function loadShared() {
   const prevDate = (S.meta.rsaDates || []).filter(d => rsa?.to && d < rsa.to).sort().reverse()[0];
   S.rsaPrev = prevDate ? await S.be.rsaAt(prevDate).catch(() => null) : null;
   S.days = S.rsaPrev ? consultantWeeks(rsa, S.rsaPrev) : {};
+  S.trends = await loadTrends(rsa).catch(e => { console.warn('trends', e); return {}; });
   S.teams = {};
   for (const st of STORES) if ((rsa?.people || []).some(p => p.store === st.name)) S.teams[st.name] = teamSignals(rsa.people, S.weeks, st.name, DEFAULT_GOALS);
   S.lastVisit = latestVisitMap(visits);
@@ -1464,6 +1502,8 @@ async function viewVisit() {
   const picks = rsaPicks(people, x.store, DEFAULT_GOALS, paceFactor(S.rsa?.to), 3, S.weeks || {});
   if (!V.consultants.length && picks.length && V.status === 'draft' && !saved) V.consultants = picks.map(p => ({ cid: p.cid, name: p.name, why: p.why, notes: '', practice: {} }));
   const storePeople = people.filter(p => p.store === x.store).sort((a, b) => b.k.sph - a.k.sph);
+  // Everyone on this store's sales team roster, even with no RSA numbers yet (new hires, early in the month).
+  const rosterOnly = (S.roster || []).filter(r => r.store === x.store && r.title !== '__skip' && !people.some(p => p.cid === r.cid)).sort((a, b) => a.name.localeCompare(b.name));
   const team = S.teams?.[x.store];
   const leader = leaderOf(x.store);
   const tagText = { below: 'Below minimum', slipping: 'Slipping this week', gap: 'Biggest gap', model: 'Recognize and model', added: 'Added', drag: 'Pulling a store number down' };
@@ -1497,6 +1537,36 @@ async function viewVisit() {
   };
   const money = n => '$' + Math.round(n).toLocaleString('en-US');
   const p1 = n => n.toFixed(1) + '%';
+  // Year to date, last month, this month and this week side by side, with which way each is moving.
+  const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const lmLabel = S.trendInfo?.lastMonth ? MON[+S.trendInfo.lastMonth.slice(5, 7) - 1] : 'Last mo';
+  const trendBlock = (cid, p) => {
+    const t = S.trends?.[cid];
+    if (!t || !(t.mtd || t.ytd || t.lastMonth)) return '';
+    const rd = trendRead(t), g = goalsFor(DEFAULT_GOALS, x.store);
+    const cols = [['ytd', 'YTD'], ['lastMonth', lmLabel], ['mtd', 'MTD'], ['wtd', 'This wk']];
+    const cell = (per, r) => { const v = t[per]?.k?.[r.key]; const gl = g[r.key]; const cls = v == null || gl == null ? '' : status({ lower: r.lower }, v, gl) === 'green' ? 'good' : status({ lower: r.lower }, v, gl) === 'red' ? 'bad' : ''; return `<td class="num ${cls}">${trendFmt(r, v)}</td>`; };
+    const arrow = k => rd.rows[k] === 'up' ? '<td class="ar good" title="Getting better">▲</td>' : rd.rows[k] === 'down' ? '<td class="ar bad" title="Slipping">▼</td>' : '<td class="ar muted">·</td>';
+    const hrs = per => t[per]?.hours != null ? Math.round(t[per].hours).toLocaleString('en-US') : '--';
+    const ytdNote = S.trendInfo?.ytd && !S.trendInfo.ytd.uploaded ? ` YTD is built from the monthly copies on file since ${esc(shortDate(S.trendInfo.ytd.from))}.` : !S.trendInfo?.ytd ? ' Upload a year-to-date RSA report to fill in YTD.' : '';
+    const say = (r, a, b) => `${r.say} went from ${trendFmt(r, a)} ${TREND_LABEL[rd.baseP]} to ${trendFmt(r, b)} ${TREND_LABEL[r.per]}`;
+    const line = [rd.up ? `<span class="good">Getting better:</span> ${esc(say(rd.up, rd.up.from, rd.up.to))}.` : '', rd.down ? `<span class="bad">Slipping:</span> ${esc(say(rd.down, rd.down.from, rd.down.to))}.` : ''].filter(Boolean).join(' ');
+    return `<div class="trend">
+      ${line ? `<p class="small" style="margin:0 0 6px">${line}</p>` : ''}
+      <div class="scroller"><table class="grid tgrid"><thead><tr><th></th>${cols.map(([, l]) => `<th class="num">${l}</th>`).join('')}<th></th></tr></thead><tbody>
+        <tr class="hrs"><td>Hours</td>${cols.map(([k]) => `<td class="num">${hrs(k)}</td>`).join('')}<td></td></tr>
+        ${TREND_ROWS.map(r => `<tr><td>${r.label}</td>${cols.map(([k]) => cell(k, r)).join('')}${arrow(r.key)}</tr>`).join('')}
+      </tbody></table></div>
+      <p class="small muted" style="margin:4px 0 0">Green is at goal, red is well off it. ▲ ▼ compare ${rd.recentP === 'wtd' ? 'this week (or this month when the week is too short)' : 'this month'} with ${TREND_LABEL[rd.baseP] || 'the longer run'}.${ytdNote}</p>
+    </div>`;
+  };
+  // A question to open with, from the trend: ask about what changed instead of reading the number at them.
+  const trendAsk = (cid, first) => {
+    const rd = trendRead(S.trends?.[cid]); if (!rd.baseP) return '';
+    if (rd.down) return `\nOpen with the trend: "Your ${rd.down.say} was ${trendFmt(rd.down, rd.down.from)} ${TREND_LABEL[rd.baseP]} and it's ${trendFmt(rd.down, rd.down.to)} ${TREND_LABEL[rd.down.per]}. What's changed?" Let ${first} answer before you coach.`;
+    if (rd.up) return `\nRecognize the trend: "Your ${rd.up.say} went from ${trendFmt(rd.up, rd.up.from)} ${TREND_LABEL[rd.baseP]} to ${trendFmt(rd.up, rd.up.to)} ${TREND_LABEL[rd.up.per]}. What are you doing differently?" Then ask ${first} to show the team.`;
+    return '';
+  };
 
   const html = `
   <div class="spread">
@@ -1560,21 +1630,24 @@ async function viewVisit() {
       : S.rsa ? `<p class="small muted" style="margin:6px 0 0">Nobody is above goal on this one yet.</p>` : ''}
     </div>`; }).join('')}</div>` : '<p class="small muted">No store numbers yet.</p>')}
 
-  ${sec('people', '3', x.remote ? 'Consultants: coach them through the leader' : 'Consultants coached', x.remote ? `Help the leader coach each person. Use the data to open a conversation about behavior, role-play it with the leader, and agree on when they coach it. Numbers are month to date${S.rsa?.to ? ' through ' + esc(shortDate(S.rsa.to)) : ''}.` : `Who to see first. Coach one thing with each person. Numbers are month to date${S.rsa?.to ? ' through ' + esc(shortDate(S.rsa.to)) : ''}.`, `
+  ${sec('people', '3', x.remote ? 'Consultants: coach them through the leader' : 'Consultants coached', x.remote ? `Help the leader coach each person. Use the data and the trend to open a conversation about behavior, role-play it with the leader, and agree on when they coach it. Each card shows year to date, last month, month to date and this week${S.rsa?.to ? ' through ' + esc(shortDate(S.rsa.to)) : ''}.` : `Who to see first. Coach one thing with each person. Each card shows year to date, last month, month to date and this week${S.rsa?.to ? ' through ' + esc(shortDate(S.rsa.to)) : ''}.`, `
     ${V.consultants.map((c, ci) => {
       const p = people.find(q => q.cid === c.cid) || { name: c.name, k: {} };
       const pk = picks.find(q => q.cid === c.cid);
       const wk = S.weeks?.[c.cid];
       return `<div class="ccard">
         <div class="row" style="justify-content:space-between"><h3 style="margin:0">${esc(titleName(c.name))}${p.store && p.store !== x.store ? ` <span class="small muted">(${esc(p.store)})</span>` : ''}</h3><span class="row" style="gap:6px"><span class="tag ${c.why}">${tagText[c.why] || ''}</span>${canLog ? `<button type="button" class="link" data-rmc="${ci}" aria-label="Remove ${esc(titleName(c.name))}">Remove</button>` : ''}</span></div>
-        ${p.k?.sph != null ? `<div class="kpis">
+        ${trendBlock(c.cid, p) || (p.k?.sph != null ? `<div class="kpis">
           ${kpiCell(p, 'sph', 'SPH', money)}${wk?.hours >= 1 && wk.sph != null ? `<div class="kc ${wk.priorSph && wk.sph < wk.priorSph * 0.75 ? 'red' : wk.priorSph && wk.sph > wk.priorSph * 1.25 ? 'green' : ''}"><span>This week</span><b>${money(wk.sph)}</b></div>` : ''}
           ${kpiCell(p, 'financePct', 'Finance', p1)}${kpiCell(p, 'beddingPct', 'Bedding', p1)}${kpiCell(p, 'protectionPct', 'Protection', p1)}${kpiCell(p, 'creditApps', 'Apps', n => String(Math.round(n)))}${kpiCell(p, 'cancelPct', 'Cancel', p1, true)}
-        </div>` : ''}
+        </div>` : '')}
         <div class="segwho"><p class="small" style="margin:0 0 6px"><b>How are you coaching ${esc(titleName(c.name).split(' ')[0])}?</b> <span class="muted">Through the leader: you give the leader the plan, role-play it with them, and they coach ${esc(titleName(c.name).split(' ')[0])}.</span></p>${tri(`consultants.${ci}.mode`, c.mode || (x.remote ? 'leader' : 'direct'), [['direct', 'Directly with them'], ['leader', 'Through the store leader']])}</div>
         ${(() => { const cc = consultantCoaching({ p, store: p.store || x.store, why: c.why, wk, goals: DEFAULT_GOALS, pace: paceFactor(S.rsa?.to), teamFocus: focusAll.find(f => V.focus.includes(f.key))?.label, lever: c.lever });
           const viaLeader = (c.mode || (x.remote ? 'leader' : 'direct')) === 'leader';
-          const text = viaLeader ? leaderCoachText(cc, titleName(c.name).split(' ')[0], V.leaderWin?.name || 'the store leader') : cc.text;
+          const base = (viaLeader ? leaderCoachText(cc, titleName(c.name).split(' ')[0], V.leaderWin?.name || 'the store leader') : cc.text).split('\n');
+          const ask = trendAsk(c.cid, titleName(c.name).split(' ')[0]).trim();
+          if (ask) base.splice(Math.min(2, base.length), 0, ask);
+          const text = base.join('\n');
           return `<div class="suggest"><p class="eyebrow">${viaLeader ? `Help ${esc(V.leaderWin?.name ? titleName(V.leaderWin.name).split(' ')[0] : 'the leader')} coach ${esc(titleName(c.name).split(' ')[0])}` : 'Suggested coaching'}</p><div class="stext">${esc(text)}</div>
           ${canLog ? `<div class="row" style="margin-top:8px"><button type="button" class="btn tiny primary" data-usec="${ci}">Use this in my notes</button><span class="small muted">or write or say your own below</span></div>` : ''}</div>`; })()}
         ${(() => {
@@ -1624,12 +1697,12 @@ async function viewVisit() {
     }).join('') || `<p class="small muted">${S.rsa ? 'No consultants matched to this store in the RSA report.' : 'Upload the RSA report to get consultant picks.'}</p>`}
     ${canLog ? `<div class="addc"><div style="flex:1;min-width:220px">${fieldInput('addc', 'Coach any consultant', '', '', '', 'list="addcList" placeholder="Start typing a name" autocomplete="off" style="width:100%"')}</div>
       <button type="button" class="btn" id="addcgo">Add</button></div>
-      <datalist id="addcList">${[...storePeople, ...people.filter(p => p.store !== x.store).sort((a, b) => a.name.localeCompare(b.name))].filter(p => !V.consultants.some(c => c.cid === p.cid)).map(p => `<option value="${esc(titleName(p.name))}">${esc(p.store || 'No store')} · $${Math.round(p.k.sph)} SPH</option>`).join('')}</datalist>
-      <p class="small muted" style="margin:4px 0 0">This store's team shows first. Anyone in the RSA report works, and a name not in the report can be coached too.</p>` : ''}
+      <datalist id="addcList">${[...storePeople, ...rosterOnly, ...people.filter(p => p.store !== x.store).sort((a, b) => a.name.localeCompare(b.name))].filter(p => !V.consultants.some(c => c.cid === p.cid)).map(p => `<option value="${esc(titleName(p.name))}">${esc(p.store || 'No store')} · ${p.k ? '$' + Math.round(p.k.sph) + ' SPH' : 'no RSA numbers yet'}</option>`).join('')}</datalist>
+      <p class="small muted" style="margin:4px 0 0">This store's whole team shows first, including anyone without RSA numbers yet. Anyone in the RSA report works, and a name not on either list can be coached too.${rosterOnly.length ? ` ${storePeople.length} of ${storePeople.length + rosterOnly.length} on the ${esc(x.store)} team have RSA numbers${S.rsa?.to ? ' through ' + esc(shortDate(S.rsa.to)) : ''}.` : ''}</p>` : ''}
     <div class="cnotes" style="margin-top:12px">${fieldBox('teamnotes', 'Notes on the team', V.teamNotes, 3, 'Anything about the sales team as a whole: energy, staffing, who is ready for more.', 'teamNotes', dis)}</div>
-    ${team?.rows.length ? `<details style="margin-top:10px"><summary class="small" style="cursor:pointer;font-weight:600;color:var(--navy)">Whole team: month vs this week (${team.rows.length})</summary>
-      <div class="scroller" style="margin-top:8px"><table class="grid"><thead><tr><th>Consultant</th><th class="num">Month SPH</th><th class="num">Before this week</th><th class="num">This week</th><th class="num">Hrs</th><th>Flag</th></tr></thead><tbody>
-      ${team.rows.map(r => `<tr><td class="nm">${esc(titleName(r.name))}</td><td class="num ${r.below ? 'bad' : ''}">$${Math.round(r.sph)}</td><td class="num">${r.wk.priorSph ? '$' + Math.round(r.wk.priorSph) : '--'}</td><td class="num ${r.slipping ? 'bad' : r.rising ? 'good' : ''}">${r.wk.sph != null && r.wk.hours >= 1 ? '$' + Math.round(r.wk.sph) : '--'}</td><td class="num">${r.wk.hours >= 1 ? Math.round(r.wk.hours) : '--'}</td><td>${r.below ? '<span class="tag below">Below min</span>' : r.slipping ? '<span class="tag slipping">Slipping</span>' : r.rising ? '<span class="tag model">Rising</span>' : ''}</td></tr>`).join('')}
+    ${team?.rows.length ? `<details style="margin-top:10px"><summary class="small" style="cursor:pointer;font-weight:600;color:var(--navy)">Whole team: year, month and this week (${team.rows.length})</summary>
+      <div class="scroller" style="margin-top:8px"><table class="grid"><thead><tr><th>Consultant</th><th class="num">YTD SPH</th><th class="num">Month SPH</th><th class="num">Before this week</th><th class="num">This week</th><th class="num">Hrs</th><th>Flag</th></tr></thead><tbody>
+      ${team.rows.map(r => `<tr><td class="nm">${esc(titleName(r.name))}</td><td class="num">${S.trends?.[r.cid]?.ytd ? '$' + Math.round(S.trends[r.cid].ytd.k.sph) : '--'}</td><td class="num ${r.below ? 'bad' : ''}">$${Math.round(r.sph)}</td><td class="num">${r.wk.priorSph ? '$' + Math.round(r.wk.priorSph) : '--'}</td><td class="num ${r.slipping ? 'bad' : r.rising ? 'good' : ''}">${r.wk.sph != null && r.wk.hours >= 1 ? '$' + Math.round(r.wk.sph) : '--'}</td><td class="num">${r.wk.hours >= 1 ? Math.round(r.wk.hours) : '--'}</td><td>${r.below ? '<span class="tag below">Below min</span>' : r.slipping ? '<span class="tag slipping">Slipping</span>' : r.rising ? '<span class="tag model">Rising</span>' : ''}</td></tr>`).join('')}
       </tbody></table></div></details>` : ''}`)}
 
   ${x.remote ? '' : ELEMENTS.map(e => sec('el' + e.n, e.n, e.t, PHOTO_ELS.includes(e.key) ? `${e.q} Photos: ${photoAreas(e).filter(a => (S.vPhotos || []).some(p => p.el === e.key && p.item === a)).length} of ${photoAreas(e).length}` : e.q, `
@@ -1954,9 +2027,10 @@ function wireVisit(V, canLog, snap) {
     const key = typed.toLowerCase().replace(/[^a-z]/g, '');
     const all = S.rsa?.people || [];
     const p = all.find(q => q.name.toLowerCase().replace(/[^a-z]/g, '') === key) || all.find(q => q.name.toLowerCase().replace(/[^a-z]/g, '').startsWith(key));
-    const cid = p ? p.cid : cidOf(typed);
+    const r = p ? null : (S.roster || []).find(q => q.name.toLowerCase().replace(/[^a-z]/g, '') === key);
+    const cid = p ? p.cid : r ? r.cid : cidOf(typed);
     if (V.consultants.some(c => c.cid === cid)) return toast('Already on this visit.', true);
-    V.consultants.push({ cid, name: p ? p.name : typed, why: 'added', notes: '', practice: {} });
+    V.consultants.push({ cid, name: p ? p.name : r ? r.name : typed, why: 'added', notes: '', practice: {} });
     toast(p ? `${titleName(p.name)} added with suggested coaching.` : `${typed} added. Not in the RSA report, so the suggestion is the stand-up practice.`);
     saveDraft(); viewVisit();
   };
@@ -2806,10 +2880,11 @@ function viewUpload() {
   v.innerHTML = `
   <section class="panel">
     <h2>Upload the reports</h2>
-    <p>Drop in any of the four files. The app figures out which is which.</p>
+    <p>Drop in any of the files. The app figures out which is which.</p>
     <ul class="small" style="color:var(--body);padding-left:18px">
       <li><b>Daily report</b> (every morning, <code>daily-report-YYYY-MM-DD.csv</code>): drives the need scores, the Sunday plan and the mid-week pivots. Keep the WTD and MTD columns in the export. Last upload: ${when(m.lastDaily)}</li>
       <li><b>RSA report</b> (every morning with the daily report, <code>rsa_report_…_to_….csv</code>): drives the consultant conversations and the consultant side of the need score. Each day's copy is kept, so the app compares this week against the month before it and flags who is slipping. Last upload: ${when(m.lastRsa)}</li>
+      <li><b>RSA report, year to date</b> (once a month is enough, run it from January 1: <code>rsa_report_YYYY-01-01_to_….csv</code>): fills the YTD column on every consultant card so leaders can see the trend. The app adds this month on top of it. Last upload: ${when(m.lastRsaYtd)}</li>
       <li><b>Store leader list</b> (when leaders change, the store-leader-logins file): names the store leader on every visit. ${(S.storeLeaders || []).length} on file.</li>
       <li><b>Sales team roster</b> (when people change, the Paylocity "Sales Team" export): tells the app which store each consultant works in. ${S.roster.length} people on file.</li>
     </ul>
@@ -2885,6 +2960,13 @@ function prepRsa(file, rows, rosterOverride) {
   const sugg = res.unmatched.filter(p => res.suggestions[p.cid] && res.suggestions[p.cid].how !== 'possible');
   sugg.forEach(p => { const d = roster.find(x => x.cid === res.suggestions[p.cid].cid); people.push({ ...p, store: d.store }); });
   const left = res.unmatched.filter(p => !sugg.includes(p));
+  // A report that starts January 1 and runs past January is the year-to-date copy. It is kept on its own
+  // so it never replaces this month's numbers.
+  if (range.from && /-01-01$/.test(range.from) && range.to && range.to.slice(0, 7) !== range.from.slice(0, 7))
+    return { file, kind: 'rsa', label: 'RSA report, year to date',
+      summary: `Year-to-date RSA report ${esc(shortDate(range.from))} to ${esc(shortDate(range.to))} · <b>${people.length}</b> consultants matched to a store. Fills the YTD column on every consultant card.${left.length ? ` · <span class="warn">${left.length} not on the roster</span>` : ''}`,
+      extra: left.length ? `<p class="small">Not matched: ${left.map(p => esc(titleName(p.name))).join(', ')}</p>` : '',
+      publish: () => S.be.publishRsaYtd({ from: range.from, to: range.to, file, people }) };
   return { file, kind: 'rsa', label: 'RSA report',
     summary: `RSA report ${range.from ? esc(shortDate(range.from)) + ' to ' : 'through '}${esc(shortDate(range.to))} · <b>${people.length}</b> consultants matched to a store${left.length ? ` · <span class="warn">${left.length} not on the roster</span>` : ''}`,
     extra: left.length ? `<p class="small">Not matched (left out of coaching until the roster has them): ${left.map(p => esc(titleName(p.name))).join(', ')}</p>` : '',
