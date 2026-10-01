@@ -1,15 +1,15 @@
-import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610010919';
-import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610010919';
+import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610011005';
+import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610011005';
 import {
   STORES, DISTRICTS, canonicalStore, isKnownStore, parseRsa, rangeFromFileName, parseTeamRoster, resolveReportNames,
   paceFactor, DEFAULT_GOALS, cidOf, status, fmt, goalsFor, TEAM_FOCUS, pickStoreFocus
-} from './base.js?v=202610010919';
+} from './base.js?v=202610011005';
 import {
   iso, fromIso, addDays, daysApart, weekStartOf, DAY_NAMES, DAY_LONG, dow, DEFAULT_OFF, validOff, safeOff, VISIT_DAYS, STORE_GOALS,
   parseDaily, needScore, band, pct, environment, buildPlan, pivotSuggestion, ELEMENTS, SEGMENTS, AORS, PRACTICE, VISIT_TYPES, kindToType, visitScore, visitSummary, consultantCoaching, drillFor, draggers, helpers, STORE_TO_RSA, hasCommitment, commitmentText, blackoutFor, offChoicesFor, storeFocus, rsaPicks, consultantWeeks, teamSignals,
   STORE_METRICS, slug, COACHING, METRICS, PLAIN, isOutlet, driveMin, driveText, MAX_SPLIT_MIN, LEVERS, leverStatus, suggestLever,
   OFFER_DEFAULT, PLAY, PLAY_CHECKS, PLAY_CHECKS_REMOTE, offerActive, offerMath, FLIQ_CHECKS, FLIQ_CHECKS_REMOTE, FLIQ_DAILY
-} from './ml.js?v=202610010919';
+} from './ml.js?v=202610011005';
 
 const DEMO = !firebaseConfig.apiKey || firebaseConfig.apiKey.startsWith('PASTE');
 const FB = 'https://www.gstatic.com/firebasejs/10.12.2/';
@@ -235,7 +235,7 @@ function demoBackend() {
   });
   { const d = addDays(week, 1), id = `east@demo_${d}_${slug('Yulee')}_remote`;
     visits[id] = { id, remote: true, email: 'east@demo', name: users['east@demo'].name, role: 'leader', store: 'Yulee', date: d, kind: 'remote', vtype: 'Video call', status: 'done',
-      leaderWin: { name: 'Store leader', text: 'Had the numbers ready before the call.' }, actions: [{ what: 'Finance % of sales', from: '48%', to: '55%', how: 'Bring up financing in the first 10 minutes with every guest', owner: 'Store leader' }, {}, {}], at: d }; }
+      leaderWin: { name: 'Store leader', text: 'Had the numbers ready before the call.' }, actions: [{ what: 'Finance % of sales', from: '48%', to: '55%', how: 'Get every guest their buying power', owner: 'Store leader' }, {}, {}], at: d }; }
   for (const l of leaders) {
     const lv = latestVisitMap(Object.values(visits));
     const scores = Object.fromEntries(l.stores.map(s => [s, needScore(daily[sat].stores[s], { lastVisit: lv[s], today: week })]));
@@ -247,7 +247,7 @@ function demoBackend() {
         visits[id] = { id, email: l.email, name: l.name, role: l.role, store: d.store, date: d.date, kind: d.kind, vtype: kindToType(d.kind), status: 'done',
           leaderWin: { name: 'Store leader', text: 'Every guest greeted at the door within 10 seconds.' },
           working: 'Leaders are greeting at the door and taking every up in turn.',
-          actions: [{ behavior: 'Finance offered in the first 10 minutes with every guest', owner: 'All consultants' }, { behavior: 'Leader turnover before any guest walks', owner: 'Leader on duty' }, {}],
+          actions: [{ behavior: 'Every guest gets their buying power', owner: 'All consultants' }, { behavior: 'Leader turnover before any guest walks', owner: 'Leader on duty' }, {}],
           checks: { culture: { 0: 'yes', 1: 'partial', 2: 'yes', 3: 'no' }, facilities: { 0: 'yes', 1: 'yes', 2: 'partial', 3: 'yes', 4: 'yes' } },
           segs: { 0: { 0: 'yes', 1: 'partial', 2: 'no', 3: 'yes' } }, aor: { 'Front Entrance and Windows': 'pass', 'Dining': 'needs' },
           notes: 'Two RSAs coached on the monthly payment talk track.', at: d.date };
@@ -302,7 +302,7 @@ function demoBackend() {
       visits[id] = { id, email: l.email, name: l.name, role: l.role, store: d.store, date: d.date, kind: d.kind, vtype: kindToType(d.kind), status: 'done',
         leaderWin: { name: 'Store leader', text: 'Huddle ran on time with every number posted.' },
         consultants: team.map((x, j) => ({ cid: x.cid, name: x.name, notes: 'Worked the monthly payment talk track.', drill: j === 0 ? { key: 'financePct', scored: { 0: 'yes', 1: 'partial', 2: 'yes', 3: 'no' } } : {} })),
-        actions: [{ what: 'Finance % of sales', key: 'financePct', from: '48%', to: '55%', how: 'Buying power in the first 10 minutes with every guest', owner: 'Store leader', due: addDays(lw, 6) }, {}, {}], at: d.date };
+        actions: [{ what: 'Finance % of sales', key: 'financePct', from: '48%', to: '55%', how: 'Get every guest their buying power', owner: 'Store leader', due: addDays(lw, 6) }, {}, {}], at: d.date };
     });
     plans[`${l.email}_${lw}`] = p;
   }
@@ -315,7 +315,7 @@ function demoBackend() {
   ones[`east@demo_${addDays(lw, -7)}`] = { id: `east@demo_${addDays(lw, -7)}`, email: 'east@demo', name: users['east@demo'].name, weekStart: addDays(lw, -7), status: 'done', heldAt: addDays(lw, 1) + 'T09:00:00', heldBy: OWNER_EMAIL, heldByName: 'Frank Pina',
     coaching: '', actions: [
       { key: 'closeRate', what: 'Close Rate across the market', from: '24%', to: '28%', how: 'No guest leaves without a TO. Leaders track TOs at every huddle.', owner: users['east@demo'].name, due: addDays(lw, 6) },
-      { store: 'Yulee', key: 'financePct', what: 'Yulee: Finance %', from: '44%', to: '55%', how: 'Full-day visit Tuesday. Buying power in the first 10 minutes.', owner: users['east@demo'].name, due: addDays(lw, 6) },
+      { store: 'Yulee', key: 'financePct', what: 'Yulee: Finance %', from: '44%', to: '55%', how: 'Full-day visit Tuesday. Every guest gets their buying power.', owner: users['east@demo'].name, due: addDays(lw, 6) },
       { what: 'Full-day visits', from: '3 of 5', to: '5 of 5', how: 'Days off locked by Sunday.', owner: users['east@demo'].name, due: addDays(lw, 6) }], support: 'Help backfill a closing leader at Yulee', supportBy: addDays(lw, 3) };
   let current = 'east@demo';
   const clone = x => structuredClone(x);
@@ -1283,7 +1283,7 @@ function visitIntent(store, { anchor, kind, date, remote } = {}) {
     .filter((x, i, a) => a.findIndex(y => y.cid === x.cid) === i).slice(0, 3);
   const prior = S.visits.filter(v => v.store === store && v.status !== 'draft' && (!date || v.date < date)).sort((a, b) => b.date.localeCompare(a.date))[0];
   const open = prior ? (prior.actions || []).filter(hasCommitment).filter(a => autoFollow(a, snap, {})?.v !== 'yes').length : 0;
-  const purpose = remote ? `Remote coaching: go over the numbers with the leader, coach the people behind the gap through the leader, and role-play the play with an associate on video.${open ? ` Check in on the ${open} open commitment${open > 1 ? 's' : ''} from the last visit.` : ''}`
+  const purpose = remote ? `Remote coaching: go over the numbers with the leader, coach the people behind the gap through the leader, and role-play the play with the leader or an associate on video.${open ? ` Check in on the ${open} open commitment${open > 1 ? 's' : ''} from the last visit.` : ''}`
     : anchor ? 'Anchor morning: be on the floor at open, set the tone, and run the play with the team.'
     : open ? `Follow up and inspect: ${open} commitment${open > 1 ? 's' : ''} from the last visit ${open > 1 ? "aren't" : "isn't"} there yet.`
     : kind === 'second' ? 'Second visit this week: inspect the plan you set and the behaviors behind it.'
@@ -1314,7 +1314,7 @@ function playBlock(V, canLog, dis, tri) {
       <ul class="blist small" style="margin:6px 0">${(o.lines || []).map(l => `<li>${esc(l)}</li>`).join('')}</ul>
       <p class="small" style="margin:0"><b>Say it in dollars:</b> on a $3,000 room, financing or the bundle saves $${ex.one}. Financing AND the bundle saves $${ex.both}.</p>
       ${o.fine ? `<p class="small muted" style="margin:4px 0 0">${esc(o.fine)}</p>` : ''}</div>` : ''}
-    ${V.remote ? `<p class="small" style="margin:12px 0 6px"><b>Remote: you can't watch the floor.</b> Ask the leader for specifics (names and counts, not "we're good"), and role-play the play with an associate on video. Connection comes first.</p>`
+    ${V.remote ? `<p class="small" style="margin:12px 0 6px"><b>Remote: you can't watch the floor.</b> Ask the leader for specifics (names and counts, not "we're good"), and role-play the play on video, with the leader or with an associate. Connection comes first.</p>`
       : `<p class="small" style="margin:12px 0 6px"><b>Watch one live guest, or run it as a practice.</b> Connection comes first.</p>`}
     ${(V.remote ? PLAY_CHECKS_REMOTE : PLAY_CHECKS).map((t, i) => `<div class="item"><div class="txt">${esc(t)}</div>${tri(`play.${i}`, V.play?.[i])}</div>`).join('')}
     ${fieldBox('playnotes', V.remote ? 'What the leader told you, and how the role-play went' : 'What you saw', V.playNotes, 2, '', 'playNotes', dis)}`;
@@ -1428,6 +1428,7 @@ async function viewVisit() {
     x.addCid = null;
   }
   S.vSnap = snap; S.vPriorRaw = priorRaw;
+  if (x.remote && canLog) (V.consultants || []).forEach(c => { if (!c.mode) c.mode = 'leader'; });
   if (canLog && !later && !V.actions.some(hasCommitment)) fillCommitments(V, focusAll);
   // Wins to celebrate, built from the numbers: store results, last visit's commitments that moved,
   // and the people carrying the store. The leader win box starts with these; change anything.
@@ -1559,7 +1560,7 @@ async function viewVisit() {
       : S.rsa ? `<p class="small muted" style="margin:6px 0 0">Nobody is above goal on this one yet.</p>` : ''}
     </div>`; }).join('')}</div>` : '<p class="small muted">No store numbers yet.</p>')}
 
-  ${sec('people', '3', 'Consultants coached', `Who to see first. Coach one thing with each person. Numbers are month to date${S.rsa?.to ? ' through ' + esc(shortDate(S.rsa.to)) : ''}.`, `
+  ${sec('people', '3', x.remote ? 'Consultants: coach them through the leader' : 'Consultants coached', x.remote ? `Help the leader coach each person. Use the data to open a conversation about behavior, role-play it with the leader, and agree on when they coach it. Numbers are month to date${S.rsa?.to ? ' through ' + esc(shortDate(S.rsa.to)) : ''}.` : `Who to see first. Coach one thing with each person. Numbers are month to date${S.rsa?.to ? ' through ' + esc(shortDate(S.rsa.to)) : ''}.`, `
     ${V.consultants.map((c, ci) => {
       const p = people.find(q => q.cid === c.cid) || { name: c.name, k: {} };
       const pk = picks.find(q => q.cid === c.cid);
@@ -1570,11 +1571,11 @@ async function viewVisit() {
           ${kpiCell(p, 'sph', 'SPH', money)}${wk?.hours >= 1 && wk.sph != null ? `<div class="kc ${wk.priorSph && wk.sph < wk.priorSph * 0.75 ? 'red' : wk.priorSph && wk.sph > wk.priorSph * 1.25 ? 'green' : ''}"><span>This week</span><b>${money(wk.sph)}</b></div>` : ''}
           ${kpiCell(p, 'financePct', 'Finance', p1)}${kpiCell(p, 'beddingPct', 'Bedding', p1)}${kpiCell(p, 'protectionPct', 'Protection', p1)}${kpiCell(p, 'creditApps', 'Apps', n => String(Math.round(n)))}${kpiCell(p, 'cancelPct', 'Cancel', p1, true)}
         </div>` : ''}
-        <div class="segwho"><p class="small" style="margin:0 0 6px"><b>How are you coaching ${esc(titleName(c.name).split(' ')[0])}?</b> <span class="muted">Through the leader: you give the leader the plan, role-play it with them, and they coach ${esc(titleName(c.name).split(' ')[0])}.</span></p>${tri(`consultants.${ci}.mode`, c.mode || 'direct', [['direct', 'Directly with them'], ['leader', 'Through the store leader']])}</div>
+        <div class="segwho"><p class="small" style="margin:0 0 6px"><b>How are you coaching ${esc(titleName(c.name).split(' ')[0])}?</b> <span class="muted">Through the leader: you give the leader the plan, role-play it with them, and they coach ${esc(titleName(c.name).split(' ')[0])}.</span></p>${tri(`consultants.${ci}.mode`, c.mode || (x.remote ? 'leader' : 'direct'), [['direct', 'Directly with them'], ['leader', 'Through the store leader']])}</div>
         ${(() => { const cc = consultantCoaching({ p, store: p.store || x.store, why: c.why, wk, goals: DEFAULT_GOALS, pace: paceFactor(S.rsa?.to), teamFocus: focusAll.find(f => V.focus.includes(f.key))?.label, lever: c.lever });
-          const viaLeader = c.mode === 'leader';
+          const viaLeader = (c.mode || (x.remote ? 'leader' : 'direct')) === 'leader';
           const text = viaLeader ? leaderCoachText(cc, titleName(c.name).split(' ')[0], V.leaderWin?.name || 'the store leader') : cc.text;
-          return `<div class="suggest"><p class="eyebrow">${viaLeader ? 'Coach the leader to coach them' : 'Suggested coaching'}</p><div class="stext">${esc(text)}</div>
+          return `<div class="suggest"><p class="eyebrow">${viaLeader ? `Help ${esc(V.leaderWin?.name ? titleName(V.leaderWin.name).split(' ')[0] : 'the leader')} coach ${esc(titleName(c.name).split(' ')[0])}` : 'Suggested coaching'}</p><div class="stext">${esc(text)}</div>
           ${canLog ? `<div class="row" style="margin-top:8px"><button type="button" class="btn tiny primary" data-usec="${ci}">Use this in my notes</button><span class="small muted">or write or say your own below</span></div>` : ''}</div>`; })()}
         ${(() => {
           const cc = consultantCoaching({ p, store: p.store || x.store, why: c.why, wk, goals: DEFAULT_GOALS, pace: paceFactor(S.rsa?.to), lever: c.lever });
@@ -1585,7 +1586,7 @@ async function viewVisit() {
           const onWhat = cc.items.find(f => !f.stretch) || cc.items[0];
           const dr = drillFor(c.drill.key), d = c.drill, n = Object.keys(d.scored || {}).length;
           const opts = DRILL_KEYS.map(k => [k, drillFor(k).title]);
-          if (c.mode === 'leader') {
+          if ((c.mode || (x.remote ? 'leader' : 'direct')) === 'leader') {
             const L = V.leaderWin?.name ? titleName(V.leaderWin.name).split(' ')[0] : 'the leader', ld = c.lead || {};
             return `<div class="drill">
               <p class="eyebrow" style="margin:0">Practice the coaching conversation with ${esc(L)}</p>
@@ -1709,16 +1710,25 @@ const COACH_WATCH = [
   'Used the number, then asked a question before telling',
   'Showed the behavior or ran it with them, did not just talk about it',
   'Got a commitment in the consultant\'s words, with a date'];
-// Remote coaching through the store leader: the same plan, written for the leader to deliver.
+// Coaching through the store leader: help the leader coach the consultant. The numbers open a
+// behavior conversation, then you role-play it with the leader before they do it for real.
 function leaderCoachText(cc, first, leader) {
   const L = titleName(leader).split(' ')[0] || 'the leader';
-  const lines = String(cc.text || '').split('\n').filter(Boolean);
-  const out = [`You're coaching ${L} to coach ${first}. Give ${L} the plan below, then role-play it: you play ${first}, ${L} coaches you. One tip, then run it again before ${L} does it for real.`];
-  lines.forEach(l => {
-    if (/^Practice it standing up/.test(l)) out.push(`${L} runs the stand-up practice with ${first} on the floor: ${l.replace(/^Practice it standing up: /, '').replace(/You're the guest\./, `${L} plays the guest.`).replace(/Let [^,]+ run it, give one tip, then run it again\./, `${first} runs it, ${L} gives one tip, then they run it again.`)}`);
-    else if (/'s commitment/.test(l)) out.push(`${L} gets ${first}'s commitment in their own words${(l.match(/ from .+ to .+ by the next visit/) || [''])[0].replace(' by the next visit', '') ? ': ' + l.split(': ').slice(1).join(': ').replace(' We inspect it then.', '') : ''}, and checks it before your next visit.`);
-    else out.push(l.replace(/^Open with a win\./, `${L} opens with a win.`).replace(/Sit down with the store leader and write a plan today/, `${L} writes the plan with them today`).replace(/^Coach /, `${L} coaches `).replace(/Ask what's going on before you talk numbers/, `${L} asks what's going on first`).replace(/Tell them\./, `${L} tells them.`));
-  });
+  const main = (cc.items || []).find(f => !f.stretch) || (cc.items || [])[0];
+  const out = [`Help ${L} coach ${first}. Use the numbers to start a conversation about behavior, not a lecture about the number.`];
+  const facts = [];
+  if (cc.strength) facts.push(`strong on ${PLAIN[cc.strength.key] || cc.strength.label.toLowerCase()} (${fmtMetric(cc.strength.key, cc.strength.value)} vs ${fmtMetric(cc.strength.key, cc.strength.goal)} goal)`);
+  (cc.items || []).filter(f => !f.stretch).forEach(f => facts.push(`${PLAIN[f.key] || f.label.toLowerCase()} at ${fmtMetric(f.key, f.value)} vs ${fmtMetric(f.key, f.goal)} goal`));
+  if (facts.length) out.push(`What the data says about ${first}: ${facts.join('; ')}.`);
+  if (cc.strength) out.push(`${L} opens with the win: "${first}, your ${PLAIN[cc.strength.key] || 'numbers'} ${cc.strength.key === 'sph' ? 'are' : 'is'} ahead of goal. That's real."`);
+  if (main) {
+    const beh = String(main.coach?.doThis || '').split('. ')[0].replace(/\.$/, '');
+    out.push(`${L} uses the number to ask, not tell: "Your ${PLAIN[main.key] || main.label.toLowerCase()} is ${fmtMetric(main.key, main.value)} and our goal is ${fmtMetric(main.key, main.goal)}. ${/^walk me through/i.test(main.coach?.ask?.[0] || '') ? main.coach.ask[0] : `Walk me through your last guest. ${main.coach?.ask?.[0] || 'What happened?'}`}"`);
+    out.push(`The behavior ${L} coaches: ${beh}. ${L} shows it or runs it with ${first}, not just talks about it.`);
+  }
+  out.push(`Role-play it with ${L} first: you play ${first} and push back a little, ${L} coaches you. Give one tip, then run it again.`);
+  if (cc.drill) out.push(`Then ${L} runs the "${cc.drill.title}" practice with ${first} on the floor.`);
+  out.push(cc.commit ? `${L} gets ${first}'s commitment in their own words: ${cc.commit.what.replace(/^[^:]+:\s*/, '').replace(/^./, c => c.toLowerCase())}, ${PLAIN[cc.commit.key] || 'the number'} from ${cc.commit.from} to ${cc.commit.to}${main && cc.commit.to !== fmtMetric(main.key, main.goal) ? ` (a first step toward ${fmtMetric(main.key, main.goal)})` : ''}, and checks it before your next visit.` : `${L} gets ${first}'s commitment in their own words and checks it before your next visit.`);
   return out.join('\n');
 }
 function followBadge(v, au) {

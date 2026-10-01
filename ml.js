@@ -4,7 +4,7 @@
 import {
   normalizeHeader, toNumber, parseDate, slug, canonicalStore, isKnownStore, REGIONS, STORE_METRICS,
   COACHING, METRICS, pickFocus, pickStoreFocus, goalsFor, DEFAULT_GOALS, isOutlet, minSphFor, fmt, weeklyTarget
-} from './base.js?v=202610010919';
+} from './base.js?v=202610011005';
 
 const numOrNull = v => (v === '' || v === null || v === undefined ? null : toNumber(v));
 
@@ -195,7 +195,7 @@ export const LEVERS = [
       behavior: 'Start a cart with every guest. Connection shows up as a cart, and a guest with a cart is a guest who buys.',
       ask: 'How many of your last 10 guests left with a cart started?' },
     { key: 'finance', label: 'Finance: buying power early', metric: 'financePct', alt: 'appsToTraffic', drill: 'finance',
-      behavior: 'Get every guest their buying power in the first 10 minutes so the yes is easy.',
+      behavior: 'Get every guest their buying power so the yes is easy.',
       fact: '93% of guests who get approved buy today, and 97% buy within 7 days.',
       ask: 'When in the conversation are you bringing up buying power?' }
   ] },
@@ -281,7 +281,7 @@ export const PLAY = [
 export const PLAY_CHECKS = [
   'Connected first: greeted like a referral and started a cart',
   'Built value before price: started at Best and showed the whole room',
-  'Buying power early: 6 or 12 month financing offered in the first 10 minutes',
+  'Buying power: got the guest their buying power with 6 or 12 month financing',
   'Bundle presented: every option with Protection + Premium Delivery',
   'Showed the guest their savings in dollars and asked which option feels right'
 ];
@@ -289,9 +289,9 @@ export const PLAY_CHECKS = [
 export const PLAY_CHECKS_REMOTE = [
   'Connection: the leader can tell you how many guests got a cart yesterday, and who',
   'Value: the leader walked you through a recent sale that started at Best and showed the whole room',
-  'Buying power: the leader knows who offered financing in the first 10 minutes yesterday',
-  'Bundle: role-played every option with Protection + Premium Delivery with an associate on video',
-  'Savings in dollars: the associate said the double savings out loud in the role-play'
+  'Buying power: the leader knows which guests got their buying power yesterday, and who didn\'t',
+  'Bundle: role-played every option with Protection + Premium Delivery with the leader or an associate on video',
+  'Savings in dollars: the double savings was said out loud in the role-play'
 ];
 export const FLIQ_CHECKS_REMOTE = [
   'Per the leader: associates on the floor today have used FrontLine IQ',
@@ -315,7 +315,7 @@ export const FLIQ_DAILY = [
   'Sunday: go over last week\'s FrontLine IQ use with each store leader. Who used it, who didn\'t.',
   'Monday: reps before the first guest. Every associate runs one FrontLine IQ practice at open.',
   'Tuesday: connection. Practice the greeting and starting a cart in FrontLine IQ.',
-  'Wednesday: buying power. Practice bringing up financing in the first 10 minutes.',
+  'Wednesday: buying power. Practice getting every guest their buying power.',
   'Thursday: run the play. Practice presenting the bundle and the double savings.',
   'Friday: weekend prep. Every associate role-plays the weekend guest in FrontLine IQ.',
   'Saturday: recognize the associate who used FrontLine IQ the most this week.'
@@ -566,7 +566,7 @@ const D = {
   bundle: { title: 'Running the play', guest: 'Ask "Is there any deal going on right now?" before the salesperson brings it up.',
     watch: ['Connected and started a cart before talking about the offer', 'Built value first: started at Best and showed the whole room', 'Got buying power with 6 or 12 month financing', 'Presented every option with Protection + Premium Delivery and showed the double savings'] },
   cart: { title: 'Building the cart', guest: 'Say "I\'m just looking at sofas today." Like two pieces, but don\'t ask for anything.',
-    watch: ['Started a cart in the first 10 minutes', 'Added every piece the guest liked as they went', 'Asked about the rest of the room and added to the cart', 'Walked the guest through the cart before any talk of price'] },
+    watch: ['Started a cart early in the conversation', 'Added every piece the guest liked as they went', 'Asked about the rest of the room and added to the cart', 'Walked the guest through the cart before any talk of price'] },
   quality: { title: 'Starting at Best', guest: 'Ask "What\'s the difference between these three?"',
     watch: ['Showed the Best option first', 'Explained why Best is better in the guest\'s own words', 'Walked down only when the guest asked', 'Quoted Best as a monthly payment'] },
   connection: { title: 'Greeting to discovery', guest: 'Walk in and say "Just looking." Keep your answers short until they get you talking.',
@@ -575,8 +575,8 @@ const D = {
     watch: ['Showed the full room: tables, rug, lighting, accents', 'Tied each add-on back to something you said', 'Let you take pieces out instead of never offering them', 'Gave one total for the room, delivered and protected'] },
   price: { title: 'Holding price', guest: 'Say "That\'s more than I wanted to spend. Can you do better?"',
     watch: ['Did not jump to a discount', 'Went back to value in your own words', 'Offered the monthly payment before any price move', 'Brought in a leader before going below price'] },
-  finance: { title: 'Finance in the first 10 minutes', guest: 'Shop a bedroom set. Don\'t bring up a budget.',
-    watch: ['Brought up financing in the first 10 minutes, before price came up', 'Framed it as buying power, not credit', 'Quoted a monthly payment next to the price', 'Asked for the app with a clear, easy ask'] },
+  finance: { title: 'Getting the guest their buying power', guest: 'Shop a bedroom set. Don\'t bring up a budget.',
+    watch: ['Got the guest their buying power before price came up', 'Framed it as buying power, not credit', 'Quoted a monthly payment next to the price', 'Asked for the app with a clear, easy ask'] },
   bedding: { title: 'The sleep question', guest: 'Buy a bed frame and say your mattress is "fine."',
     watch: ['Asked how you are sleeping, not whether you need a mattress', 'Asked a follow-up about age of mattress, pain or partner', 'Walked you to the bedding gallery', 'Had you lie down and compared two options'] },
   protection: { title: 'Protection inside the price', guest: 'Say "I don\'t need protection. I\'m careful."',

@@ -320,7 +320,7 @@ export const COACHING = {
     pillar: 'Finance',
     why: 'Finance gives the guest buying power. If we wait until the end, it usually never comes up.',
     ask: ['When do you bring up financing?', 'How do you talk about the monthly payment?'],
-    doThis: 'Talk buying power in the first 10 minutes with every guest. Show the monthly payment next to the price.'
+    doThis: 'Get every guest their buying power. Show the monthly payment next to the price.'
   },
   beddingPct: {
     pillar: 'Bedding',
@@ -380,7 +380,7 @@ export const COACHING = {
     pillar: 'Finance',
     why: 'Apps to traffic shows how many guests we offer finance to. Our standard is 10%.',
     ask: ['When in the visit is the team offering the app?', 'Who on the team runs the most apps, and what do they do differently?'],
-    doThis: 'Offer buying power to every guest in the first 10 minutes. Leaders check apps at every huddle.'
+    doThis: 'Get every guest their buying power. Leaders check apps at every huddle.'
   },
   creditApps: {
     pillar: 'Finance',
