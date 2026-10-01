@@ -1,14 +1,14 @@
-import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610010628';
-import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610010628';
+import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610010632';
+import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610010632';
 import {
   STORES, DISTRICTS, canonicalStore, isKnownStore, parseRsa, rangeFromFileName, parseTeamRoster, resolveReportNames,
   paceFactor, DEFAULT_GOALS, cidOf, status, fmt, goalsFor, TEAM_FOCUS, pickStoreFocus
-} from './base.js?v=202610010628';
+} from './base.js?v=202610010632';
 import {
   iso, fromIso, addDays, daysApart, weekStartOf, DAY_NAMES, DAY_LONG, dow, DEFAULT_OFF, validOff, safeOff, VISIT_DAYS, STORE_GOALS,
   parseDaily, needScore, band, pct, environment, buildPlan, pivotSuggestion, ELEMENTS, SEGMENTS, AORS, PRACTICE, VISIT_TYPES, kindToType, visitScore, visitSummary, consultantCoaching, drillFor, draggers, helpers, STORE_TO_RSA, hasCommitment, commitmentText, blackoutFor, offChoicesFor, storeFocus, rsaPicks, consultantWeeks, teamSignals,
   STORE_METRICS, slug, COACHING, METRICS, PLAIN, isOutlet, driveMin, driveText, MAX_SPLIT_MIN
-} from './ml.js?v=202610010628';
+} from './ml.js?v=202610010632';
 
 const DEMO = !firebaseConfig.apiKey || firebaseConfig.apiKey.startsWith('PASTE');
 const FB = 'https://www.gstatic.com/firebasejs/10.12.2/';
@@ -1223,8 +1223,10 @@ const fieldBox = (id, label, value, rows = 3, hint = '', field = '', dis = '') =
 // One page the leader works through in the store, top to bottom. It opens already knowing why they
 // are there, what to coach and who to see. Everything autosaves as a draft; Submit closes it out.
 const V_OPEN = new Set(['why', 'win', 'follow', 'focus', 'people', 'photos', 'action', 'leadercommit', 'el2', 'el3']);
-const PHOTO_MAX = 20;
-const PHOTO_ELS = ['assortment', 'visual'];   // these elements always get a photo block
+const PHOTO_MAX = 30;
+const PHOTO_ELS = ['assortment', 'visual', 'facilities'];   // every area in these gets a photo, asked for right where it's scored
+// The areas that need a photo on every in-person visit, so every Market Leader walks the same store.
+const photoAreas = e => PHOTO_ELS.includes(e.key) ? (e.aor ? AORS : e.items) : [];
 const REMOTE_TYPES = ['Phone call', 'Video call', 'Teams or text'];
 const DRILL_KEYS = ['sph', 'closeRate', 'avgTicket', 'effMargin', 'financePct', 'appsToTraffic', 'beddingPct', 'protectionPct', 'deliveryPct', 'cancelPct'];
 function blankVisit(x, who) {
@@ -1316,7 +1318,14 @@ async function viewVisit() {
       <figcaption><span class="pill">${esc(ph.el === 'general' ? 'General' : ELEMENTS.find(e => e.key === ph.el)?.t || ph.el)}${ph.item ? ' · ' + esc(ph.item) : ''}</span>
         ${canLog ? fieldBox(`pc_${ph.id}`, 'Comments', ph.caption, 2, '', '', '').replace('<textarea ', `<textarea data-pcap="${esc(ph.id)}" placeholder="What does this show? What needs to change?" `) : ph.caption ? `<p class="small">${esc(ph.caption)}</p>` : ''}
         ${canLog ? `<button type="button" class="link" data-delphoto="${esc(ph.id)}" style="color:var(--red);padding-left:0">Remove</button>` : ''}</figcaption></figure>`;
-  const photoStrip = el => { const list = (S.vPhotos || []).filter(p => p.el === el); return list.length ? `<div class="gallery" style="margin-top:10px">${list.map(photoCard).join('')}</div>` : ''; };
+  const photoStrip = (el, extraOnly) => { const areas = photoAreas(ELEMENTS.find(z => z.key === el) || {}); const list = (S.vPhotos || []).filter(p => p.el === el && (!extraOnly || !areas.includes(p.item))); return list.length ? `<div class="gallery" style="margin-top:10px">${list.map(photoCard).join('')}</div>` : ''; };
+  // The photo ask for one area, under its score: the shots taken so far with comments, or the buttons.
+  const areaPhoto = (el, area, val) => {
+    const list = (S.vPhotos || []).filter(p => p.el === el && p.item === area);
+    if (list.length) return `<div class="aphoto done"><div class="gallery">${list.map(photoCard).join('')}</div>${canLog ? `<div class="row" style="gap:6px"><span class="small good">Photo taken</span>${photoBtns(el, area).replace(/Take a photo/, 'Add another')}</div>` : ''}</div>`;
+    if (!canLog) return '';
+    return `<div class="aphoto"><span class="small ${flagged(val) ? 'warn' : 'muted'}">${flagged(val) ? 'Needs work: get a photo and say what has to change.' : 'Photo of this area'}</span>${photoBtns(el, area)}</div>`;
+  };
   const photoBtns = (el, item = '') => canLog ? `<span class="row" style="gap:6px"><button type="button" class="btn tiny primary" data-photo="${el}" data-item="${esc(item)}" data-src="cam">Take a photo</button><button type="button" class="btn tiny" data-photo="${el}" data-item="${esc(item)}" data-src="lib">From library</button></span>` : '';
   const flagged = v => v === 'no' || v === 'partial' || v === 'needs';
   const kpiCell = (p, key, label, fmtFn, lower) => {
@@ -1453,7 +1462,8 @@ async function viewVisit() {
       ${team.rows.map(r => `<tr><td class="nm">${esc(titleName(r.name))}</td><td class="num ${r.below ? 'bad' : ''}">$${Math.round(r.sph)}</td><td class="num">${r.wk.priorSph ? '$' + Math.round(r.wk.priorSph) : '--'}</td><td class="num ${r.slipping ? 'bad' : r.rising ? 'good' : ''}">${r.wk.sph != null && r.wk.hours >= 1 ? '$' + Math.round(r.wk.sph) : '--'}</td><td class="num">${r.wk.hours >= 1 ? Math.round(r.wk.hours) : '--'}</td><td>${r.below ? '<span class="tag below">Below min</span>' : r.slipping ? '<span class="tag slipping">Slipping</span>' : r.rising ? '<span class="tag model">Rising</span>' : ''}</td></tr>`).join('')}
       </tbody></table></div></details>` : ''}`)}
 
-  ${x.remote ? '' : ELEMENTS.map(e => sec('el' + e.n, e.n, e.t, e.q, `
+  ${x.remote ? '' : ELEMENTS.map(e => sec('el' + e.n, e.n, e.t, PHOTO_ELS.includes(e.key) ? `${e.q} Photos: ${photoAreas(e).filter(a => (S.vPhotos || []).some(p => p.el === e.key && p.item === a)).length} of ${photoAreas(e).length}` : e.q, `
+    ${PHOTO_ELS.includes(e.key) && canLog ? `<p class="small" style="margin:0 0 8px">Score each area and take a photo of it as you go, good or bad. Every visit gets the same photos so we can compare stores and visits.</p>` : ''}
     ${e.key === 'culture' ? `<p class="small">Score the value segments from something you saw today: watch a team member with a live guest, or run it as a practice with them.</p>` + SEGMENTS.map((g, gi) => { const sm = V.segMeta?.[gi] || {};
       return `<div class="seggrp"><p class="eyebrow">${esc(g.name)}</p><p class="small">${esc(g.must)}</p>
       <div class="segwho">
@@ -1463,21 +1473,14 @@ async function viewVisit() {
       ${g.items.map((t, i) => `<div class="item"><div class="txt">${esc(t)}</div>${tri(`segs.${gi}.${i}`, V.segs?.[gi]?.[i])}</div>`).join('')}
       ${fieldBox(`segn${gi}`, 'What you saw', sm.notes, 2, '', `segMeta.${gi}.notes`, dis)}</div>`; }).join('') : ''}
     ${e.items.map((t, i) => `<div class="item"><div class="txt">${esc(t)}</div>${tri(`checks.${e.key}.${i}`, V.checks?.[e.key]?.[i])}
-      ${PHOTO_ELS.includes(e.key) ? `<div class="iphoto" ${flagged(V.checks?.[e.key]?.[i]) ? '' : 'hidden'}><span class="small warn">Get a photo of this for the team.</span>${photoBtns(e.key, t)}</div>` : ''}</div>`).join('')}
+      ${PHOTO_ELS.includes(e.key) ? areaPhoto(e.key, t, V.checks?.[e.key]?.[i]) : ''}</div>`).join('')}
     ${e.aor ? `<p class="small">Walk every area of responsibility. Heroes leading, clean displays, pricing and POP right.</p>${AORS.map(a => `<div class="item"><div class="txt">${esc(a)}</div>${tri(`aor.${a}`, V.aor?.[a], [['pass', 'Pass'], ['needs', 'Needs work']])}
-      <div class="iphoto" ${flagged(V.aor?.[a]) ? '' : 'hidden'}><span class="small warn">Get a photo of this area.</span>${photoBtns(e.key, a)}</div></div>`).join('')}` : ''}
-    ${PHOTO_ELS.includes(e.key) ? `<div class="elphotos"><div class="spread" style="margin:0 0 6px"><b class="small">Photos and comments for ${esc(e.t)}</b>${photoBtns(e.key)}</div>
-      ${photoStrip(e.key) || '<p class="small muted" style="margin:0">No photos yet. Take one of what you see, good or bad, and say what it shows.</p>'}</div>` : ''}
+      ${areaPhoto(e.key, a, V.aor?.[a])}</div>`).join('')}` : ''}
+    ${PHOTO_ELS.includes(e.key) && photoStrip(e.key, true) ? `<div class="elphotos"><b class="small">Other photos for ${esc(e.t)}</b>${photoStrip(e.key, true)}</div>` : ''}
     ${fieldBox(`eln${e.n}`, 'Notes', V.elNotes?.[e.key], 2, '', `elNotes.${e.key}`, dis)}
-    ${!PHOTO_ELS.includes(e.key) ? `${canLog ? `<div style="margin-top:8px">${photoBtns(e.key)}</div>` : ''}${photoStrip(e.key)}` : ''}`)).join('')}
+    ${canLog ? `<div class="row" style="margin-top:8px"><span class="small muted">Something else worth a picture?</span>${photoBtns(e.key)}</div>` : ''}${!PHOTO_ELS.includes(e.key) ? photoStrip(e.key) : ''}`)).join('')}
 
-  ${x.remote ? `<div class="warnbox">This is a remote visit, so there's no 6 Elements walk or photos. Go over the numbers with the leader, coach the focus items and the consultants, and set commitments.</div>` : sec('photos', '▣', 'Photos', 'Take pictures of what you saw. Tag each one and add a caption.', `
-    ${canLog ? `<div class="photobar">
-      <label for="ptag" style="margin:0">Tag to<select id="ptag">${[['general', 'General'], ...ELEMENTS.map(e => [e.key, `${e.n}. ${e.t}`])].map(([k, l]) => `<option value="${k}" ${S.pTag === k ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></label>
-      <button type="button" class="btn primary" id="pcam">Take a photo</button>
-      <button type="button" class="btn" id="plib">Add from library</button>
-      <span class="small muted">${(S.vPhotos || []).length} of ${PHOTO_MAX}</span></div>` : ''}
-    <div class="gallery">${(S.vPhotos || []).map(photoCard).join('') || '<p class="small muted">No photos yet.</p>'}</div>`)}
+  ${x.remote ? `<div class="warnbox">This is a remote visit, so there's no 6 Elements walk or photos. Go over the numbers with the leader, coach the focus items and the consultants, and set commitments.</div>` : ''}
 
   ${sec('action', '✓', 'Action plan', 'Up to 3 commitments, each from X to Y by a date. We fill in suggestions. Change anything.', `
     ${[0, 1, 2].map(i => { const a = V.actions[i] || {}; return `<div class="ap"><div class="row" style="justify-content:space-between"><p class="eyebrow" style="margin:0">Commitment ${i + 1}</p>${a.suggested ? '<span class="pill check">Suggested</span>' : ''}</div>
@@ -1663,6 +1666,7 @@ function wireVisit(V, canLog, snap) {
     if (path.startsWith('follow.')) { setPath(V, 'followAuto.' + path.slice(7), null); const au = b.closest('.item')?.querySelector('.auto .pill'); if (au) au.remove(); }
     b.parentElement.querySelectorAll('button').forEach(o => o.classList.toggle('on', o.dataset.v === val));
     const ip = b.closest('.item')?.querySelector('.iphoto'); if (ip) ip.hidden = !(val === 'no' || val === 'partial' || val === 'needs');
+    const ap = b.closest('.item')?.querySelector('.aphoto:not(.done) > span'); if (ap) { const bad = val === 'no' || val === 'partial' || val === 'needs'; ap.textContent = bad ? 'Needs work: get a photo and say what has to change.' : 'Photo of this area'; ap.className = 'small ' + (bad ? 'warn' : 'muted'); }
     const dc = path.includes('.drill.scored.') && b.closest('.drill')?.querySelector('.dcount'); if (dc) dc.textContent = `(${Object.keys(getPath(V, path.split('.').slice(0, 4).join('.')) || {}).length} of ${dc.dataset.total})`;
     const prac = b.closest('details.prac'); if (prac && path.includes('.practice.')) prac.querySelector('summary .small').textContent = `${Object.keys(getPath(V, path.split('.').slice(0, 3).join('.')) || {}).length} of ${PRACTICE.length} scored`;
     drawScore(); saveDraft();
@@ -1764,6 +1768,15 @@ function wireVisit(V, canLog, snap) {
     const partial = V.actions.find(a => hasCommitment(a) && (!String(a.from || '').trim() || !String(a.to || '').trim()));
     if (partial) { V_OPEN.add('action'); document.querySelector('[data-sec="action"]').classList.add('open'); document.querySelector('[data-sec="action"]').scrollIntoView({ behavior: 'smooth' }); return toast('Each commitment needs a From and a To.', true); }
     if (!sm.commitments.length) { V_OPEN.add('action'); document.querySelector('[data-sec="action"]').classList.add('open'); document.querySelector('[data-sec="action"]').scrollIntoView({ behavior: 'smooth' }); return toast('Add at least one commitment in the action plan before you submit.', true); }
+    if (!V.remote) {
+      const missing = ELEMENTS.flatMap(e => photoAreas(e).filter(a => !(S.vPhotos || []).some(p => p.el === e.key && p.item === a)).map(a => ({ e, a })));
+      V.photosMissing = missing.length;
+      if (missing.length && S.photoNudged !== V.id) {
+        S.photoNudged = V.id;
+        const first = missing[0]; V_OPEN.add('el' + first.e.n); const sec0 = document.querySelector(`[data-sec="el${first.e.n}"]`); if (sec0) { sec0.classList.add('open'); sec0.scrollIntoView({ behavior: 'smooth' }); }
+        return toast(`${missing.length} area${missing.length > 1 ? 's still need' : ' still needs'} a photo (first: ${first.a}). Take them, or tap Submit again to send without.`, true);
+      }
+    }
     V.status = 'done'; V.submittedAt = V.submittedAt || new Date().toISOString();
     saveDraft(true);
     try {
