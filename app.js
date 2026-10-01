@@ -1,15 +1,15 @@
-import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610010759';
-import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610010759';
+import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610010813';
+import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610010813';
 import {
   STORES, DISTRICTS, canonicalStore, isKnownStore, parseRsa, rangeFromFileName, parseTeamRoster, resolveReportNames,
   paceFactor, DEFAULT_GOALS, cidOf, status, fmt, goalsFor, TEAM_FOCUS, pickStoreFocus
-} from './base.js?v=202610010759';
+} from './base.js?v=202610010813';
 import {
   iso, fromIso, addDays, daysApart, weekStartOf, DAY_NAMES, DAY_LONG, dow, DEFAULT_OFF, validOff, safeOff, VISIT_DAYS, STORE_GOALS,
   parseDaily, needScore, band, pct, environment, buildPlan, pivotSuggestion, ELEMENTS, SEGMENTS, AORS, PRACTICE, VISIT_TYPES, kindToType, visitScore, visitSummary, consultantCoaching, drillFor, draggers, helpers, STORE_TO_RSA, hasCommitment, commitmentText, blackoutFor, offChoicesFor, storeFocus, rsaPicks, consultantWeeks, teamSignals,
   STORE_METRICS, slug, COACHING, METRICS, PLAIN, isOutlet, driveMin, driveText, MAX_SPLIT_MIN, LEVERS, leverStatus, suggestLever,
   OFFER_DEFAULT, PLAY, PLAY_CHECKS, offerActive, offerMath, FLIQ_CHECKS, FLIQ_DAILY
-} from './ml.js?v=202610010759';
+} from './ml.js?v=202610010813';
 
 const DEMO = !firebaseConfig.apiKey || firebaseConfig.apiKey.startsWith('PASTE');
 const FB = 'https://www.gstatic.com/firebasejs/10.12.2/';
@@ -1086,9 +1086,7 @@ function dayCard(d, i, plan, canEdit) {
       <div class="row" style="justify-content:space-between;flex-wrap:nowrap"><span class="store">${part ? `<span class="part">${esc(part)}</span> ` : ''}${esc(store)}</span>${needChip(sc?.score)}</div>
       ${extra}
       <div class="row">${kindPill(kind)}${statePill(status)}</div>
-      ${status !== 'done' && sc?.parts?.length ? `<ul>${sc.parts.slice(0, 2).map(p => `<li>${esc(p.text)}</li>`).join('')}</ul>` : ''}
-      ${status !== 'done' && lvL ? `<p class="small" style="margin:0"><b>Lever:</b> ${esc(lvL)}</p>` : ''}
-      ${status !== 'done' && see.length ? `<p class="small" style="margin:0"><b>See first:</b> ${see.map(esc).join(', ')}</p>` : ''}
+      ${status !== 'done' && !past ? intentHtml(visitIntent(store, { anchor: part === 'AM' && d.anchor, kind, date: d.date }), true) : ''}
       <div class="row" style="gap:6px">${btn}</div>
     </div>`;
   };
@@ -1246,6 +1244,45 @@ const fieldBox = (id, label, value, rows = 3, hint = '', field = '', dis = '') =
   <div class="fieldhead"><label for="${id}">${esc(label)}</label>${dis ? '' : micBtn(id)}</div>
   ${hint ? `<p class="small" style="margin:0 0 4px">${esc(hint)}</p>` : ''}
   <textarea id="${id}" rows="${rows}" ${field ? `data-field="${field}"` : ''} ${dis}>${esc(value || '')}</textarea>`;
+
+// ---------------------------------------------------------------- the intent of a visit
+// Why the Market Leader is going, in plain words: the purpose, the lever, the people behind the gap,
+// the behaviors to coach, and who models it. We change the outcome through people and behaviors.
+function visitIntent(store, { anchor, kind, date } = {}) {
+  const snap = S.daily?.stores?.[store], m = snap?.mtd, sc = S.scores[store];
+  const lk = suggestLever(m), L = lk ? leverStatus(m).find(l => l.key === lk) : null;
+  const weak = L ? L.inputs.filter(i => i.metric && i.ratio != null && i.ratio < 1).sort((a, b) => a.ratio - b.ratio)[0] : null;
+  const floorIn = L ? L.inputs.find(i => !i.metric) : null;
+  const people = S.rsa?.people || [], pace = paceFactor(S.rsa?.to);
+  const drag = weak && STORE_TO_RSA[weak.metric] ? draggers(people, store, weak.metric, DEFAULT_GOALS, pace, 2) : [];
+  const help = weak && STORE_TO_RSA[weak.metric] ? helpers(people, store, weak.metric, DEFAULT_GOALS, pace, 1) : [];
+  const team = S.teams?.[store];
+  const see = [...drag.map(d => ({ cid: d.cid, n: titleName(d.name), why: `${(PLAIN[d.key] || d.key)} ${fmtMetric(d.key, d.value)} vs ${fmtMetric(d.key, d.goal)}` })),
+    ...(team?.below || []).map(r => ({ cid: r.cid, n: titleName(r.name), why: `$${Math.round(r.sph)} an hour, under the minimum` })),
+    ...(team?.slipping || []).map(r => ({ cid: r.cid, n: titleName(r.name), why: `slipping this week` }))]
+    .filter((x, i, a) => a.findIndex(y => y.cid === x.cid) === i).slice(0, 3);
+  const prior = S.visits.filter(v => v.store === store && v.status !== 'draft' && (!date || v.date < date)).sort((a, b) => b.date.localeCompare(a.date))[0];
+  const open = prior ? (prior.actions || []).filter(hasCommitment).filter(a => autoFollow(a, snap, {})?.v !== 'yes').length : 0;
+  const purpose = anchor ? 'Anchor morning: be on the floor at open, set the tone, and run the play with the team.'
+    : open ? `Follow up and inspect: ${open} commitment${open > 1 ? 's' : ''} from the last visit ${open > 1 ? "aren't" : "isn't"} there yet.`
+    : kind === 'second' ? 'Second visit this week: inspect the plan you set and the behaviors behind it.'
+    : 'Set the plan: find the gap, coach the people behind it, leave with commitments.';
+  const behaviors = [weak && { l: weak.label, b: weak.behavior.split('. ')[0] }, floorIn && { l: floorIn.label, b: floorIn.behavior.split('. ')[0] }].filter(Boolean);
+  return { purpose, L, weak, why: (sc?.parts || []).slice(0, 2).map(p => p.text), see, model: help[0] ? titleName(help[0].name) : null, behaviors };
+}
+function intentHtml(it, compact) {
+  if (!it) return '';
+  return `<div class="intent ${compact ? 'compact' : ''}">
+    ${compact ? '' : '<p class="eyebrow" style="margin:0 0 2px">Intent of this visit</p>'}
+    <p class="ipurpose">${esc(it.purpose)}</p>
+    ${it.why.length && !compact ? `<ul class="whylist">${it.why.map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : it.why.length ? `<p class="small" style="margin:0">${esc(it.why[0])}</p>` : ''}
+    ${it.L ? `<p class="small" style="margin:0"><b>Lever:</b> ${esc(it.L.label)} (${esc(fmtMetric(it.L.key, it.L.value))} vs ${esc(fmtMetric(it.L.key, it.L.goal))} goal).${compact ? '' : ' The number moves through people and behaviors, not by talking about the number.'}</p>` : ''}
+    ${it.see.length ? `<p class="small" style="margin:0"><b>People:</b> ${it.see.map(p => `${esc(p.n)} <span class="muted">(${esc(p.why)})</span>`).join(', ')}</p>` : ''}
+    ${it.behaviors.length ? `<p class="small" style="margin:0"><b>Behaviors to coach:</b> ${it.behaviors.map(b => esc(b.b)).join('. ')}.</p>` : ''}
+    ${it.model ? `<p class="small" style="margin:0"><b>Model:</b> ${esc(it.model)} shows the team how it's done.</p>` : ''}
+    ${compact ? '' : '<p class="small" style="margin:4px 0 0"><b>Leave with:</b> a from X to Y commitment from the leader and from each person you coach.</p>'}
+  </div>`;
+}
 
 // ---------------------------------------------------------------- run the play, and FrontLine IQ, on a visit
 function playBlock(V, canLog, dis, tri) {
@@ -1454,8 +1491,9 @@ async function viewVisit() {
   ${later ? `<div class="warnbox">This visit is on ${esc(longDate(x.date))}. Use it to prep; you can fill it in that day.</div>` : ''}
   ${env ? `<div class="env ${env.kind}"><b>${env.kind === 'headwind' ? 'Headwind.' : env.kind === 'tailwind' ? 'Tailwind.' : 'Normal traffic.'}</b> ${esc(env.text)}</div>` : ''}
 
-  ${sec('why', '1', 'Why you are here', 'Numbers are context. Coach the behavior and the numbers follow.', `
-    ${sc?.parts?.length ? `<ul class="whylist">${sc.parts.slice(0, 5).map(p => `<li>${esc(p.text)}</li>`).join('')}</ul>` : '<p class="small">No flags. Use the visit to lock in what is working.</p>'}
+  ${sec('why', '1', 'Why you are here', 'The intent of the visit. We change the outcome through people and behaviors.', `
+    ${(() => { const pd = (S.vPlans || []).flatMap(p => p.days || []).find(d => d.date === x.date && dayStores(d).includes(x.store)); return intentHtml(visitIntent(x.store, { anchor: pd?.anchor && pd.store === x.store && !x.remote, kind: pd ? (pd.store === x.store ? pd.kind : pd.stops.find(y => y.store === x.store)?.kind) : x.kind, date: x.date })); })()}
+    ${sc?.parts?.length > 2 ? `<details style="margin:8px 0"><summary class="small" style="cursor:pointer">All the reasons from the numbers</summary><ul class="whylist">${sc.parts.slice(0, 6).map(p => `<li>${esc(p.text)}</li>`).join('')}</ul></details>` : sc?.parts?.length ? '' : '<p class="small">No flags. Use the visit to lock in what is working.</p>'}
     <div class="ptog" role="group" aria-label="Period">${PERIODS.filter(([k]) => snap?.[k]).map(([k, l]) => `<button type="button" data-period="${k}" class="${period === k ? 'on' : ''}">${l}</button>`).join('')}</div>
     ${storeTiles(snap, period)}`)}
 
@@ -2149,10 +2187,14 @@ async function viewBriefInner() {
     <p class="small" style="margin:6px 0 0">Check in with each store leader: who used it yesterday, what it flagged, and who needs a follow-up. It's on every visit too.</p></section>` : ''}
   <section class="panel today">
     <h3>Today</h3>
-    ${todayDay?.store ? `<p style="margin:0 0 4px"><b>${todayDay.stops?.length ? `${todayDay.anchor ? 'Anchor store, ' : ''}${esc(todayDay.part || 'AM')}: ${esc(todayDay.store)}` : `Full-day visit: ${esc(todayDay.store)}`}</b> ${needChip(S.scores[todayDay.store]?.score)} ${todayDay.status === 'done' ? '<span class="pill done">Visited</span>' : ''}${(todayDay.stops || []).map(x => `<br><b>${esc(x.part || 'Stop')}: ${esc(x.store)}</b> ${needChip(S.scores[x.store]?.score)} ${x.status === 'done' ? '<span class="pill done">Visited</span>' : `<button class="link" type="button" data-bstop="${esc(x.store)}">Open</button>`}`).join('')}</p>
-      <p class="small">${esc((S.scores[todayDay.store]?.parts || []).slice(0, 2).map(p => p.text).join('. '))}</p>
-      <div class="row"><button class="btn primary" id="bgo">Open today's visit</button></div>`
-      : `<p style="margin:0">${plan ? 'No store visit on your plan today.' : 'No plan yet this week.'}</p>`}
+    ${todayDay?.store ? `<div class="tstops">${dayStores(todayDay).map((st, j) => { const isP = j === 0, stop = isP ? todayDay : todayDay.stops[j - 1], part = todayDay.stops?.length ? (isP ? (todayDay.part || 'AM') : (stop.part || 'Stop')) : 'Full day';
+        const m = j ? driveMin(dayStores(todayDay)[j - 1], st) : null;
+        return `<div class="tstop"><div class="row" style="justify-content:space-between;flex-wrap:nowrap"><span><span class="part">${esc(part)}</span> <b>${esc(st)}</b>${isP && todayDay.anchor ? ' <span class="pill anchor">Anchor</span>' : ''}</span>${needChip(S.scores[st]?.score)}</div>
+          ${m != null ? `<p class="small muted" style="margin:0">~${driveText(m)} drive from ${esc(dayStores(todayDay)[j - 1])}</p>` : ''}
+          ${stop.status === 'done' ? '<span class="pill done">Visited</span>' : intentHtml(visitIntent(st, { anchor: isP && todayDay.anchor, kind: stop.kind, date: t }), true)}
+          <div class="row" style="margin-top:6px"><button class="btn ${j === 0 ? 'primary' : ''}" type="button" data-bopen="${esc(st)}">${stop.status === 'done' ? 'See visit' : `Open ${part === 'Full day' ? '' : esc(part) + ' '}visit`}</button></div></div>`; }).join('')}</div>`
+      : ''}
+    ${todayDay?.store ? '' : `<p style="margin:0">${plan ? 'No store visit on your plan today.' : 'No plan yet this week.'}</p>`}
     ${sugg ? `<div class="warnbox" style="margin-top:10px"><b>Suggested swap:</b> add ${esc(sugg.to)}, drop ${esc(sugg.from)}. ${esc(sugg.reasonTo || '')} <button class="link" id="bweek">Review it on My week</button></div>` : ''}
     ${remoteNext.length ? `<p class="small" style="margin:10px 0 0"><b>Remote coaching today</b> (opportunities at stores you're not in): ${remoteNext.map(s => remoteToday.has(s) ? `${esc(s)} <span class="good">✓</span>` : `<button class="link" data-bremote="${esc(s)}">${esc(s)}</button>`).join(' · ')}</p>` : ''}
   </section>
@@ -2197,6 +2239,7 @@ async function viewBriefInner() {
     <div class="row"><button class="btn primary" id="bmsg">Open team messages</button></div>
   </section>`;
   wirePick();
+  v.querySelectorAll('[data-bopen]').forEach(b => b.onclick = () => openVisit({ store: b.dataset.bopen, date: t, email, kind: (todayDay.store === b.dataset.bopen ? todayDay.kind : todayDay.stops?.find(y => y.store === b.dataset.bopen)?.kind) || 'first', dayIndex: plan.days.indexOf(todayDay) }));
   v.querySelectorAll('[data-bstop]').forEach(b => b.onclick = () => openVisit({ store: b.dataset.bstop, date: t, email, kind: 'first', dayIndex: plan.days.indexOf(todayDay) }));
   const g = $('#bgo'); if (g) g.onclick = () => openVisit({ store: todayDay.store, date: t, email, kind: todayDay.kind, dayIndex: plan.days.indexOf(todayDay) });
   const w = $('#bweek'); if (w) w.onclick = () => { S.tab = 'week'; renderShell(); };
