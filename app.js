@@ -1,15 +1,15 @@
-import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610010813';
-import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610010813';
+import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610010855';
+import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610010855';
 import {
   STORES, DISTRICTS, canonicalStore, isKnownStore, parseRsa, rangeFromFileName, parseTeamRoster, resolveReportNames,
   paceFactor, DEFAULT_GOALS, cidOf, status, fmt, goalsFor, TEAM_FOCUS, pickStoreFocus
-} from './base.js?v=202610010813';
+} from './base.js?v=202610010855';
 import {
   iso, fromIso, addDays, daysApart, weekStartOf, DAY_NAMES, DAY_LONG, dow, DEFAULT_OFF, validOff, safeOff, VISIT_DAYS, STORE_GOALS,
   parseDaily, needScore, band, pct, environment, buildPlan, pivotSuggestion, ELEMENTS, SEGMENTS, AORS, PRACTICE, VISIT_TYPES, kindToType, visitScore, visitSummary, consultantCoaching, drillFor, draggers, helpers, STORE_TO_RSA, hasCommitment, commitmentText, blackoutFor, offChoicesFor, storeFocus, rsaPicks, consultantWeeks, teamSignals,
   STORE_METRICS, slug, COACHING, METRICS, PLAIN, isOutlet, driveMin, driveText, MAX_SPLIT_MIN, LEVERS, leverStatus, suggestLever,
   OFFER_DEFAULT, PLAY, PLAY_CHECKS, offerActive, offerMath, FLIQ_CHECKS, FLIQ_DAILY
-} from './ml.js?v=202610010813';
+} from './ml.js?v=202610010855';
 
 const DEMO = !firebaseConfig.apiKey || firebaseConfig.apiKey.startsWith('PASTE');
 const FB = 'https://www.gstatic.com/firebasejs/10.12.2/';
@@ -2252,7 +2252,7 @@ async function viewBriefInner() {
 // Weekly, VP to Market Leader. Recaps the week that just closed (Sunday to Saturday): which stores and
 // people performed and which didn't, how the leader ran their week, the one lever the market needs
 // pulled, and where the focus goes this week. Ends with commitments from X to Y by a date, and how.
-const ONE_LEVERS = TEAM_FOCUS.filter(k => COACHING[k]);
+const ONE_LEVERS = ['financePct', 'appsToTraffic', 'beddingPct', 'protectionAttach', 'deliveryPct'];   // core behaviors under the two levers
 const O_OPEN = new Set(['glance', 'wins', 'opps', 'ran', 'prev', 'lever', 'focus', 'coach', 'acts', 'notes']);
 const oneId = (email, ws) => `${email}_${ws}`;
 const weekRange = ws => `${shortDate(ws)} to ${shortDate(addDays(ws, 6))}`;

@@ -4,7 +4,7 @@
 import {
   normalizeHeader, toNumber, parseDate, slug, canonicalStore, isKnownStore, REGIONS, STORE_METRICS,
   COACHING, METRICS, pickFocus, pickStoreFocus, goalsFor, DEFAULT_GOALS, isOutlet, minSphFor, fmt, weeklyTarget
-} from './base.js?v=202610010813';
+} from './base.js?v=202610010855';
 
 const numOrNull = v => (v === '' || v === null || v === undefined ? null : toNumber(v));
 
@@ -117,7 +117,7 @@ export function needScore(snap, { lastVisit = null, today = null, team = null } 
     const cr = mtd.vsBud.closeRate;
     if (cr != null && cr < 0) add('closeRate', cap(-cr / 50, 15), `Close rate ${Math.round(cr)} bps to budget`);
     const c = mtd.k.cancelPct;
-    if (c != null && c > STORE_GOALS.cancelPct) add('cancelPct', cap((c - STORE_GOALS.cancelPct) * 2, 10), `Cancellations at ${c.toFixed(1)}% of gross`);
+    if (c != null && c > STORE_GOALS.cancelPct + 2) add('cancelPct', cap((c - STORE_GOALS.cancelPct) * 0.75, 4), `Cancellations at ${c.toFixed(1)}% of gross`);
     const pa = mtd.k.protectionAttach;
     if (pa != null && pa < STORE_GOALS.protectionAttach) add('protectionAttach', cap((STORE_GOALS.protectionAttach - pa) / 2, 8), `Protection attach ${pa.toFixed(0)}% (goal ${STORE_GOALS.protectionAttach}%)`);
     const fp = mtd.k.financePct;
@@ -254,8 +254,9 @@ export function leverStatus(p) {
   });
 }
 // The lever to pull: the one furthest below goal. Null if every lever is at goal or there are no numbers.
+// The app suggests one of the two levers. Effective margin is there to pick, not suggested.
 export function suggestLever(p) {
-  const st = leverStatus(p).filter(l => l.ratio != null);
+  const st = leverStatus(p).filter(l => l.ratio != null && l.key !== 'effMargin');
   const worst = st.sort((a, b) => a.ratio - b.ratio)[0];
   return worst && worst.ratio < 1 ? worst.key : st.length ? null : null;
 }
@@ -475,9 +476,17 @@ export function visitSummary(v) {
   const support = String(lc.support || '').trim() ? String(lc.support).trim() + (lc.supportBy ? ` (by ${mdd(lc.supportBy)})` : '') : '';
   return { fixes, commitments, coached, leaderCommit, support, leaderName: lc.name || v.leaderWin?.name || '', win: v.leaderWin?.text || '', winName: v.leaderWin?.name || '', working: v.working || '', score: visitScore(v) };
 }
+// Coaching comes from the two levers (close rate and average ticket) through our core behaviors:
+// connection, buying power, bedding, protection and delivery. Cancellations and the like are watched,
+// not coached as the focus.
+export const CORE_FOCUS = ['financePct', 'appsToTraffic', 'beddingPct', 'protectionAttach', 'deliveryPct'];
 export function storeFocus(snap, max = 2) {
   const p = snap?.mtd; if (!p) return [];
-  return pickStoreFocus({ k: p.k, budget: p.budget }, STORE_GOALS, max).map(f => ({ ...f, coach: COACHING[f.key] }));
+  const all = pickStoreFocus({ k: p.k, budget: p.budget }, STORE_GOALS, 20).filter(f => CORE_FOCUS.includes(f.key));
+  const below = all.filter(f => !f.stretch);
+  const pick = (below.length ? below : all).slice(0, max);
+  if (!pick.length) { const st = pickStoreFocus({ k: p.k, budget: p.budget }, STORE_GOALS, 1)[0]; if (st && CORE_FOCUS.includes(st.key)) pick.push(st); }
+  return pick.map(f => ({ ...f, coach: COACHING[f.key] }));
 }
 // RSA picks for one store: below minimum standard first, then biggest gap, then one person to
 // recognize and use as the model. Each gets one focus item, never a checklist.
@@ -487,7 +496,7 @@ export function rsaPicks(people, store, goals = DEFAULT_GOALS, pace = 1, max = 3
   const min = minSphFor(goals, store);
   const g = goalsFor(goals, store);
   const scored = list.map(p => {
-    const focus = pickFocus(p.k, g, pace, 1)[0] || null;
+    const focus = pickFocus(p.k, g, pace, 6).filter(f => !['cancelPct', 'discountPct'].includes(f.key))[0] || null;
     const w = weeks[p.cid] || {};
     const slipping = w.hours >= 12 && w.priorSph && w.sph != null && w.sph < w.priorSph * SLIP;
     return { ...p, focus, below: p.k.sph < min, slipping, wk: w, gap: focus && !focus.stretch ? focus.ratio : 1.5 };
@@ -631,7 +640,8 @@ export function consultantCoaching({ p, store, why = 'added', wk = null, goals =
     return { items: [], strength: null, drillKey: 'sph', drill: drillFor('sph'), text: `${first} isn't in the RSA report yet, so there are no numbers to go on.\nWatch ${first} with a live guest and see how far they get through the Core 4. Coach the first step they skip.\nPractice it: run the full Core 4 standing up, start to finish.\n${first}'s commitment: one full Core 4 presentation on the next guest.` };
   }
   const g = goalsFor(goals, store);
-  let items = pickFocus(p.k, g, pace, 2).map(f => ({ ...f, coach: COACHING[f.key] })).filter(f => f.coach);
+  // A consultant's coaching points to the core behaviors, never cancels or discount on their own.
+  let items = pickFocus(p.k, g, pace, 6).map(f => ({ ...f, coach: COACHING[f.key] })).filter(f => f.coach && !['cancelPct', 'discountPct'].includes(f.key)).slice(0, 2);
   // Coaching this person on a store opportunity: that number goes first.
   const lk = lever && STORE_TO_RSA[lever];
   const lm = lk && METRICS.find(x => x.key === lk);
