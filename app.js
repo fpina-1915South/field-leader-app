@@ -1,16 +1,16 @@
-import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610011608';
-import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610011608';
+import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610011643';
+import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610011643';
 import {
   STORES, DISTRICTS, canonicalStore, isKnownStore, parseRsa, rangeFromFileName, parseTeamRoster, resolveReportNames,
   paceFactor, DEFAULT_GOALS, cidOf, status, fmt, goalsFor, TEAM_FOCUS, pickStoreFocus
-} from './base.js?v=202610011608';
+} from './base.js?v=202610011643';
 import {
   iso, fromIso, addDays, daysApart, weekStartOf, DAY_NAMES, DAY_LONG, dow, DEFAULT_OFF, validOff, safeOff, VISIT_DAYS, STORE_GOALS,
   parseDaily, needScore, band, pct, environment, buildPlan, pivotSuggestion, ELEMENTS, SEGMENTS, AORS, PRACTICE, VISIT_TYPES, kindToType, visitScore, visitSummary, consultantCoaching, drillFor, draggers, helpers, STORE_TO_RSA, hasCommitment, commitmentText, blackoutFor, offChoicesFor, storeFocus, rsaPicks, consultantWeeks, teamSignals,
   STORE_METRICS, slug, COACHING, METRICS, PLAIN, isOutlet, driveMin, driveText, MAX_SPLIT_MIN, LEVERS, leverStatus, suggestLever,
   consultantTrends, TREND_ROWS, trendFmt, trendRead, TREND_LABEL,
   OFFER_DEFAULT, PLAY, PLAY_CHECKS, PLAY_CHECKS_REMOTE, offerActive, offerMath, FLIQ_CHECKS, FLIQ_CHECKS_REMOTE, FLIQ_DAILY
-} from './ml.js?v=202610011608';
+} from './ml.js?v=202610011643';
 
 const DEMO = !firebaseConfig.apiKey || firebaseConfig.apiKey.startsWith('PASTE');
 const FB = 'https://www.gstatic.com/firebasejs/10.12.2/';
@@ -2967,6 +2967,10 @@ function prepRsa(file, rows, rosterOverride) {
       summary: `Year-to-date RSA report ${esc(shortDate(range.from))} to ${esc(shortDate(range.to))} · <b>${people.length}</b> consultants matched to a store. Fills the YTD column on every consultant card.${left.length ? ` · <span class="warn">${left.length} not on the roster</span>` : ''}`,
       extra: left.length ? `<p class="small">Not matched: ${left.map(p => esc(titleName(p.name))).join(', ')}</p>` : '',
       publish: () => S.be.publishRsaYtd({ from: range.from, to: range.to, file, people }) };
+  // Every daily copy has to be month to date (from the 1st). A one-day or one-week report would be read as the
+  // whole month and throw off the month, the week and the trends.
+  if (range.from && range.to && range.from !== range.to.slice(0, 8) + '01')
+    return { file, error: `This report runs ${esc(shortDate(range.from))} to ${esc(shortDate(range.to))}. Run the RSA report from the 1st of the month (${esc(shortDate(range.to.slice(0, 8) + '01'))} to ${esc(shortDate(range.to))}) so the app reads it as month to date. For year to date, start it January 1.` };
   return { file, kind: 'rsa', label: 'RSA report',
     summary: `RSA report ${range.from ? esc(shortDate(range.from)) + ' to ' : 'through '}${esc(shortDate(range.to))} · <b>${people.length}</b> consultants matched to a store${left.length ? ` · <span class="warn">${left.length} not on the roster</span>` : ''}`,
     extra: left.length ? `<p class="small">Not matched (left out of coaching until the roster has them): ${left.map(p => esc(titleName(p.name))).join(', ')}</p>` : '',
