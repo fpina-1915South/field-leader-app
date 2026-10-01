@@ -1,15 +1,15 @@
-import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610010910';
-import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610010910';
+import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610010919';
+import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610010919';
 import {
   STORES, DISTRICTS, canonicalStore, isKnownStore, parseRsa, rangeFromFileName, parseTeamRoster, resolveReportNames,
   paceFactor, DEFAULT_GOALS, cidOf, status, fmt, goalsFor, TEAM_FOCUS, pickStoreFocus
-} from './base.js?v=202610010910';
+} from './base.js?v=202610010919';
 import {
   iso, fromIso, addDays, daysApart, weekStartOf, DAY_NAMES, DAY_LONG, dow, DEFAULT_OFF, validOff, safeOff, VISIT_DAYS, STORE_GOALS,
   parseDaily, needScore, band, pct, environment, buildPlan, pivotSuggestion, ELEMENTS, SEGMENTS, AORS, PRACTICE, VISIT_TYPES, kindToType, visitScore, visitSummary, consultantCoaching, drillFor, draggers, helpers, STORE_TO_RSA, hasCommitment, commitmentText, blackoutFor, offChoicesFor, storeFocus, rsaPicks, consultantWeeks, teamSignals,
   STORE_METRICS, slug, COACHING, METRICS, PLAIN, isOutlet, driveMin, driveText, MAX_SPLIT_MIN, LEVERS, leverStatus, suggestLever,
   OFFER_DEFAULT, PLAY, PLAY_CHECKS, PLAY_CHECKS_REMOTE, offerActive, offerMath, FLIQ_CHECKS, FLIQ_CHECKS_REMOTE, FLIQ_DAILY
-} from './ml.js?v=202610010910';
+} from './ml.js?v=202610010919';
 
 const DEMO = !firebaseConfig.apiKey || firebaseConfig.apiKey.startsWith('PASTE');
 const FB = 'https://www.gstatic.com/firebasejs/10.12.2/';
@@ -1245,6 +1245,26 @@ const fieldBox = (id, label, value, rows = 3, hint = '', field = '', dis = '') =
   ${hint ? `<p class="small" style="margin:0 0 4px">${esc(hint)}</p>` : ''}
   <textarea id="${id}" rows="${rows}" ${field ? `data-field="${field}"` : ''} ${dis}>${esc(value || '')}</textarea>`;
 
+// ---------------------------------------------------------------- remote: does the leader know the floor?
+// The leader answers from memory; where the daily report has the number, it shows next to it.
+const FLOOR_Q = [
+  { k: 'guests', l: 'Guests yesterday', rep: snap => snap?.day?.k?.traffic },
+  { k: 'carts', l: 'Carts started yesterday', rep: () => null },
+  { k: 'apps', l: 'Finance apps yesterday', rep: snap => snap?.day?.k?.traffic != null && snap?.day?.k?.appsToTraffic != null ? Math.round(snap.day.k.traffic * snap.day.k.appsToTraffic / 100) : null },
+  { k: 'bundles', l: 'Sales with the full bundle yesterday', rep: () => null },
+  { k: 'coachings', l: '1 on 1 coachings yesterday (and with who)', rep: () => null }
+];
+function floorBlock(V, x, snap, dis, tri) {
+  const f = V.floor || {};
+  return `<p class="small" style="margin:0 0 8px">Ask each one and type what the leader says. Names count: "who got the carts" tells you more than "a few".</p>
+    <div class="scroller"><table class="grid"><thead><tr><th>Ask</th><th>Leader says</th><th>Report</th></tr></thead><tbody>
+    ${FLOOR_Q.map(q => { const r = q.rep(snap), said = numOf(f[q.k]); const off = r != null && said != null && Math.abs(said - r) > Math.max(2, r * 0.15);
+      return `<tr><td>${esc(q.l)}</td><td><input id="fl_${q.k}" data-field="floor.${q.k}" value="${esc(f[q.k] || '')}" ${dis} style="width:100%;min-width:120px" placeholder="${q.k === 'coachings' ? 'e.g. 2: Maria, Tyler' : 'e.g. 12'}"></td><td class="num ${off ? 'bad' : ''}">${r != null ? Math.round(r) : '<span class="muted">not in report</span>'}</td></tr>`; }).join('')}
+    </tbody></table></div>
+    <div class="item"><div class="txt">Answered without looking it up</div>${tri('floor.knew', f.knew)}</div>
+    ${fieldBox('floornotes', 'What this tells you about the floor', f.notes, 2, '', 'floor.notes', dis)}`;
+}
+
 // ---------------------------------------------------------------- the intent of a visit
 // Why the Market Leader is going, in plain words: the purpose, the lever, the people behind the gap,
 // the behaviors to coach, and who models it. We change the outcome through people and behaviors.
@@ -1351,7 +1371,7 @@ function leverBlock(V, x, snap, people, canLog, dis) {
 // ---------------------------------------------------------------- the visit
 // One page the leader works through in the store, top to bottom. It opens already knowing why they
 // are there, what to coach and who to see. Everything autosaves as a draft; Submit closes it out.
-const V_OPEN = new Set(['why', 'win', 'follow', 'play', 'fliq', 'lever', 'focus', 'people', 'photos', 'action', 'leadercommit', 'el2', 'el3']);
+const V_OPEN = new Set(['why', 'win', 'follow', 'floor', 'play', 'fliq', 'lever', 'focus', 'people', 'photos', 'action', 'leadercommit', 'el2', 'el3']);
 const PHOTO_MAX = 30;
 const PHOTO_ELS = ['visual', 'facilities'];   // every area in these gets a photo, asked for right where it's scored
 // The areas that need a photo on every in-person visit, so every Market Leader walks the same store.
@@ -1515,6 +1535,7 @@ async function viewVisit() {
     : '<p class="small">Nothing to check. Your action plan today becomes the start of the next visit.</p>', true)}
 
   ${sec('play', '▶', 'Connect, build value, run the play', activeOffer() ? `How we sell, and the ${esc(S.offer.name)} offer that rewards the bundle.` : 'How we sell, on every guest.', playBlock(V, canLog, dis, tri), true)}
+  ${x.remote ? sec('floor', '◎', 'Does the leader know their floor?', 'Ask for yesterday, by the numbers. A leader who knows the floor can coach it.', floorBlock(V, x, snap, dis, tri), true) : ''}
   ${hasFliq(who) ? sec('fliq', '◆', 'FrontLine IQ', 'Pilot: the AI sales coach for your associates. Check it on every visit.', fliqBlock(V, canLog, dis, tri), true) : ''}
 
   ${sec('lever', '⚑', 'Pull a lever', 'Close rate, average ticket or effective margin. Pick the outcome, then coach the inputs that move it.', leverBlock(V, x, snap, people, canLog, dis), true)}
@@ -1549,9 +1570,9 @@ async function viewVisit() {
           ${kpiCell(p, 'sph', 'SPH', money)}${wk?.hours >= 1 && wk.sph != null ? `<div class="kc ${wk.priorSph && wk.sph < wk.priorSph * 0.75 ? 'red' : wk.priorSph && wk.sph > wk.priorSph * 1.25 ? 'green' : ''}"><span>This week</span><b>${money(wk.sph)}</b></div>` : ''}
           ${kpiCell(p, 'financePct', 'Finance', p1)}${kpiCell(p, 'beddingPct', 'Bedding', p1)}${kpiCell(p, 'protectionPct', 'Protection', p1)}${kpiCell(p, 'creditApps', 'Apps', n => String(Math.round(n)))}${kpiCell(p, 'cancelPct', 'Cancel', p1, true)}
         </div>` : ''}
-        ${x.remote ? `<div class="segwho"><p class="small" style="margin:0 0 6px"><b>How are you coaching ${esc(titleName(c.name).split(' ')[0])}?</b></p>${tri(`consultants.${ci}.mode`, c.mode || 'direct', [['direct', 'Directly with them'], ['leader', 'Through the store leader']])}</div>` : ''}
+        <div class="segwho"><p class="small" style="margin:0 0 6px"><b>How are you coaching ${esc(titleName(c.name).split(' ')[0])}?</b> <span class="muted">Through the leader: you give the leader the plan, role-play it with them, and they coach ${esc(titleName(c.name).split(' ')[0])}.</span></p>${tri(`consultants.${ci}.mode`, c.mode || 'direct', [['direct', 'Directly with them'], ['leader', 'Through the store leader']])}</div>
         ${(() => { const cc = consultantCoaching({ p, store: p.store || x.store, why: c.why, wk, goals: DEFAULT_GOALS, pace: paceFactor(S.rsa?.to), teamFocus: focusAll.find(f => V.focus.includes(f.key))?.label, lever: c.lever });
-          const viaLeader = x.remote && c.mode === 'leader';
+          const viaLeader = c.mode === 'leader';
           const text = viaLeader ? leaderCoachText(cc, titleName(c.name).split(' ')[0], V.leaderWin?.name || 'the store leader') : cc.text;
           return `<div class="suggest"><p class="eyebrow">${viaLeader ? 'Coach the leader to coach them' : 'Suggested coaching'}</p><div class="stext">${esc(text)}</div>
           ${canLog ? `<div class="row" style="margin-top:8px"><button type="button" class="btn tiny primary" data-usec="${ci}">Use this in my notes</button><span class="small muted">or write or say your own below</span></div>` : ''}</div>`; })()}
@@ -1564,7 +1585,7 @@ async function viewVisit() {
           const onWhat = cc.items.find(f => !f.stretch) || cc.items[0];
           const dr = drillFor(c.drill.key), d = c.drill, n = Object.keys(d.scored || {}).length;
           const opts = DRILL_KEYS.map(k => [k, drillFor(k).title]);
-          if (x.remote && c.mode === 'leader') {
+          if (c.mode === 'leader') {
             const L = V.leaderWin?.name ? titleName(V.leaderWin.name).split(' ')[0] : 'the leader', ld = c.lead || {};
             return `<div class="drill">
               <p class="eyebrow" style="margin:0">Practice the coaching conversation with ${esc(L)}</p>
@@ -1692,7 +1713,7 @@ const COACH_WATCH = [
 function leaderCoachText(cc, first, leader) {
   const L = titleName(leader).split(' ')[0] || 'the leader';
   const lines = String(cc.text || '').split('\n').filter(Boolean);
-  const out = [`You're coaching ${L} to coach ${first}. Walk ${L} through this, then practice it with them.`];
+  const out = [`You're coaching ${L} to coach ${first}. Give ${L} the plan below, then role-play it: you play ${first}, ${L} coaches you. One tip, then run it again before ${L} does it for real.`];
   lines.forEach(l => {
     if (/^Practice it standing up/.test(l)) out.push(`${L} runs the stand-up practice with ${first} on the floor: ${l.replace(/^Practice it standing up: /, '').replace(/You're the guest\./, `${L} plays the guest.`).replace(/Let [^,]+ run it, give one tip, then run it again\./, `${first} runs it, ${L} gives one tip, then they run it again.`)}`);
     else if (/'s commitment/.test(l)) out.push(`${L} gets ${first}'s commitment in their own words${(l.match(/ from .+ to .+ by the next visit/) || [''])[0].replace(' by the next visit', '') ? ': ' + l.split(': ').slice(1).join(': ').replace(' We inspect it then.', '') : ''}, and checks it before your next visit.`);
@@ -1767,6 +1788,7 @@ function commitmentOptions(V, snap, priorRaw = []) {
   out.push({ group: 'Run the play', what: 'Present every option with financing + Protection + Premium Delivery (the bundle)', from: bundleMiss ? (V.remote ? 'Missed in today\'s role-play' : 'Not presented on today\'s guest') : (V.remote ? 'Leader\'s count: sales with the full bundle' : 'Count today: sales with the full bundle'), to: 'Every sale',
     how: `Connect and start a cart first, build value from Best, then buying power and the bundle.${activeOffer() ? ` Show the savings in dollars: $100 off every $1,000 with financing AND the bundle (${S.offer.name}).` : ''} Practice "Running the play" at the huddle.`, owner: leader, due: nextDay, playFirst: playGap });
   if (['no', 'partial'].includes(V.play?.[0])) out.push({ group: 'Run the play', what: 'Connect first: greet like a referral and start a cart with every guest', from: V.remote ? 'Leader couldn\'t say how many carts' : 'Missed on today\'s guest', to: '8 of 10 guests with a cart', how: 'Practice "Building the cart" standing up. The leader counts carts started at every huddle.', owner: leader, due: nextDay, playFirst: true });
+  if (V.remote && ['no', 'partial'].includes(V.floor?.knew)) out.push({ group: 'Run the play', what: 'Know the floor every shift: guests, carts, finance apps, bundles and coachings', from: 'Couldn\'t answer from memory', to: 'Knows every number at each huddle', how: 'Leader keeps a tally on the floor and opens each huddle with yesterday\'s guests, carts, apps, bundles and who they coached.', owner: leader, due: nextDay, playFirst: true });
   const vWho = S.users.find(u => u.email === V.email);
   if (hasFliq(vWho)) { const u = numOf(V.fliq?.using), fl = numOf(V.fliq?.floor);
     out.push({ group: 'FrontLine IQ', what: 'Every associate gets reps in FrontLine IQ before their first guest', from: u != null && fl ? `${u} of ${fl} associates` : 'Count today', to: fl ? `${fl} of ${fl} associates` : 'Every associate', how: 'Leader checks FrontLine IQ use at open and goes over what it flagged at the huddle.', owner: leader, due: nextDay, fliqFirst: true }); }
