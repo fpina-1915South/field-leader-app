@@ -1,15 +1,15 @@
-import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610010855';
-import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610010855';
+import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610010900';
+import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610010900';
 import {
   STORES, DISTRICTS, canonicalStore, isKnownStore, parseRsa, rangeFromFileName, parseTeamRoster, resolveReportNames,
   paceFactor, DEFAULT_GOALS, cidOf, status, fmt, goalsFor, TEAM_FOCUS, pickStoreFocus
-} from './base.js?v=202610010855';
+} from './base.js?v=202610010900';
 import {
   iso, fromIso, addDays, daysApart, weekStartOf, DAY_NAMES, DAY_LONG, dow, DEFAULT_OFF, validOff, safeOff, VISIT_DAYS, STORE_GOALS,
   parseDaily, needScore, band, pct, environment, buildPlan, pivotSuggestion, ELEMENTS, SEGMENTS, AORS, PRACTICE, VISIT_TYPES, kindToType, visitScore, visitSummary, consultantCoaching, drillFor, draggers, helpers, STORE_TO_RSA, hasCommitment, commitmentText, blackoutFor, offChoicesFor, storeFocus, rsaPicks, consultantWeeks, teamSignals,
   STORE_METRICS, slug, COACHING, METRICS, PLAIN, isOutlet, driveMin, driveText, MAX_SPLIT_MIN, LEVERS, leverStatus, suggestLever,
   OFFER_DEFAULT, PLAY, PLAY_CHECKS, offerActive, offerMath, FLIQ_CHECKS, FLIQ_DAILY
-} from './ml.js?v=202610010855';
+} from './ml.js?v=202610010900';
 
 const DEMO = !firebaseConfig.apiKey || firebaseConfig.apiKey.startsWith('PASTE');
 const FB = 'https://www.gstatic.com/firebasejs/10.12.2/';
@@ -1351,7 +1351,7 @@ function leverBlock(V, x, snap, people, canLog, dis) {
 // are there, what to coach and who to see. Everything autosaves as a draft; Submit closes it out.
 const V_OPEN = new Set(['why', 'win', 'follow', 'play', 'fliq', 'lever', 'focus', 'people', 'photos', 'action', 'leadercommit', 'el2', 'el3']);
 const PHOTO_MAX = 30;
-const PHOTO_ELS = ['assortment', 'visual', 'facilities'];   // every area in these gets a photo, asked for right where it's scored
+const PHOTO_ELS = ['visual', 'facilities'];   // every area in these gets a photo, asked for right where it's scored
 // The areas that need a photo on every in-person visit, so every Market Leader walks the same store.
 // Items that are the same physical area as a Visual walk area share its photo, so nobody takes it twice.
 const PHOTO_SAME = {
