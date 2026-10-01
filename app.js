@@ -1,14 +1,14 @@
-import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610010723';
-import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610010723';
+import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610010743';
+import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610010743';
 import {
   STORES, DISTRICTS, canonicalStore, isKnownStore, parseRsa, rangeFromFileName, parseTeamRoster, resolveReportNames,
   paceFactor, DEFAULT_GOALS, cidOf, status, fmt, goalsFor, TEAM_FOCUS, pickStoreFocus
-} from './base.js?v=202610010723';
+} from './base.js?v=202610010743';
 import {
   iso, fromIso, addDays, daysApart, weekStartOf, DAY_NAMES, DAY_LONG, dow, DEFAULT_OFF, validOff, safeOff, VISIT_DAYS, STORE_GOALS,
   parseDaily, needScore, band, pct, environment, buildPlan, pivotSuggestion, ELEMENTS, SEGMENTS, AORS, PRACTICE, VISIT_TYPES, kindToType, visitScore, visitSummary, consultantCoaching, drillFor, draggers, helpers, STORE_TO_RSA, hasCommitment, commitmentText, blackoutFor, offChoicesFor, storeFocus, rsaPicks, consultantWeeks, teamSignals,
-  STORE_METRICS, slug, COACHING, METRICS, PLAIN, isOutlet, driveMin, driveText, MAX_SPLIT_MIN
-} from './ml.js?v=202610010723';
+  STORE_METRICS, slug, COACHING, METRICS, PLAIN, isOutlet, driveMin, driveText, MAX_SPLIT_MIN, LEVERS, leverStatus, suggestLever
+} from './ml.js?v=202610010743';
 
 const DEMO = !firebaseConfig.apiKey || firebaseConfig.apiKey.startsWith('PASTE');
 const FB = 'https://www.gstatic.com/firebasejs/10.12.2/';
@@ -1219,10 +1219,48 @@ const fieldBox = (id, label, value, rows = 3, hint = '', field = '', dis = '') =
   ${hint ? `<p class="small" style="margin:0 0 4px">${esc(hint)}</p>` : ''}
   <textarea id="${id}" rows="${rows}" ${field ? `data-field="${field}"` : ''} ${dis}>${esc(value || '')}</textarea>`;
 
+// ---------------------------------------------------------------- levers on a visit
+// Targets for inputs counted on the floor (no number in the daily report).
+const COUNT_TARGET = { cart: '8 of 10 guests', pieces: 'One more piece per ticket', quality: 'Every guest', price: 'No discount without a leader' };
+// The inputs to coach by default once a lever is picked: the ones below goal first, then a floor input.
+function defaultInputs(L) {
+  const below = L.inputs.filter(i => i.ratio != null && i.ratio < 1).sort((a, b) => a.ratio - b.ratio).map(i => i.key);
+  const floor = L.inputs.filter(i => !i.metric).map(i => i.key);
+  return [...new Set([...below, ...floor, ...L.inputs.map(i => i.key)])].slice(0, 2);
+}
+function leverBlock(V, x, snap, people, canLog, dis) {
+  const pL = snap?.mtd;
+  const LS = leverStatus(pL), sugg = suggestLever(pL);
+  if (!LS.length) return '<p class="small muted">No store numbers yet.</p>';
+  const fv = (k, v) => v == null ? '--' : fmtMetric(k, v);
+  const cards = LS.map(L => { const on = V.lever === L.key, below = L.ratio != null && L.ratio < 1;
+    return `<div class="fcard pick ${on ? 'on' : ''}"><span class="row" style="justify-content:space-between"><span class="eyebrow">${L.key === sugg ? 'Suggested from the numbers' : 'Lever'}</span>${canLog ? `<button type="button" class="btn tiny ${on ? 'primary' : ''}" data-lpick="${L.key}" ${dis}>${on ? 'Pulling this ✓' : 'Pull this lever'}</button>` : ''}</span>
+      <b class="fl">${esc(L.label)}</b><span class="small">Now <b class="${below ? 'bad' : 'good'}">${esc(fv(L.key, L.value))}</b>${L.goal != null ? `, goal ${esc(fv(L.key, L.goal))}` : ''} this month. ${esc(L.why)}</span></div>`; }).join('');
+  const L = LS.find(l => l.key === V.lever);
+  const chosen = V.leverInputs || [];
+  const inputs = L ? `<h3 style="margin:16px 0 4px">What drives ${esc(L.label.toLowerCase())}</h3>
+    <p class="small" style="margin:0 0 10px">Coach the inputs, not the outcome. Pick up to two to work on today.</p>
+    <div class="focus">${L.inputs.map(inp => {
+      const on = chosen.includes(inp.key), d = drillFor(inp.drill), below = inp.ratio != null && inp.ratio < 1;
+      const dr = inp.metric && STORE_TO_RSA[inp.metric] ? draggers(people, x.store, inp.metric, DEFAULT_GOALS, paceFactor(S.rsa?.to), 2) : [];
+      return `<div class="fcard pick ${on ? 'on' : ''}">
+        <span class="row" style="justify-content:space-between"><span class="eyebrow">${inp.metric ? (below ? 'Below goal' : 'At goal') : 'Count it on the floor'}</span>${canLog ? `<button type="button" class="btn tiny ${on ? 'primary' : ''}" data-linput="${inp.key}" ${dis}>${on ? 'Coaching this ✓' : 'Coach this'}</button>` : ''}</span>
+        <b class="fl">${esc(inp.label)}</b>
+        <span class="small">${inp.metric ? `Now <b class="${below ? 'bad' : 'good'}">${esc(fv(inp.metric, inp.value))}</b>, goal ${esc(fv(inp.metric, inp.goal))}.` : `Not in the daily report. Count it today: <b>${esc(inp.count)}</b>, goal ${esc(COUNT_TARGET[inp.key] || '')}.`}${inp.also ? ` ${esc(inp.also)}` : ''}</span>
+        <span class="do"><b>Do this:</b> ${esc(inp.behavior)}</span>
+        ${inp.fact ? `<span class="small"><b>Why it works:</b> ${esc(inp.fact)}</span>` : ''}
+        <span class="asks"><span>• ${esc(inp.ask)}</span></span>
+        <span class="small"><b>Practice it standing up:</b> ${esc(d.title)}. ${esc(d.guest)}</span>
+        ${dr.length ? `<div class="drag"><p class="eyebrow" style="margin:0 0 4px">Who's pulling this down</p>${dr.map(dd => { const added = V.consultants.some(c => c.cid === dd.cid);
+          return `<div class="dragrow"><span><b>${esc(titleName(dd.name))}</b> <span class="small">${esc(fmtMetric(dd.key, dd.value))} vs ${esc(fmtMetric(dd.key, dd.goal))} goal</span></span>${canLog ? `<button type="button" class="btn tiny" data-dragc="${esc(dd.cid)}" data-lever="${inp.metric}" ${added ? 'disabled' : ''}>${added ? 'On this visit' : 'Coach'}</button>` : ''}</div>`; }).join('')}</div>` : ''}
+      </div>`; }).join('')}</div>` : `<p class="small" style="margin:12px 0 0">${sugg ? `The numbers point to <b>${esc(LS.find(l => l.key === sugg).label)}</b>. You know the store: pick the lever you're pulling today.` : 'All three are at goal. Pick the one to push.'}</p>`;
+  return `<div class="focus">${cards}</div>${inputs}`;
+}
+
 // ---------------------------------------------------------------- the visit
 // One page the leader works through in the store, top to bottom. It opens already knowing why they
 // are there, what to coach and who to see. Everything autosaves as a draft; Submit closes it out.
-const V_OPEN = new Set(['why', 'win', 'follow', 'focus', 'people', 'photos', 'action', 'leadercommit', 'el2', 'el3']);
+const V_OPEN = new Set(['why', 'win', 'follow', 'lever', 'focus', 'people', 'photos', 'action', 'leadercommit', 'el2', 'el3']);
 const PHOTO_MAX = 30;
 const PHOTO_ELS = ['assortment', 'visual', 'facilities'];   // every area in these gets a photo, asked for right where it's scored
 // The areas that need a photo on every in-person visit, so every Market Leader walks the same store.
@@ -1383,6 +1421,8 @@ async function viewVisit() {
     ${priorSum.leaderCommit ? `<div class="item"><div class="txt"><b>${esc(priorSum.leaderName || 'Store leader')} committed to:</b> ${esc(priorSum.leaderCommit)}</div>${followBadge(S.lcAuto?.v, S.lcAuto)}</div>` : ''}
     ${priorSum.support ? `<div class="item"><div class="txt"><b>Support promised by ${esc(prior.name)}:</b> ${esc(priorSum.support)}</div><p class="small muted" style="margin:4px 0 0">Review it with the leader.</p></div>` : ''}`
     : '<p class="small">Nothing to check. Your action plan today becomes the start of the next visit.</p>', true)}
+
+  ${sec('lever', '⚑', 'Pull a lever', 'Close rate, average ticket or effective margin. Pick the outcome, then coach the inputs that move it.', leverBlock(V, x, snap, people, canLog, dis), true)}
 
   ${sec('focus', '2', 'Coach the team on two things', 'The two furthest from goal, and the people behind each one. We move the number through people.', focusAll.length ? `
     <div class="focus">${focusAll.map((f, i) => { const dr = draggers(people, x.store, f.key, DEFAULT_GOALS, paceFactor(S.rsa?.to)); const hp = helpers(people, x.store, f.key, DEFAULT_GOALS, paceFactor(S.rsa?.to), 2); const on = V.focus.includes(f.key); return `<div class="fcard pick ${on ? 'on' : ''}" data-fcard="${f.key}">
@@ -1618,7 +1658,14 @@ function commitmentOptions(V, snap, priorRaw = []) {
   const out = [];
   priorRaw.forEach(a => {
     const au = autoFollow(a, snap, V); if (au?.v === 'yes') return;
-    out.push({ group: 'Carry forward (not there yet)', key: a.key, cid: a.cid, rkey: a.rkey, what: String(a.what || a.behavior || '').trim(), from: au?.now || a.from, to: a.to, how: a.how || '', owner: a.owner || leader, due: nextDay, carried: true });
+    out.push({ group: 'Carry forward (not there yet)', key: a.cid ? a.key : (a.key || metricKeyFor(a) || undefined), cid: a.cid, rkey: a.rkey, what: String(a.what || a.behavior || '').trim(), from: au?.now || a.from, to: a.to, how: a.how || '', owner: a.owner || leader, due: nextDay, carried: true });
+  });
+  const L = V.lever ? leverStatus(snap?.mtd).find(l => l.key === V.lever) : null;
+  if (L) [...L.inputs].sort((a, b) => ((V.leverInputs || []).includes(b.key) ? 1 : 0) - ((V.leverInputs || []).includes(a.key) ? 1 : 0)).forEach(inp => {
+    const first = String(inp.behavior).split('. ')[0].replace(/\.$/, '');
+    const how = `${String(inp.behavior).split('. ').slice(1).join('. ')} ${inp.fact || ''} Practice "${drillFor(inp.drill).title}" with the team, then the leader checks it every shift.`.replace(/\s+/g, ' ').trim();
+    if (inp.metric && inp.value != null) out.push({ group: `Lever: ${L.label}`, key: inp.metric, what: `${first} (${inp.label})`, from: fmtMetric(inp.metric, inp.value), to: fmtMetric(inp.metric, inp.goal), how, owner: leader, due: nextDay, lever: (V.leverInputs || []).includes(inp.key) });
+    else if (!inp.metric) out.push({ group: `Lever: ${L.label}`, what: `${first} (${inp.label})`, from: `Count today: ${inp.count.toLowerCase()}`, to: COUNT_TARGET[inp.key] || 'Every guest', how, owner: leader, due: nextDay, lever: (V.leverInputs || []).includes(inp.key) });
   });
   const opps = storeFocus(snap, 6).filter(f => !f.stretch && COACHING[f.key]);
   const focusFirst = [...opps.filter(f => (V.focus || []).includes(f.key)), ...opps.filter(f => !(V.focus || []).includes(f.key))];
@@ -1630,14 +1677,15 @@ function commitmentOptions(V, snap, priorRaw = []) {
     if (cc.commit) out.push({ group: 'People coached today', cid: c.cid, rkey: cc.commit.key, what: cc.commit.what.replace(/^[^:]+:/, `${titleName(c.name)}:`), from: cc.commit.from, to: cc.commit.to, how: c.drill?.adjust ? `${cc.commit.how} Focus on: ${c.drill.adjust}` : cc.commit.how, owner: titleName(c.name), due: nextDay });
   });
   visitSummary(V).fixes.forEach(fx => out.push({ group: '6 Elements fixes', what: `${fx}: fix what was flagged on today's walk`, from: 'Needs work today', to: 'Grand Opening Ready', how: 'Leader walks it at open every day and sends a photo when it\'s right.', owner: leader, due: nextDay }));
+  // One commitment per number: the same store metric (or the same person's metric) only shows once.
   const seen = new Set();
-  return out.filter(o => { const k = o.what.toLowerCase(); if (!o.what || seen.has(k)) return false; seen.add(k); return true; });
+  return out.filter(o => { const ks = [o.what.toLowerCase(), o.key && !o.cid ? 'm:' + o.key : null, o.cid ? `p:${o.cid}:${o.rkey}` : null].filter(Boolean); if (!o.what || ks.some(k => seen.has(k))) return false; ks.forEach(k => seen.add(k)); return true; });
 }
 // Fills only empty slots, best first: carry-forwards, what the leader is coaching today, people
 // coached, then 6 Elements fixes and other store opportunities. Returns how many it filled.
 function fillCommitments(V, focusAll, opts) {
   const all = opts || commitmentOptions(V, S.vSnap, S.vPriorRaw || []);
-  const rank = o => o.carried ? 0 : o.coached ? 1 : o.group === 'People coached today' ? 2 : o.group === '6 Elements fixes' ? 3 : 4;
+  const rank = o => o.carried ? 0 : o.lever ? 0.5 : o.coached ? 1 : o.group === 'People coached today' ? 2 : o.group === '6 Elements fixes' ? 3 : String(o.group).startsWith('Lever') ? 3.5 : 4;
   const sugg = [...all].sort((a, b) => rank(a) - rank(b));
   const have = new Set(V.actions.filter(hasCommitment).map(a => String(a.what || a.behavior).toLowerCase()));
   let n = 0;
@@ -1645,7 +1693,7 @@ function fillCommitments(V, focusAll, opts) {
     if (hasCommitment(V.actions[i])) continue;
     const next = sugg.find(x => !have.has(x.what.toLowerCase()));
     if (!next) break;
-    have.add(next.what.toLowerCase()); const { group, coached, ...rest } = next; V.actions[i] = { ...(V.actions[i] || {}), ...rest, suggested: true }; n++;
+    have.add(next.what.toLowerCase()); const { group, coached, lever, ...rest } = next; V.actions[i] = { ...(V.actions[i] || {}), ...rest, suggested: true }; n++;
   }
   return n;
 }
@@ -1713,9 +1761,23 @@ function wireVisit(V, canLog, snap) {
     drawScore(); saveDraft();
   });
   v.querySelectorAll('[data-field]').forEach(inp => inp.oninput = inp.onchange = () => { setPath(V, inp.dataset.field, inp.value); if (inp.dataset.field === 'leaderWin.text') { V.leaderWin.touched = true; V.leaderWin.suggested = false; } saveDraft(); });
+  v.querySelectorAll('[data-lpick]').forEach(b => b.onclick = () => {
+    const k = b.dataset.lpick; V.lever = V.lever === k ? null : k;
+    const L = leverStatus(S.vSnap?.mtd).find(l => l.key === V.lever);
+    V.leverInputs = L ? defaultInputs(L) : [];
+    // Suggested commitments follow the lever; anything the leader typed or picked stays.
+    V.actions = V.actions.map(a => a?.suggested && !a.carried ? {} : a); fillCommitments(V);
+    saveDraft(); V_OPEN.add('lever'); viewVisit();
+  });
+  v.querySelectorAll('[data-linput]').forEach(b => b.onclick = () => {
+    const k = b.dataset.linput, cur = V.leverInputs || [];
+    V.leverInputs = cur.includes(k) ? cur.filter(z => z !== k) : [...cur, k].slice(-2);
+    V.actions = V.actions.map(a => a?.suggested && !a.carried ? {} : a); fillCommitments(V);
+    saveDraft(); V_OPEN.add('lever'); viewVisit();
+  });
   v.querySelectorAll('[data-apick]').forEach(sel => sel.onchange = () => {
     const o = S.cOpts[+sel.value]; if (!o) return;
-    const { group, coached, ...rest } = o; V.actions[+sel.dataset.apick] = { ...rest, suggested: false };
+    const { group, coached, lever, ...rest } = o; V.actions[+sel.dataset.apick] = { ...rest, suggested: false };
     saveDraft(); V_OPEN.add('action'); viewVisit(); toast('Commitment filled in. Change anything.');
   });
   wireLeaderPicks(v);
@@ -2209,7 +2271,13 @@ async function viewOne() {
   const schedChanges = (S.alerts || []).filter(a => (a.forEmail || a.email) === email && a.weekStart === ws);
 
   // The lever and where the week goes.
-  const levers = marketLevers(stores, daily, per);
+  // The lever first (close rate, average ticket or effective margin), then the input to coach under it.
+  const LS = leverStatus(mk);
+  const leverKey = (S.oneLeverPick || {})[oneId(email, ws)] || saved?.leverKey || suggestLever(mk);
+  const topL = LS.find(l => l.key === leverKey) || null;
+  const inMetrics = topL ? topL.inputs.map(i => i.metric).filter(Boolean) : [];
+  const levers0 = marketLevers(stores, daily, per);
+  const levers = topL ? [...levers0.filter(l => inMetrics.includes(l.key)), ...levers0.filter(l => !inMetrics.includes(l.key))] : levers0;
   const lever = levers[0] || null;
   const lever2 = levers.find(l => l !== lever && l.pillar !== lever?.pillar) || null;
   const pace = paceFactor(S.rsa?.to);
@@ -2245,7 +2313,8 @@ async function viewOne() {
     const bestS = storeWins[0], bestP = topPeople[0];
     L.push(`Open with a win: ${bestS ? `${bestS.s} finished ${pct(bestS.bud ?? 0)} to budget` : bestP ? `${titleName(bestP.name)} did $${Math.round(bestP.wk.sph)} an hour` : `${first} got into the stores`}${bestS && bestP ? `, and ${titleName(bestP.name)} did $${Math.round(bestP.wk.sph)} an hour` : ''}. Ask what drove it and how the rest of the market copies it.`);
     if (mk) L.push(`The number: ${moneyK(mk.k.netSales)} for the week, ${pct(mk.vsBud.netSales ?? 0)} to budget${mk.vsLy.spg != null ? `, SPG with cancellations ${pct(mk.vsLy.spg)} vs LY` : ''}.${mtd?.vsBud?.netSales != null ? ` Month to date ${pct(mtd.vsBud.netSales)}.` : ''}`);
-    if (lever) L.push(`The lever is ${plainOf(lever.key)}. ${lever.hits.length} of ${lever.of} stores are under goal, worst at ${lever.hits.slice(0, 2).map(h => `${h.store} (${fmtMetric(lever.key, h.value)})`).join(' and ')}. Ask: "What are you seeing on the floor that explains ${plainOf(lever.key)} at ${leverStores[0]}?"`);
+    if (topL) L.push(`The lever this week is ${topL.label.toLowerCase()}: market at ${fmtMetric(topL.key, topL.value)}${topL.goal != null ? ` against ${fmtMetric(topL.key, topL.goal)}` : ''}. ${topL.why} We move it through its inputs: ${topL.inputs.map(i => i.label.split(':')[0].toLowerCase()).join(', ')}.`);
+    if (lever) L.push(`Start with ${plainOf(lever.key)}. ${lever.hits.length} of ${lever.of} stores are under goal, worst at ${lever.hits.slice(0, 2).map(h => `${h.store} (${fmtMetric(lever.key, h.value)})`).join(' and ')}. Ask: "What are you seeing on the floor that explains ${plainOf(lever.key)} at ${leverStores[0]}?"`);
     if (storeMiss[0] && storeMiss[0].s !== leverStores[0]) L.push(`${storeMiss[0].s} was ${pct(storeMiss[0].bud)} to budget. Ask: "Walk me through that store last week. Who did you coach and on what?"`);
     if (planned) L.push(`${first} made ${inPerson.length} of ${planned} planned visits${remote.length ? ` and ${remote.length} remote coaching call${remote.length > 1 ? 's' : ''}` : ''}, coached ${coachedN} ${coachedN === 1 ? 'person' : 'people'} and ran ${practiceN} stand-up practice${practiceN === 1 ? '' : 's'}.${missed ? ` Ask: "What got in the way of the visit${missed > 1 ? 's' : ''} you missed? How do we protect those days?"` : ''}`);
     if (dueNot) L.push(`${dueNot} commitment${dueNot > 1 ? 's' : ''} from last week's visits ${dueNot > 1 ? "aren't" : "isn't"} moving. Ask: "What's the plan to get ${dueNot > 1 ? 'them' : 'it'} there, and who owns it?"`);
@@ -2337,9 +2406,14 @@ async function viewOne() {
     <p class="eyebrow" style="margin-top:10px">Commitments due last week</p>
     ${dueWk.length ? `<ul class="blist">${dueWk.map(({ x, a, au }) => `<li><b>${esc(x.store)}:</b> ${esc(commitmentText(a))} ${au?.v ? `<span class="rv ${au.v === 'yes' ? 'done' : au.v === 'partial' ? 'part' : 'not'}">${au.v === 'yes' ? 'Done' : au.v === 'partial' ? 'Moving' : 'Not yet'}</span>` : ''}</li>`).join('')}</ul>` : '<p class="small muted">None were due that week.</p>'}`)}
   ${prevActs.length ? sec('prev', '5', "Last 1 on 1's commitments", 'Where they stand today. Review them first.', `<ul class="blist">${prevActs.map(a => { const au = oneFollow(a, stores, email, prev.weekStart); return `<li>${esc(commitmentText(a))} ${au?.v ? `<span class="rv ${au.v === 'yes' ? 'done' : au.v === 'partial' ? 'part' : 'not'}">${au.v === 'yes' ? 'Done' : au.v === 'partial' ? 'Moving' : 'Not yet'}</span> <span class="small">${esc(au.text)}</span>` : '<span class="small muted">Talk it through.</span>'}</li>`; }).join('')}</ul>`) : ''}
-  ${sec('lever', prevActs.length ? '6' : '5', 'The lever to pull', 'The one number that moves this market the most right now.', lever ? `
+  ${sec('lever', prevActs.length ? '6' : '5', 'The lever to pull', 'The outcome to move, then the input to coach under it.', `${LS.length ? `<div class="fcard" style="border-left:5px solid #003B4A;margin:0 0 12px">
+      <div class="spread" style="margin:0"><div><p class="eyebrow">${topL && topL.key === suggestLever(mk) ? 'The lever (suggested from the numbers)' : 'The lever'}</p><h3 style="margin:0 0 4px">${topL ? esc(topL.label) : 'Every lever is at goal'}</h3>
+        ${topL ? `<p style="margin:0">Market at <b>${esc(fmtMetric(topL.key, topL.value))}</b>${topL.goal != null ? `, goal ${esc(fmtMetric(topL.key, topL.goal))}` : ''}. ${esc(topL.why)}</p>` : ''}</div>
+        ${canEdit ? `<label for="olever" style="margin:0">Lever<select id="olever">${LS.map(l => `<option value="${l.key}" ${topL?.key === l.key ? 'selected' : ''}>${esc(l.label)}${l.value != null ? ` (${esc(fmtMetric(l.key, l.value))})` : ''}</option>`).join('')}</select></label>` : ''}</div>
+      ${topL ? `<ul class="blist small" style="margin:8px 0 0">${topL.inputs.map(i => `<li><b>${esc(i.label)}</b>: ${i.metric ? `${esc(fmtMetric(i.metric, i.value))} vs ${esc(fmtMetric(i.metric, i.goal))} goal` : `count it on visits (${esc(i.count.toLowerCase())})`}. ${esc(i.behavior)}${i.fact ? ` <i>${esc(i.fact)}</i>` : ''}</li>`).join('')}</ul>` : ''}
+    </div>` : ''}${lever ? `
     <div class="fcard" style="border-left:5px solid #F68C2C">
-      <p class="eyebrow">${esc(lever.pillar)}</p>
+      <p class="eyebrow">Input to coach first · ${esc(lever.pillar)}</p>
       <h3 style="margin:0 0 4px">${esc(lever.label)}</h3>
       <p style="margin:0 0 8px">${lever.hits.length} of ${lever.of} stores under goal. Market at ${esc(fmtMetric(lever.key, mk.k[lever.key]))}.</p>
       <p class="small" style="margin:0 0 4px"><b>Where:</b> ${lever.hits.slice(0, 4).map(h => `${esc(h.store)} ${esc(fmtMetric(lever.key, h.value))} vs ${esc(fmtMetric(lever.key, h.goal))}`).join(' · ')}</p>
@@ -2348,7 +2422,7 @@ async function viewOne() {
       <p class="small" style="margin:6px 0 0"><b>How:</b> ${esc(COACHING[lever.key].doThis)}</p>
       <p class="small" style="margin:4px 0 0"><b>Practice it standing up:</b> ${esc(drill.title)}. ${esc(drill.guest)}</p>
     </div>
-    ${lever2 ? `<p class="small" style="margin-top:8px"><b>Next lever:</b> ${esc(lever2.label)}, ${lever2.hits.length} of ${lever2.of} stores under goal (${lever2.hits.slice(0, 2).map(h => esc(h.store)).join(', ')}).</p>` : ''}` : '<p>Every store number is at goal for the week. Pick a stretch goal together.</p>', true)}
+    ${lever2 ? `<p class="small" style="margin-top:8px"><b>Next input:</b> ${esc(lever2.label)}, ${lever2.hits.length} of ${lever2.of} stores under goal (${lever2.hits.slice(0, 2).map(h => esc(h.store)).join(', ')}).</p>` : ''}` : '<p>Every store number is at goal for the week. Pick a stretch goal together.</p>'}`, true)}
   ${sec('focus', prevActs.length ? '7' : '6', 'Where the focus goes this week', 'Stores with the most need right now, and whether they are on the plan.', `
     ${focusStores.length ? `<ul class="blist">${[...new Set([...leverStores, ...focusStores])].map(s => `<li>${needChip(S.scores[s]?.score)} <b>${esc(s)}</b>: ${esc((S.scores[s]?.parts || []).slice(0, 2).map(p => p.text).join('. '))}${thisPlan ? (onPlan.has(s) ? ' <span class="pill done">On the plan</span>' : ' <span class="pill check">Not on the plan</span>') : ''}${leverSet.has(s) ? ' <span class="pill">Lever store</span>' : ''}</li>`).join('')}</ul>` : '<p class="small muted">No scores yet.</p>'}
     ${thisPlan ? '' : `<p class="small muted">${esc(first)} has no plan saved for this week yet.</p>`}`)}
@@ -2379,6 +2453,11 @@ async function viewOne() {
 
   // ---- wiring
   const omm = $('#omm'); if (omm) omm.onchange = () => { S.oneEmail = omm.value; viewOne(); };
+  const olv = $('#olever'); if (olv) olv.onchange = async () => {
+    S.oneLeverPick = { ...(S.oneLeverPick || {}), [doc.id]: olv.value }; doc.leverKey = olv.value;
+    if (canEdit) { const { vpNotes, ...pub } = doc; await S.be.saveOneOnOne({ ...pub, updatedAt: new Date().toISOString() }).catch(() => null); }
+    viewOne();
+  };
   $('#owk').onchange = e => { S.oneWeek = e.target.value; viewOne(); };
   v.querySelectorAll('.vsec-hd').forEach(h => h.onclick = () => {
     const el = h.parentElement, k = el.dataset.sec; el.classList.toggle('open'); h.setAttribute('aria-expanded', el.classList.contains('open'));

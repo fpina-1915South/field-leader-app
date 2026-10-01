@@ -4,7 +4,7 @@
 import {
   normalizeHeader, toNumber, parseDate, slug, canonicalStore, isKnownStore, REGIONS, STORE_METRICS,
   COACHING, METRICS, pickFocus, pickStoreFocus, goalsFor, DEFAULT_GOALS, isOutlet, minSphFor, fmt, weeklyTarget
-} from './base.js?v=202610010723';
+} from './base.js?v=202610010743';
 
 const numOrNull = v => (v === '' || v === null || v === undefined ? null : toNumber(v));
 
@@ -183,6 +183,76 @@ export function buildPlan({ weekStart, stores, scores, off = DEFAULT_OFF, role =
   };
 }
 
+
+
+// ---------------------------------------------------------------- levers and their inputs
+// The Market Leader picks the lever (the outcome to move), then coaches the inputs that drive it.
+// metric: the store number for that input, when the daily report has one. Inputs without a number
+// are counted on the floor during the visit.
+export const LEVERS = [
+  { key: 'closeRate', label: 'Close Rate', why: 'More guests say yes today.', inputs: [
+    { key: 'cart', label: 'Connection: cart creation', metric: null, count: 'Guests with a cart started', drill: 'cart',
+      behavior: 'Start a cart with every guest. Connection shows up as a cart, and a guest with a cart is a guest who buys.',
+      ask: 'How many of your last 10 guests left with a cart started?' },
+    { key: 'finance', label: 'Finance: buying power early', metric: 'financePct', alt: 'appsToTraffic', drill: 'finance',
+      behavior: 'Get every guest their buying power in the first 10 minutes so the yes is easy.',
+      fact: '93% of guests who get approved buy today, and 97% buy within 7 days.',
+      ask: 'When in the conversation are you bringing up buying power?' }
+  ] },
+  { key: 'avgTicket', label: 'Average Ticket', why: 'More on every sale.', inputs: [
+    { key: 'finance', label: 'Finance: buying power makes it affordable', metric: 'financePct', alt: 'appsToTraffic', drill: 'finance',
+      behavior: 'Get buying power early and show the monthly payment, so the whole room is affordable.',
+      fact: '93% of guests who get approved buy today, and 97% buy within 7 days.',
+      ask: 'Are you showing the monthly payment next to the price?' },
+    { key: 'pieces', label: 'More pieces: sell the room', metric: null, count: 'Pieces per ticket', drill: 'room',
+      behavior: 'Show the whole room: tables, rug, lighting, accents. Let the guest take pieces out instead of never offering them.',
+      ask: 'What did your last guest leave without that would have finished the room?' },
+    { key: 'quality', label: 'Quality of the pieces: start at Best', metric: null, count: 'Guests shown Best first', drill: 'quality',
+      behavior: 'Start at Best and walk down only if the guest asks.',
+      ask: 'Which option do you show first?' },
+    { key: 'bedding', label: 'Bedding: start the conversation', metric: 'beddingPct', drill: 'bedding',
+      behavior: 'Ask every guest how they are sleeping. Start the conversation even when they came in for something else.',
+      ask: 'How many guests today did you ask about their sleep?' },
+    { key: 'protection', label: 'Protection', metric: 'protectionAttach', drill: 'protection', also: 'Also raises effective margin.',
+      behavior: 'Present every option protected and delivered. Quote protection inside the price.',
+      ask: 'Are you quoting protection inside the price, or adding it at the end?' },
+    { key: 'delivery', label: 'Delivery', metric: 'deliveryPct', drill: 'delivery', also: 'Also raises effective margin.',
+      behavior: 'Quote the delivered price first on every sale. Carry-out is the exception.',
+      ask: 'Which price do you quote first?' }
+  ] },
+  { key: 'effMargin', label: 'Effective Margin', why: 'Profit is oxygen. We have to stay healthy.', inputs: [
+    { key: 'protection', label: 'Protection', metric: 'protectionAttach', drill: 'protection',
+      behavior: 'Present every option protected and delivered. Quote protection inside the price.',
+      ask: 'Are you quoting protection inside the price, or adding it at the end?' },
+    { key: 'delivery', label: 'Delivery', metric: 'deliveryPct', drill: 'delivery',
+      behavior: 'Quote the delivered price first on every sale.',
+      ask: 'Which price do you quote first?' },
+    { key: 'price', label: 'Hold price', metric: null, count: 'Sales with no discount', drill: 'effMargin',
+      behavior: 'Build value and show the monthly payment first. No discount without a leader, and only after finance.',
+      ask: 'What happened the last time a guest asked for a better price?' }
+  ] }
+];
+const LEVER_DEFAULT = { closeRate: null, avgTicket: 2200, effMargin: 55.5 };
+// Where each lever and input stands for a store (or a market rollup): value, goal, and how far off.
+export function leverStatus(p) {
+  if (!p?.k) return [];
+  return LEVERS.map(L => {
+    const value = p.k[L.key], goal = p.budget?.[L.key] ?? LEVER_DEFAULT[L.key];
+    const ratio = value != null && goal ? value / goal : null;
+    const inputs = L.inputs.map(inp => {
+      if (!inp.metric) return { ...inp, value: null, goal: null, ratio: null };
+      const v = p.k[inp.metric], g = p.budget?.[inp.metric] ?? STORE_GOALS[inp.metric];
+      return { ...inp, value: v, goal: g, ratio: v != null && g ? v / g : null };
+    });
+    return { ...L, value, goal, ratio, inputs };
+  });
+}
+// The lever to pull: the one furthest below goal. Null if every lever is at goal or there are no numbers.
+export function suggestLever(p) {
+  const st = leverStatus(p).filter(l => l.ratio != null);
+  const worst = st.sort((a, b) => a.ratio - b.ratio)[0];
+  return worst && worst.ratio < 1 ? worst.key : st.length ? null : null;
+}
 
 // ---------------------------------------------------------------- drive time between stores
 // City-level coordinates for each store. Drive time is an estimate: straight-line miles x 1.15 for
@@ -418,6 +488,10 @@ export function teamSignals(people, weeks, store, goals = DEFAULT_GOALS) {
 // One drill per coaching lever. The leader plays the guest, the consultant runs the rep,
 // the leader scores what they see, gives one adjustment, and they run it again.
 const D = {
+  cart: { title: 'Building the cart', guest: 'Say "I\'m just looking at sofas today." Like two pieces, but don\'t ask for anything.',
+    watch: ['Started a cart in the first 10 minutes', 'Added every piece the guest liked as they went', 'Asked about the rest of the room and added to the cart', 'Walked the guest through the cart before any talk of price'] },
+  quality: { title: 'Starting at Best', guest: 'Ask "What\'s the difference between these three?"',
+    watch: ['Showed the Best option first', 'Explained why Best is better in the guest\'s own words', 'Walked down only when the guest asked', 'Quoted Best as a monthly payment'] },
   connection: { title: 'Greeting to discovery', guest: 'Walk in and say "Just looking." Keep your answers short until they get you talking.',
     watch: ['Greeted within 10 seconds, used your name once they had it', 'Asked about the room and how you live in it before showing product', 'Listened more than they talked in the first 3 minutes', 'Set up the next step before walking to the floor'] },
   room: { title: 'Selling the room', guest: 'Pick one sofa and say "I\'ll figure out the rest later."',
@@ -440,6 +514,7 @@ const D = {
     watch: ['Recognized the pause as the moment to offer the app', 'Explained it takes a few minutes and has no cost to check', 'Made a clear ask instead of "if you want"', 'Walked you through it or handed it off to a leader'] }
 };
 export const DRILLS = {
+  cart: D.cart, quality: D.quality, finance: D.finance, room: D.room, bedding: D.bedding, protection: D.protection, delivery: D.delivery,
   sph: D.connection, closeRate: D.close, cancelPct: D.cancel, avgTicket: D.room, effMargin: D.price, discountPct: D.price,
   financePct: D.finance, appsToTraffic: D.apps, creditApps: D.apps, beddingPct: D.bedding, beddingSph: D.bedding,
   protectionPct: D.protection, protectionSph: D.protection, protectionAttach: D.protection, deliveryPct: D.delivery
