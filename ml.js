@@ -4,7 +4,7 @@
 import {
   normalizeHeader, toNumber, parseDate, slug, canonicalStore, isKnownStore, REGIONS, STORE_METRICS,
   COACHING, METRICS, pickFocus, pickStoreFocus, goalsFor, DEFAULT_GOALS, isOutlet, minSphFor, fmt, weeklyTarget
-} from './base.js?v=202610010900';
+} from './base.js?v=202610010910';
 
 const numOrNull = v => (v === '' || v === null || v === undefined ? null : toNumber(v));
 
@@ -284,6 +284,20 @@ export const PLAY_CHECKS = [
   'Buying power early: 6 or 12 month financing offered in the first 10 minutes',
   'Bundle presented: every option with Protection + Premium Delivery',
   'Showed the guest their savings in dollars and asked which option feels right'
+];
+// Remote coaching can't watch the floor: ask the leader and role-play it on video. Same order as PLAY_CHECKS.
+export const PLAY_CHECKS_REMOTE = [
+  'Connection: the leader can tell you how many guests got a cart yesterday, and who',
+  'Value: the leader walked you through a recent sale that started at Best and showed the whole room',
+  'Buying power: the leader knows who offered financing in the first 10 minutes yesterday',
+  'Bundle: role-played every option with Protection + Premium Delivery with an associate on video',
+  'Savings in dollars: the associate said the double savings out loud in the role-play'
+];
+export const FLIQ_CHECKS_REMOTE = [
+  'Per the leader: associates on the floor today have used FrontLine IQ',
+  'Per the leader: reps in before the first guest at open',
+  'Leader walked you through what FrontLine IQ flagged this week',
+  'You and the leader picked one associate to coach on what it flagged'
 ];
 export const offerActive = (o, day) => !!o && (!o.start || day >= o.start) && (!o.end || day <= o.end);
 // What the bundle saves on a ticket, so the consultant can say it in dollars.

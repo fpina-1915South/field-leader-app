@@ -1,15 +1,15 @@
-import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610010900';
-import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610010900';
+import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610010910';
+import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610010910';
 import {
   STORES, DISTRICTS, canonicalStore, isKnownStore, parseRsa, rangeFromFileName, parseTeamRoster, resolveReportNames,
   paceFactor, DEFAULT_GOALS, cidOf, status, fmt, goalsFor, TEAM_FOCUS, pickStoreFocus
-} from './base.js?v=202610010900';
+} from './base.js?v=202610010910';
 import {
   iso, fromIso, addDays, daysApart, weekStartOf, DAY_NAMES, DAY_LONG, dow, DEFAULT_OFF, validOff, safeOff, VISIT_DAYS, STORE_GOALS,
   parseDaily, needScore, band, pct, environment, buildPlan, pivotSuggestion, ELEMENTS, SEGMENTS, AORS, PRACTICE, VISIT_TYPES, kindToType, visitScore, visitSummary, consultantCoaching, drillFor, draggers, helpers, STORE_TO_RSA, hasCommitment, commitmentText, blackoutFor, offChoicesFor, storeFocus, rsaPicks, consultantWeeks, teamSignals,
   STORE_METRICS, slug, COACHING, METRICS, PLAIN, isOutlet, driveMin, driveText, MAX_SPLIT_MIN, LEVERS, leverStatus, suggestLever,
-  OFFER_DEFAULT, PLAY, PLAY_CHECKS, offerActive, offerMath, FLIQ_CHECKS, FLIQ_DAILY
-} from './ml.js?v=202610010900';
+  OFFER_DEFAULT, PLAY, PLAY_CHECKS, PLAY_CHECKS_REMOTE, offerActive, offerMath, FLIQ_CHECKS, FLIQ_CHECKS_REMOTE, FLIQ_DAILY
+} from './ml.js?v=202610010910';
 
 const DEMO = !firebaseConfig.apiKey || firebaseConfig.apiKey.startsWith('PASTE');
 const FB = 'https://www.gstatic.com/firebasejs/10.12.2/';
@@ -1248,7 +1248,7 @@ const fieldBox = (id, label, value, rows = 3, hint = '', field = '', dis = '') =
 // ---------------------------------------------------------------- the intent of a visit
 // Why the Market Leader is going, in plain words: the purpose, the lever, the people behind the gap,
 // the behaviors to coach, and who models it. We change the outcome through people and behaviors.
-function visitIntent(store, { anchor, kind, date } = {}) {
+function visitIntent(store, { anchor, kind, date, remote } = {}) {
   const snap = S.daily?.stores?.[store], m = snap?.mtd, sc = S.scores[store];
   const lk = suggestLever(m), L = lk ? leverStatus(m).find(l => l.key === lk) : null;
   const weak = L ? L.inputs.filter(i => i.metric && i.ratio != null && i.ratio < 1).sort((a, b) => a.ratio - b.ratio)[0] : null;
@@ -1263,7 +1263,8 @@ function visitIntent(store, { anchor, kind, date } = {}) {
     .filter((x, i, a) => a.findIndex(y => y.cid === x.cid) === i).slice(0, 3);
   const prior = S.visits.filter(v => v.store === store && v.status !== 'draft' && (!date || v.date < date)).sort((a, b) => b.date.localeCompare(a.date))[0];
   const open = prior ? (prior.actions || []).filter(hasCommitment).filter(a => autoFollow(a, snap, {})?.v !== 'yes').length : 0;
-  const purpose = anchor ? 'Anchor morning: be on the floor at open, set the tone, and run the play with the team.'
+  const purpose = remote ? `Remote coaching: go over the numbers with the leader, coach the people behind the gap through the leader, and role-play the play with an associate on video.${open ? ` Check in on the ${open} open commitment${open > 1 ? 's' : ''} from the last visit.` : ''}`
+    : anchor ? 'Anchor morning: be on the floor at open, set the tone, and run the play with the team.'
     : open ? `Follow up and inspect: ${open} commitment${open > 1 ? 's' : ''} from the last visit ${open > 1 ? "aren't" : "isn't"} there yet.`
     : kind === 'second' ? 'Second visit this week: inspect the plan you set and the behaviors behind it.'
     : 'Set the plan: find the gap, coach the people behind it, leave with commitments.';
@@ -1293,9 +1294,10 @@ function playBlock(V, canLog, dis, tri) {
       <ul class="blist small" style="margin:6px 0">${(o.lines || []).map(l => `<li>${esc(l)}</li>`).join('')}</ul>
       <p class="small" style="margin:0"><b>Say it in dollars:</b> on a $3,000 room, financing or the bundle saves $${ex.one}. Financing AND the bundle saves $${ex.both}.</p>
       ${o.fine ? `<p class="small muted" style="margin:4px 0 0">${esc(o.fine)}</p>` : ''}</div>` : ''}
-    <p class="small" style="margin:12px 0 6px"><b>Watch one live guest, or run it as a practice.</b> Connection comes first.</p>
-    ${PLAY_CHECKS.map((t, i) => `<div class="item"><div class="txt">${esc(t)}</div>${tri(`play.${i}`, V.play?.[i])}</div>`).join('')}
-    ${fieldBox('playnotes', 'What you saw', V.playNotes, 2, '', 'playNotes', dis)}`;
+    ${V.remote ? `<p class="small" style="margin:12px 0 6px"><b>Remote: you can't watch the floor.</b> Ask the leader for specifics (names and counts, not "we're good"), and role-play the play with an associate on video. Connection comes first.</p>`
+      : `<p class="small" style="margin:12px 0 6px"><b>Watch one live guest, or run it as a practice.</b> Connection comes first.</p>`}
+    ${(V.remote ? PLAY_CHECKS_REMOTE : PLAY_CHECKS).map((t, i) => `<div class="item"><div class="txt">${esc(t)}</div>${tri(`play.${i}`, V.play?.[i])}</div>`).join('')}
+    ${fieldBox('playnotes', V.remote ? 'What the leader told you, and how the role-play went' : 'What you saw', V.playNotes, 2, '', 'playNotes', dis)}`;
 }
 function fliqBlock(V, canLog, dis, tri) {
   const f = V.fliq || {};
@@ -1304,7 +1306,7 @@ function fliqBlock(V, canLog, dis, tri) {
       <div>${fieldInput('fliqUsing', 'Associates who used it today', f.using, 'fliq.using', dis, 'inputmode="numeric" placeholder="For example 4" style="width:100%"')}</div>
       <div>${fieldInput('fliqFloor', 'Associates on the floor', f.floor, 'fliq.floor', dis, 'inputmode="numeric" placeholder="For example 6" style="width:100%"')}</div>
     </div>
-    ${FLIQ_CHECKS.map((t, i) => `<div class="item"><div class="txt">${esc(t)}</div>${tri(`fliq.c.${i}`, f.c?.[i])}</div>`).join('')}
+    ${(V.remote ? FLIQ_CHECKS_REMOTE : FLIQ_CHECKS).map((t, i) => `<div class="item"><div class="txt">${esc(t)}</div>${tri(`fliq.c.${i}`, f.c?.[i])}</div>`).join('')}
     ${fieldBox('fliqnotes', 'What FrontLine IQ flagged, and what you did with it', f.notes, 3, 'Which associates, what it coached them on, and what you saw on the floor.', 'fliq.notes', dis)}`;
 }
 
@@ -1333,9 +1335,9 @@ function leverBlock(V, x, snap, people, canLog, dis) {
       const on = chosen.includes(inp.key), d = drillFor(inp.drill), below = inp.ratio != null && inp.ratio < 1;
       const dr = inp.metric && STORE_TO_RSA[inp.metric] ? draggers(people, x.store, inp.metric, DEFAULT_GOALS, paceFactor(S.rsa?.to), 2) : [];
       return `<div class="fcard pick ${on ? 'on' : ''}">
-        <span class="row" style="justify-content:space-between"><span class="eyebrow">${inp.metric ? (below ? 'Below goal' : 'At goal') : 'Count it on the floor'}</span>${canLog ? `<button type="button" class="btn tiny ${on ? 'primary' : ''}" data-linput="${inp.key}" ${dis}>${on ? 'Coaching this ✓' : 'Coach this'}</button>` : ''}</span>
+        <span class="row" style="justify-content:space-between"><span class="eyebrow">${inp.metric ? (below ? 'Below goal' : 'At goal') : (V.remote ? 'Ask the leader for the count' : 'Count it on the floor')}</span>${canLog ? `<button type="button" class="btn tiny ${on ? 'primary' : ''}" data-linput="${inp.key}" ${dis}>${on ? 'Coaching this ✓' : 'Coach this'}</button>` : ''}</span>
         <b class="fl">${esc(inp.label)}</b>
-        <span class="small">${inp.metric ? `Now <b class="${below ? 'bad' : 'good'}">${esc(fv(inp.metric, inp.value))}</b>, goal ${esc(fv(inp.metric, inp.goal))}.` : `Not in the daily report. Count it today: <b>${esc(inp.count)}</b>, goal ${esc(COUNT_TARGET[inp.key] || '')}.`}${inp.also ? ` ${esc(inp.also)}` : ''}</span>
+        <span class="small">${inp.metric ? `Now <b class="${below ? 'bad' : 'good'}">${esc(fv(inp.metric, inp.value))}</b>, goal ${esc(fv(inp.metric, inp.goal))}.` : `Not in the daily report. ${V.remote ? 'Ask the leader for it' : 'Count it today'}: <b>${esc(inp.count)}</b>, goal ${esc(COUNT_TARGET[inp.key] || '')}.`}${inp.also ? ` ${esc(inp.also)}` : ''}</span>
         <span class="do"><b>Do this:</b> ${esc(inp.behavior)}</span>
         ${inp.fact ? `<span class="small"><b>Why it works:</b> ${esc(inp.fact)}</span>` : ''}
         <span class="asks"><span>• ${esc(inp.ask)}</span></span>
@@ -1492,7 +1494,7 @@ async function viewVisit() {
   ${env ? `<div class="env ${env.kind}"><b>${env.kind === 'headwind' ? 'Headwind.' : env.kind === 'tailwind' ? 'Tailwind.' : 'Normal traffic.'}</b> ${esc(env.text)}</div>` : ''}
 
   ${sec('why', '1', 'Why you are here', 'The intent of the visit. We change the outcome through people and behaviors.', `
-    ${(() => { const pd = (S.vPlans || []).flatMap(p => p.days || []).find(d => d.date === x.date && dayStores(d).includes(x.store)); return intentHtml(visitIntent(x.store, { anchor: pd?.anchor && pd.store === x.store && !x.remote, kind: pd ? (pd.store === x.store ? pd.kind : pd.stops.find(y => y.store === x.store)?.kind) : x.kind, date: x.date })); })()}
+    ${(() => { const pd = (S.vPlans || []).flatMap(p => p.days || []).find(d => d.date === x.date && dayStores(d).includes(x.store)); return intentHtml(visitIntent(x.store, { remote: x.remote, anchor: pd?.anchor && pd.store === x.store && !x.remote, kind: pd ? (pd.store === x.store ? pd.kind : pd.stops.find(y => y.store === x.store)?.kind) : x.kind, date: x.date })); })()}
     ${sc?.parts?.length > 2 ? `<details style="margin:8px 0"><summary class="small" style="cursor:pointer">All the reasons from the numbers</summary><ul class="whylist">${sc.parts.slice(0, 6).map(p => `<li>${esc(p.text)}</li>`).join('')}</ul></details>` : sc?.parts?.length ? '' : '<p class="small">No flags. Use the visit to lock in what is working.</p>'}
     <div class="ptog" role="group" aria-label="Period">${PERIODS.filter(([k]) => snap?.[k]).map(([k, l]) => `<button type="button" data-period="${k}" class="${period === k ? 'on' : ''}">${l}</button>`).join('')}</div>
     ${storeTiles(snap, period)}`)}
@@ -1505,7 +1507,7 @@ async function viewVisit() {
   ${sec('follow', '↻', 'Inspect and follow up', prior ? `Last visit ${esc(dayLabel(prior.date))}${prior.email !== x.email ? ' (' + esc(prior.name) + ')' : ''}. Each commitment is checked against today's numbers. Watch for the behavior on the floor.` : 'No earlier visit to this store.', (priorSum?.commitments.length || priorSum?.leaderCommit || priorSum?.support) ? `
     ${priorRaw.length ? `<p class="small" style="margin:0 0 8px"><span class="pill check">Inspection visit</span> ${priorRaw.filter(a => autoFollow(a, snap, V)?.v === 'yes').length} of ${priorRaw.length} commitments hit. Anything not there yet is ready to carry forward in today's action plan.</p>` : ''}
     ${priorSum.commitments.map((c, i) => { const a = priorRaw[i] || {}; const au = autoFollow(a, snap, V); if (canLog) setPath(V, `follow.${i}`, au?.v ?? null);
-      return `<div class="item"><div class="txt">${esc(c)}${a.how ? `<p class="small" style="margin:4px 0 0"><b>Inspect on the floor:</b> ${esc(a.how)}</p>` : ''}</div>${followBadge(au?.v, au)}</div>`; }).join('')}
+      return `<div class="item"><div class="txt">${esc(c)}${a.how ? `<p class="small" style="margin:4px 0 0"><b>${x.remote ? 'Ask the leader about' : 'Inspect on the floor'}:</b> ${esc(a.how)}</p>` : ''}</div>${followBadge(au?.v, au)}</div>`; }).join('')}
     ${priorSum.fixes.length ? `<p class="small" style="margin-top:10px">6 Elements flagged last time: ${priorSum.fixes.map(esc).join(', ')}</p>` : ''}
     ${(() => { const au = priorSum.leaderCommit ? autoFollow(prior.leaderCommit, snap, V) : null; if (canLog) setPath(V, 'follow.lc', au?.v ?? null); S.lcAuto = au; return ''; })()}
     ${priorSum.leaderCommit ? `<div class="item"><div class="txt"><b>${esc(priorSum.leaderName || 'Store leader')} committed to:</b> ${esc(priorSum.leaderCommit)}</div>${followBadge(S.lcAuto?.v, S.lcAuto)}</div>` : ''}
@@ -1762,9 +1764,9 @@ function commitmentOptions(V, snap, priorRaw = []) {
   });
   const playGap = Object.values(V.play || {}).some(x => x === 'no' || x === 'partial');
   const bundleMiss = ['no', 'partial'].includes(V.play?.[3]);
-  out.push({ group: 'Run the play', what: 'Present every option with financing + Protection + Premium Delivery (the bundle)', from: bundleMiss ? 'Not presented on today\'s guest' : 'Count today: sales with the full bundle', to: 'Every sale',
+  out.push({ group: 'Run the play', what: 'Present every option with financing + Protection + Premium Delivery (the bundle)', from: bundleMiss ? (V.remote ? 'Missed in today\'s role-play' : 'Not presented on today\'s guest') : (V.remote ? 'Leader\'s count: sales with the full bundle' : 'Count today: sales with the full bundle'), to: 'Every sale',
     how: `Connect and start a cart first, build value from Best, then buying power and the bundle.${activeOffer() ? ` Show the savings in dollars: $100 off every $1,000 with financing AND the bundle (${S.offer.name}).` : ''} Practice "Running the play" at the huddle.`, owner: leader, due: nextDay, playFirst: playGap });
-  if (['no', 'partial'].includes(V.play?.[0])) out.push({ group: 'Run the play', what: 'Connect first: greet like a referral and start a cart with every guest', from: 'Missed on today\'s guest', to: '8 of 10 guests with a cart', how: 'Practice "Building the cart" standing up. The leader counts carts started at every huddle.', owner: leader, due: nextDay, playFirst: true });
+  if (['no', 'partial'].includes(V.play?.[0])) out.push({ group: 'Run the play', what: 'Connect first: greet like a referral and start a cart with every guest', from: V.remote ? 'Leader couldn\'t say how many carts' : 'Missed on today\'s guest', to: '8 of 10 guests with a cart', how: 'Practice "Building the cart" standing up. The leader counts carts started at every huddle.', owner: leader, due: nextDay, playFirst: true });
   const vWho = S.users.find(u => u.email === V.email);
   if (hasFliq(vWho)) { const u = numOf(V.fliq?.using), fl = numOf(V.fliq?.floor);
     out.push({ group: 'FrontLine IQ', what: 'Every associate gets reps in FrontLine IQ before their first guest', from: u != null && fl ? `${u} of ${fl} associates` : 'Count today', to: fl ? `${fl} of ${fl} associates` : 'Every associate', how: 'Leader checks FrontLine IQ use at open and goes over what it flagged at the huddle.', owner: leader, due: nextDay, fliqFirst: true }); }
