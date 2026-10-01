@@ -272,7 +272,7 @@ function demoBackend() {
   let storeLeaders = [];
   let markets = [
     { id: 'jax', name: 'Jacksonville', leader: 'east@demo', director: 'director@demo', stores: ['Town Center', 'Orange Park', 'Yulee', 'St. Augustine'] },
-    { id: 'nc', name: 'Carolinas', leader: 'nc@demo', director: '', stores: ['Greensboro', 'Winston Salem', 'Burlington', 'Danville', 'Outlet Greensboro'] },
+    { id: 'nc', name: 'Carolinas', leader: 'nc@demo', director: '', stores: ['Greensboro', 'Winston Salem', 'Burlington', 'Danville', 'Outlet Greensboro'], anchor: 'Danville', anchorDays: 5 },
     { id: 'gulf', name: 'Gulf Coast', leader: 'gulf@demo', director: '', stores: ['Mobile', "D'Iberville", 'Spanish Fort', 'Pensacola', 'Crestview', 'Ft. Walton'] }
   ];
   // Last week, for the 1 on 1: a plan and visits for each leader, the RSA copy from the Saturday
@@ -533,8 +533,8 @@ function alertBar() {
 }
 // Day by day, what moved: store to store, store to off, off to store.
 function scheduleDiff(beforeDays, afterDays) {
-  const b = Object.fromEntries((beforeDays || []).map(d => [d.date, d.store || 'Open day']));
-  const a = Object.fromEntries((afterDays || []).map(d => [d.date, d.store || 'Open day']));
+  const b = Object.fromEntries((beforeDays || []).map(d => [d.date, dayText(d)]));
+  const a = Object.fromEntries((afterDays || []).map(d => [d.date, dayText(d)]));
   const dates = [...new Set([...Object.keys(b), ...Object.keys(a)])].sort();
   return dates.map(date => ({ date, from: b[date] || 'Off', to: a[date] || 'Off' })).filter(x => x.from !== x.to);
 }
@@ -651,6 +651,30 @@ async function viewWeek() {
   wireOffPanel(week, who, plan, week === thisWeek);
   if (!plan) return;
   v.querySelectorAll('[data-go]').forEach(b => b.onclick = () => { const d = plan.days[+b.dataset.go]; openVisit({ store: d.store, date: d.date, email, kind: d.kind, dayIndex: +b.dataset.go }); });
+  v.querySelectorAll('[data-gostop]').forEach(b => b.onclick = () => { const [i, j] = b.dataset.gostop.split(':').map(Number); const d = plan.days[i], x = d.stops[j]; openVisit({ store: x.store, date: d.date, email, kind: x.kind || 'first', dayIndex: i, stop: j }); });
+  // Adding a stop is more coverage, so no reason needed. The day's first store becomes the morning.
+  v.querySelectorAll('[data-addstop]').forEach(sel => sel.onchange = async () => {
+    const i = +sel.dataset.addstop, d = plan.days[i], st = sel.value;
+    d.stops = [...(d.stops || []), { store: st, part: d.stops?.length ? 'Stop ' + (d.stops.length + 2) : 'PM', kind: plan.days.some((x, j) => j < i && dayStores(x).includes(st)) ? 'second' : 'first', status: 'planned' }];
+    if (!d.part) d.part = 'AM';
+    plan.calls = (plan.calls || []).filter(c => c !== st);
+    plan.pivots = [...(plan.pivots || []), { date: d.date, from: d.store, to: dayText(d), reason: 'Added a stop', at: new Date().toISOString(), by: S.user.email }];
+    await S.be.savePlan(plan); toast(`${st} added to ${dayLabel(d.date)}.`); viewWeek();
+  });
+  // Taking a stop off is a schedule change: reason and alert, same as a swap.
+  v.querySelectorAll('[data-delstop]').forEach(b => b.onclick = () => {
+    const [i, j] = b.dataset.delstop.split(':').map(Number); const d = plan.days[i], x = d.stops[j];
+    const before = dayText(d);
+    const apply = async (reason, note) => {
+      d.stops.splice(j, 1); if (!d.stops.length && !d.anchor) delete d.part;
+      plan.pivots = [...(plan.pivots || []), { date: d.date, from: before, to: dayText(d), reason: reason ? `${reason}${note ? ': ' + note : ''}` : 'Removed a stop', at: new Date().toISOString(), by: S.user.email }];
+      await S.be.savePlan(plan);
+      if (reason) await sendScheduleAlert(who, week, reason, note, [{ date: d.date, from: before, to: dayText(d) }], 'stop');
+      toast(`${x.store} taken off ${dayLabel(d.date)}.${reason ? ` ${vpNames()} was alerted.` : ''}`); viewWeek();
+    };
+    if (!needsReason()) return apply(null, '');
+    askReason('#swapreason', `Taking ${x.store} off ${dayLabel(d.date)}`, apply);
+  });
   v.querySelectorAll('[data-swap]').forEach(sel => sel.onchange = async () => {
     const i = +sel.dataset.swap, d = plan.days[i], to = sel.value, from = d.store;
     const apply = async (reason, note) => {
@@ -706,8 +730,8 @@ function offPanel(week, off, to, who, canEdit, plan, isCurrent) {
 function offStores(week, off, who, plan) {
   const out = {};
   const same = plan && [...(plan.off || [])].sort().join() === [...off].sort().join();
-  const src = same ? plan.days : validOff(off) ? buildPlan({ weekStart: week, stores: who.stores || [], scores: S.scores, off, role: who.role }).days : [];
-  src.forEach(d => { if (d.store) out[d.date] = d.store; });
+  const src = same ? plan.days : validOff(off) ? newPlan(who, week, off).days : [];
+  src.forEach(d => { if (d.store) out[d.date] = dayText(d); });
   return out;
 }
 function wireOffPanel(week, who, plan, isCurrent) {
@@ -753,6 +777,11 @@ function rebuildPlan(plan, who, off, week) {
   // Logged visits and days already past stay as they were.
   const done = plan.days.filter(d => d.status === 'done' || d.date < today());
   const open = fresh.days.map(d => d.date).filter(dt => dt >= today() && !done.some(k => k.date === dt));
+  if (fresh.anchor) {
+    fresh.days = [...done, ...fresh.days.filter(d => open.includes(d.date))].sort((a, b) => a.date.localeCompare(b.date));
+    fresh.pivots = plan.pivots || []; fresh.dismissed = plan.dismissed || []; fresh.builtAt = plan.builtAt; fresh.basisDate = plan.basisDate;
+    return fresh;
+  }
   const byNeed = who.stores.slice().sort((a, b) => (S.scores[b]?.score ?? 0) - (S.scores[a]?.score ?? 0));
   const seen = new Set(done.filter(d => d.status === 'done').map(d => d.store));
   const order = [...byNeed.filter(s => !seen.has(s)), ...byNeed];
@@ -780,10 +809,36 @@ function remotePanel(plan, who, canEdit) {
     }).join('')}</div></div>`;
 }
 function newPlan(who, week, off) {
-  return { email: who.email, name: who.name || who.email,
+  const plan = { email: who.email, name: who.name || who.email,
     ...buildPlan({ weekStart: week, stores: who.stores, scores: S.scores, off: safeOff(off || who.off, who.role), role: who.role }),
     builtAt: new Date().toISOString(), basisDate: S.meta.latestDaily, pivots: [], dismissed: [] };
+  const m = (S.markets || []).find(x => x.leader === who.email && x.anchor && (who.stores || []).includes(x.anchor));
+  return m ? anchorPlan(plan, who, m.anchor, +m.anchorDays || 5) : plan;
 }
+// Anchor store: an underperforming store with no GM. The Market Leader spends the morning there on
+// anchor days to set the tone, then travels to a second store for the afternoon. The other stores
+// rotate through the afternoons and any full days left, highest need first.
+function anchorPlan(plan, who, anchor, n) {
+  const others = (who.stores || []).filter(s => s !== anchor).sort((a, b) => (S.scores[b]?.score ?? 0) - (S.scores[a]?.score ?? 0) || a.localeCompare(b));
+  let k = 0; const next = () => others.length ? others[k++ % others.length] : null;
+  const seen = new Set();
+  const kindOf = st => { const kd = seen.has(st) ? 'second' : 'first'; seen.add(st); return kd; };
+  plan.days = plan.days.map((d, i) => {
+    if (i < n) {
+      const pm = next();
+      const day = { date: d.date, store: anchor, kind: kindOf(anchor), anchor: true, part: 'AM', status: 'planned', score: S.scores[anchor]?.score ?? null, stops: [] };
+      if (pm) day.stops.push({ store: pm, part: 'PM', kind: kindOf(pm), status: 'planned' });
+      return day;
+    }
+    const st = next() || anchor;
+    return { date: d.date, store: st, kind: kindOf(st), status: 'planned', score: S.scores[st]?.score ?? null };
+  });
+  plan.anchor = anchor; plan.anchorDays = n;
+  plan.calls = others.filter(s => !plan.days.some(d => d.store === s || (d.stops || []).some(x => x.store === s)));
+  return plan;
+}
+const dayStores = d => d ? [d.store, ...(d.stops || []).map(x => x.store)].filter(Boolean) : [];
+const dayText = d => dayStores(d).join(' + ') || 'Open day';
 function wirePicker() { const lp = $('#lp'); if (lp) lp.onchange = () => { S.viewEmail = lp.value; viewWeek(); }; }
 function pivotCard(s) {
   return `<div class="pivot" role="region" aria-label="Suggested change">
@@ -803,12 +858,15 @@ function dayCard(d, i, plan, canEdit) {
   const stores = S.users.find(u => u.email === plan.email)?.stores || (plan.email === S.user.email ? S.user.stores : Object.keys(plan.basis));
   return `<article class="day ${isToday ? 'today' : ''} ${d.status === 'done' ? 'isdone' : ''}">
     <div class="row" style="justify-content:space-between"><span class="dname">${esc(DAY_LONG[dow(d.date)])} ${esc(shortDate(d.date))}</span>${needChip(sc?.score)}</div>
-    <div class="store">${esc(d.store || 'Open day')}</div>
-    <div class="row">${kind}${state}</div>
+    <div class="store">${esc(d.store || 'Open day')}${d.part ? ` <span class="part">${d.part}</span>` : ''}</div>
+    <div class="row">${d.anchor ? '<span class="pill anchor">Anchor store</span>' : ''}${kind}${state}</div>
+    ${(d.stops || []).map((x, j) => `<div class="stop"><span class="part">${esc(x.part || 'Stop')}</span><b>${esc(x.store)}</b>${needChip(S.scores[x.store]?.score)}${x.status === 'done' ? '<span class="pill done">Visited</span>' : ''}
+      <span class="row" style="gap:6px;margin-left:auto"><button class="btn tiny" type="button" data-gostop="${i}:${j}">${x.status === 'done' ? 'See visit' : 'Open'}</button>${canEdit && x.status !== 'done' && !past ? `<button class="link" type="button" data-delstop="${i}:${j}" aria-label="Remove ${esc(x.store)}">Remove</button>` : ''}</span></div>`).join('')}
     ${d.status !== 'done' && sc?.parts?.length ? `<ul>${sc.parts.slice(0, 2).map(p => `<li>${esc(p.text)}</li>`).join('')}</ul>` : ''}
     ${d.status !== 'done' && S.teams?.[d.store] && (S.teams[d.store].below.length || S.teams[d.store].slipping.length) ? `<p class="small" style="margin:0"><b>See first:</b> ${[...S.teams[d.store].below.map(r => esc(titleName(r.name)) + ' (below min)'), ...S.teams[d.store].slipping.map(r => esc(titleName(r.name)) + ' (slipping)')].slice(0, 3).join(', ')}</p>` : ''}
     <div class="foot">
       ${d.store ? `<button class="btn tiny ${isToday ? 'primary' : ''}" data-go="${i}">${d.status === 'done' ? 'See visit' : 'Open visit'}</button>` : ''}
+      ${canEdit && !past && d.store ? `<select data-addstop="${i}" aria-label="Add a stop on ${esc(DAY_LONG[dow(d.date)])}"><option value="" disabled selected>+ Add a stop</option>${stores.filter(s => !dayStores(d).includes(s)).map(s => `<option>${esc(s)}</option>`).join('')}</select>` : ''}
       ${canEdit && d.status !== 'done' && !past ? `<select data-swap="${i}" aria-label="Change store for ${esc(DAY_LONG[dow(d.date)])}"><option value="" disabled selected>Change store</option>${stores.filter(s => s !== d.store).map(s => `<option>${esc(s)}</option>`).join('')}</select>` : ''}
     </div>
   </article>`;
@@ -827,19 +885,26 @@ async function openVisit(x) {
     const vid = `${x.email}_${x.date}_${slug(x.store)}`;
     const started = S.visits.some(v => v.id === vid) || localGet(vid);
     const planned = day?.store || (plan && idx < 0 ? 'Off' : null);
-    if (plan && planned && planned !== x.store && day?.status !== 'done' && !started) {
+    if (plan && planned && !dayStores(day).includes(x.store) && !(day?.status === 'done' && !day.stops?.length) && !started) {
       S.visit = null; window.scrollTo(0, 0);
       const v = $('#view');
       v.innerHTML = `<div class="panel"><p class="eyebrow">${esc(dayLabel(x.date))}</p>
         <h2 style="margin:0 0 6px">${planned === 'Off' ? `This is your day off` : `Your plan has you at ${esc(planned)}`}</h2>
-        <p style="margin:0 0 12px">You're opening a full-day visit at <b>${esc(x.store)}</b>.${planned !== 'Off' ? ` Going to ${esc(planned)} instead? ` : ''}</p>
-        ${planned !== 'Off' ? `<div class="row" style="margin:0 0 14px"><button class="btn" id="goplan" type="button">Open ${esc(planned)} instead</button></div>` : ''}
+        <p style="margin:0 0 12px">You're opening a visit at <b>${esc(x.store)}</b>.${planned !== 'Off' ? ` Going to ${esc(planned)} instead? ` : ''}</p>
+        ${planned !== 'Off' ? `<div class="row" style="margin:0 0 8px"><button class="btn" id="goplan" type="button">Open ${esc(planned)} instead</button><button class="btn primary" id="addplan" type="button">Add ${esc(x.store)} as a stop today</button></div><p class="small" style="margin:0 0 12px">Adding a stop keeps ${esc(dayText(day))} on your day. Replacing it takes a reason below.</p>` : ''}
         <div id="visitreason"></div></div>`;
       const gp = $('#goplan'); if (gp) gp.onclick = () => openVisit({ ...x, store: planned, kind: day.kind, dayIndex: idx });
-      askReason('#visitreason', `Why ${x.store} instead${planned === 'Off' ? ' of a day off' : ` of ${planned}`}?`, async (reason, note) => {
+      const ap = $('#addplan'); if (ap) ap.onclick = async () => {
+        day.stops = [...(day.stops || []), { store: x.store, part: day.stops?.length ? 'Stop ' + (day.stops.length + 2) : 'PM', kind: 'first', status: 'planned' }];
+        if (!day.part) day.part = 'AM';
+        plan.pivots = [...(plan.pivots || []), { date: x.date, from: planned, to: dayText(day), reason: 'Added a stop', at: new Date().toISOString(), by: S.user.email }];
+        await S.be.savePlan(plan); toast(`${x.store} added as a stop today.`);
+        openVisit({ ...x, reasonOk: true, kind: 'first', dayIndex: idx });
+      };
+      askReason('#visitreason', `Why ${x.store} instead${planned === 'Off' ? ' of a day off' : ` of ${dayText(day)}`}?`, async (reason, note) => {
         if (day) {
           plan.pivots = [...(plan.pivots || []), { date: x.date, from: day.store, to: x.store, reason: `${reason}${note ? ': ' + note : ''}`, at: new Date().toISOString(), by: S.user.email }];
-          Object.assign(day, { store: x.store, kind: plan.days.some((d, j) => j !== idx && d.store === x.store && d.date < x.date) ? 'second' : 'first', score: S.scores[x.store]?.score ?? null });
+          Object.assign(day, { store: x.store, kind: plan.days.some((d, j) => j !== idx && d.store === x.store && d.date < x.date) ? 'second' : 'first', score: S.scores[x.store]?.score ?? null, stops: [], anchor: false }); delete day.part;
           plan.calls = (plan.calls || []).filter(c => c !== x.store);
           await S.be.savePlan(plan);
         }
@@ -1028,7 +1093,7 @@ async function viewVisit() {
   <div class="spread">
     <div>
       <button class="link" id="back" style="padding-left:0">‹ Back</button>
-      <p class="eyebrow">${x.remote ? 'Remote coaching · ' : 'Full-day visit · '}${esc(longDate(x.date))} · ${esc(who.name || who.email)}${leader && leader.email !== who.email ? ' · Market Leader: ' + esc(leader.name || leader.email) : ''}</p>
+      <p class="eyebrow">${x.remote ? 'Remote coaching · ' : (() => { const pd = (S.vPlans || []).flatMap(p => p.days || []).find(d => d.date === x.date && dayStores(d).includes(x.store)); if (!pd || dayStores(pd).length < 2) return 'Full-day visit · '; const part = pd.store === x.store ? (pd.part || 'AM') : (pd.stops.find(y => y.store === x.store)?.part || 'Stop'); return `${pd.anchor && pd.store === x.store ? 'Anchor store, ' : ''}${part} visit · `; })()}${esc(longDate(x.date))} · ${esc(who.name || who.email)}${leader && leader.email !== who.email ? ' · Market Leader: ' + esc(leader.name || leader.email) : ''}</p>
       <h2 class="big" style="margin:0">${esc(x.store)}</h2>
       <p class="small" style="margin:4px 0 0">${dataLine()}</p>
     </div>
@@ -1468,7 +1533,9 @@ function wireVisit(V, canLog, snap) {
         if (plan) { plan.remoteDone = [...new Set([...(plan.remoteDone || []), V.store])]; await S.be.savePlan(plan); }
       } else {
         const day = plan?.days.find(d => d.date === V.date && d.store === V.store);
+        const stopDay = !day && plan?.days.find(d => d.date === V.date && (d.stops || []).some(x => x.store === V.store));
         if (day && day.status !== 'done') { day.status = 'done'; await S.be.savePlan(plan); }
+        else if (stopDay) { stopDay.stops.find(x => x.store === V.store).status = 'done'; await S.be.savePlan(plan); }
       }
     } catch (e) {}
     localDrop(V.id);
@@ -1633,12 +1700,12 @@ async function viewBriefInner() {
   const todayDay = plan?.days.find(d => d.date === t);
   const sugg = plan && S.meta.latestDaily > plan.basisDate ? pivotSuggestion({ plan, scores: S.scores, today: t, dismissed: plan.dismissed || [] }) : null;
   const oppStores = [...new Set([...storeOpps.map(o => o.s), ...below.map(o => o.s), ...slipping.map(o => o.s), ...dragList.map(o => o.s)])];
-  const remoteNext = oppStores.filter(s => s !== todayDay?.store).sort((a, b) => (S.scores[b]?.score ?? 0) - (S.scores[a]?.score ?? 0));
+  const remoteNext = oppStores.filter(s => !dayStores(todayDay).includes(s)).sort((a, b) => (S.scores[b]?.score ?? 0) - (S.scores[a]?.score ?? 0));
   const li = arr => arr.length ? `<ul class="blist">${arr.join('')}</ul>` : '<p class="small muted">Nothing here today.</p>';
   const nm = n => esc(titleName(n));
   // Opportunities at stores you're not in today get a remote coaching button.
   const remoteToday = new Set(S.visits.filter(x => x.remote && x.email === email && x.date === t).map(x => x.store));
-  const rbtn = (store, extra = {}) => store === todayDay?.store ? '<span class="pill set">You\'re there today</span>'
+  const rbtn = (store, extra = {}) => dayStores(todayDay).includes(store) ? '<span class="pill set">You\'re there today</span>'
     : remoteToday.has(store) ? '<span class="pill done">Coached remotely today</span>'
     : `<button type="button" class="btn tiny" data-rc='${esc(JSON.stringify({ store, ...extra }))}'>Coach remotely</button>`;
 
@@ -1650,7 +1717,7 @@ async function viewBriefInner() {
   </div>
   <section class="panel today">
     <h3>Today</h3>
-    ${todayDay?.store ? `<p style="margin:0 0 4px"><b>Full-day visit: ${esc(todayDay.store)}</b> ${needChip(S.scores[todayDay.store]?.score)} ${todayDay.status === 'done' ? '<span class="pill done">Visited</span>' : ''}</p>
+    ${todayDay?.store ? `<p style="margin:0 0 4px"><b>${todayDay.stops?.length ? `${todayDay.anchor ? 'Anchor store, ' : ''}${esc(todayDay.part || 'AM')}: ${esc(todayDay.store)}` : `Full-day visit: ${esc(todayDay.store)}`}</b> ${needChip(S.scores[todayDay.store]?.score)} ${todayDay.status === 'done' ? '<span class="pill done">Visited</span>' : ''}${(todayDay.stops || []).map(x => `<br><b>${esc(x.part || 'Stop')}: ${esc(x.store)}</b> ${needChip(S.scores[x.store]?.score)} ${x.status === 'done' ? '<span class="pill done">Visited</span>' : `<button class="link" type="button" data-bstop="${esc(x.store)}">Open</button>`}`).join('')}</p>
       <p class="small">${esc((S.scores[todayDay.store]?.parts || []).slice(0, 2).map(p => p.text).join('. '))}</p>
       <div class="row"><button class="btn primary" id="bgo">Open today's visit</button></div>`
       : `<p style="margin:0">${plan ? 'No store visit on your plan today.' : 'No plan yet this week.'}</p>`}
@@ -1698,6 +1765,7 @@ async function viewBriefInner() {
     <div class="row"><button class="btn primary" id="bmsg">Open team messages</button></div>
   </section>`;
   wirePick();
+  v.querySelectorAll('[data-bstop]').forEach(b => b.onclick = () => openVisit({ store: b.dataset.bstop, date: t, email, kind: 'first', dayIndex: plan.days.indexOf(todayDay) }));
   const g = $('#bgo'); if (g) g.onclick = () => openVisit({ store: todayDay.store, date: t, email, kind: todayDay.kind, dayIndex: plan.days.indexOf(todayDay) });
   const w = $('#bweek'); if (w) w.onclick = () => { S.tab = 'week'; renderShell(); };
   v.querySelectorAll('[data-bremote]').forEach(x => x.onclick = () => openVisit({ store: x.dataset.bremote, date: t, email, kind: 'remote', remote: true }));
@@ -1830,7 +1898,7 @@ async function viewOne() {
   // How the leader ran the week.
   const vw = S.visits.filter(x => x.email === email && x.date >= ws && x.date <= we && x.status !== 'draft');
   const inPerson = vw.filter(x => !x.remote), remote = vw.filter(x => x.remote);
-  const planned = (plan?.days || []).filter(d => d.store).length;
+  const planned = (plan?.days || []).reduce((t, d) => t + dayStores(d).length, 0);
   const coachedN = vw.reduce((t, x) => t + (x.consultants || []).length, 0);
   const practiceN = vw.reduce((t, x) => t + (x.consultants || []).filter(c => Object.keys(c.drill?.scored || c.lead?.scored || {}).length).length, 0);
   const commitN = vw.reduce((t, x) => t + (x.actions || []).filter(hasCommitment).length, 0);
@@ -2341,7 +2409,10 @@ function marketsSection(groups) {
         <div style="margin:0 0 12px">${fieldInput('mname', 'Market name', m.name, '', '', 'required placeholder="For example: Jacksonville" style="width:100%"')}</div>
         <label for="mleader">Market Leader<select id="mleader"><option value="">None yet</option>${byRole('leader').map(u => `<option value="${esc(u.email)}" ${m.leader === u.email ? 'selected' : ''}>${esc(u.name || u.email)}</option>`).join('')}</select></label>
         <label for="mdirector">Director<select id="mdirector"><option value="">None yet</option>${byRole('director').map(u => `<option value="${esc(u.email)}" ${m.director === u.email ? 'selected' : ''}>${esc(u.name || u.email)}</option>`).join('')}</select></label>
+        <label for="manchor">Anchor store <span class="small muted">(optional)</span><select id="manchor"><option value="">No anchor store</option>${STORES.map(st => `<option ${m.anchor === st.name ? 'selected' : ''}>${esc(st.name)}</option>`).join('')}</select></label>
+        <label for="manchordays">Anchor mornings per week<select id="manchordays">${[5, 4, 3, 2, 1].map(n => `<option value="${n}" ${(+m.anchorDays || 5) === n ? 'selected' : ''}>${n === 5 ? 'Every work day (5)' : n}</option>`).join('')}</select></label>
       </div>
+      <p class="small" style="margin:0 0 8px">Anchor store: an underperforming store with no GM. The Market Leader spends the morning there on anchor days to set the tone, then goes to a second store for the afternoon. It must be one of this market's stores.</p>
       <p class="small" style="margin:0 0 8px">Not on the list? Add them under Logins below with the Market Leader or Director role, then come back.</p>
       <p class="small" style="margin:4px 0"><b>Stores</b> (greyed out = in another market; checking it moves it here)</p>
       <div class="storepick">${Object.entries(groups).map(([k, arr]) => `<div class="grp">${esc(DISTRICTS[k])}</div>${arr.map(st => {
@@ -2354,7 +2425,7 @@ function marketsSection(groups) {
     </form>` : ''}
     <div class="scroller"><table class="grid"><thead><tr><th>Market</th><th>Market Leader</th><th>Director</th><th>Stores</th><th></th></tr></thead><tbody>
       ${ms.map(x => `<tr><td class="nm">${esc(x.name)}</td><td>${esc(nameOf(x.leader)) || '<span class="warn">None</span>'}</td><td>${esc(nameOf(x.director)) || '<span class="muted">None</span>'}</td>
-        <td style="white-space:normal;min-width:220px">${x.stores.map(esc).join(', ') || '<span class="muted">--</span>'}</td><td><button class="btn tiny" type="button" data-em="${esc(x.id)}">Edit</button></td></tr>`).join('') || '<tr><td colspan="5">No markets yet. Add your first one.</td></tr>'}
+        <td style="white-space:normal;min-width:220px">${x.stores.map(esc).join(', ') || '<span class="muted">--</span>'}${x.anchor ? `<br><span class="pill anchor">Anchor: ${esc(x.anchor)}, ${+x.anchorDays === 5 || !x.anchorDays ? 'every work day' : x.anchorDays + ' mornings'}</span>` : ''}</td><td><button class="btn tiny" type="button" data-em="${esc(x.id)}">Edit</button></td></tr>`).join('') || '<tr><td colspan="5">No markets yet. Add your first one.</td></tr>'}
     </tbody></table></div>
   </section>`;
 }
@@ -2376,7 +2447,9 @@ function wireMarkets() {
     const name = $('#mname').value.trim(); if (!name) return toast('Give the market a name.', true);
     const stores = [...f.querySelectorAll('.storepick input:checked')].map(x => x.value);
     const id = S.editMarket === '__new' ? slug(name) + '-' + Date.now().toString(36) : S.editMarket;
-    const doc = { id, name, leader: $('#mleader').value, director: $('#mdirector').value, stores };
+    const anchor = $('#manchor').value;
+    if (anchor && !stores.includes(anchor)) return toast(`${anchor} isn't checked as one of this market's stores.`, true);
+    const doc = { id, name, leader: $('#mleader').value, director: $('#mdirector').value, stores, anchor, anchorDays: anchor ? +$('#manchordays').value : null };
     const list = (S.markets || []).filter(x => x.id !== id).map(x => ({ ...x, stores: x.stores.filter(st => !stores.includes(st)) }));
     list.push(doc); list.sort((a, b) => a.name.localeCompare(b.name));
     saveMarketList(list, `${name} saved.`);

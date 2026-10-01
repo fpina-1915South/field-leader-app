@@ -188,10 +188,11 @@ export function buildPlan({ weekStart, stores, scores, off = DEFAULT_OFF, role =
 // Suggest one swap at a time. The leader accepts or keeps the plan.
 export const PIVOT_GAP = 15;
 export function pivotSuggestion({ plan, scores, today, dismissed = [] }) {
-  const ahead = plan.days.map((d, i) => ({ ...d, i })).filter(d => d.date > today && d.status === 'planned' && d.store);
+  // Anchor days stay put: the leader is there on purpose, every one of those mornings.
+  const ahead = plan.days.map((d, i) => ({ ...d, i })).filter(d => d.date > today && d.status === 'planned' && d.store && !d.anchor);
   if (!ahead.length) return null;
   const count = s => plan.days.filter(d => d.store === s && (d.date > today || d.status === 'done')).length;
-  const aheadSet = new Set(ahead.map(d => d.store));
+  const aheadSet = new Set([...ahead.map(d => d.store), ...plan.days.filter(d => d.date > today).flatMap(d => [d.anchor ? d.store : null, ...(d.stops || []).map(x => x.store)]).filter(Boolean)]);
   const candidates = Object.keys(plan.basis)
     .filter(s => !aheadSet.has(s))
     .map(s => ({ store: s, score: scores[s]?.score ?? 0, was: plan.basis[s] ?? 0 }))
