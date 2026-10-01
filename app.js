@@ -50,7 +50,7 @@ async function readSpreadsheet(file) {
   const XLSX = await import('https://cdn.jsdelivr.net/npm/xlsx@0.18.5/+esm');
   const wb = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: true });
   // Roster exports keep the team on a "Sales Team" sheet; everything else is the first sheet.
-  const name = wb.SheetNames.find(n => /sales team/i.test(n)) || wb.SheetNames[0];
+  const name = wb.SheetNames.find(n => /sales team|store leaders/i.test(n)) || wb.SheetNames[0];
   return XLSX.utils.sheet_to_json(wb.Sheets[name], { defval: '' });
 }
 const storeOptions = (selected, list = STORES.map(s => s.name), extra = '') => {
@@ -913,7 +913,8 @@ function autoAnchor(stores) {
   const top = rows[0], rest = rows.slice(1), avg = rest.reduce((t, r) => t + r.sc, 0) / rest.length;
   const bud = top.m?.vsBud?.netSales, spg = top.m?.vsLy?.spg;
   const listOnFile = (S.storeLeaders || []).length > 0;
-  const noLeader = listOnFile && !(S.storeLeaders || []).some(l => l.store === top.s);
+  const withRoles = (S.storeLeaders || []).some(l => isGM(l.role));
+  const noLeader = listOnFile && !(S.storeLeaders || []).some(l => l.store === top.s && (!withRoles || isGM(l.role)));
   const gap = top.sc - avg, short = (bud != null && bud <= -10) || (spg != null && spg <= -10);
   const yes = (top.sc >= 55 && short && gap >= 15) || (top.sc >= 45 && noLeader && gap >= 10);
   if (!yes) return { whyNot: `No store stands out enough. ${top.s} has the highest priority at ${top.sc}, ${Math.round(gap)} points above the rest of the market. The app anchors a store at 55+ priority (need weighted by revenue), 15+ points above the rest, and 10% or more short on sales or SPG with cancellations.` };
@@ -923,7 +924,7 @@ function autoAnchor(stores) {
   if (bud != null) why.push(`Sales ${pct(bud)} to budget this month`);
   if (spg != null) why.push(`SPG with cancellations ${pct(spg)} vs LY`);
   const t = S.teams?.[top.s]; if (t?.below?.length) why.push(`${t.below.length} consultant${t.below.length > 1 ? 's' : ''} below the minimum`);
-  if (noLeader) why.push('No store leader on file');
+  if (noLeader) why.push(withRoles ? 'No GM in the store' : 'No store leader on file');
   return { store: top.s, days: top.sc >= 75 ? 5 : top.sc >= 65 ? 4 : 3, source: 'app', why };
 }
 // Anchor store: an underperforming store with no GM. The Market Leader spends the morning there on
@@ -2418,14 +2419,17 @@ async function handleFiles(files) {
     catch (e) { out.push({ file: f.name, error: e.message }); }
   }
   // A roster in the same batch is used to match the RSA report.
-  const isRoster = h => h.has('location') && h.has('name');
-  const batchRoster = read.filter(x => isRoster(x.heads)).map(x => prepRoster(x.f.name, x.rows)).find(x => x.people);
+  // The store leadership file looks like the roster (location, role, name) but lists GMs and AGMs.
+  const isLeaders = (rows, h) => h.has('role') && h.has('name') && (h.has('stores') || rows.some(r => /general manager/i.test(String(r.Role ?? r.role ?? ''))));
+  read.forEach(x => { x.leaders = isLeaders(x.rows, x.heads); });
+  const isRoster = (h, x) => h.has('location') && h.has('name') && !x.leaders;
+  const batchRoster = read.filter(x => isRoster(x.heads, x)).map(x => prepRoster(x.f.name, x.rows)).find(x => x.people);
   for (const { f, rows, heads } of read) {
     try {
       if (heads.has('segment') && heads.has('metric')) out.push(prepDaily(f.name, rows));
       else if (heads.has('sales_associate')) out.push(prepRsa(f.name, rows, batchRoster?.people));
+      else if (read.find(x => x.f === f)?.leaders) out.push(prepStoreLeaders(f.name, rows));
       else if (heads.has('location') && heads.has('name')) out.push(prepRoster(f.name, rows));
-      else if (heads.has('email') && heads.has('stores') && heads.has('role')) out.push(prepStoreLeaders(f.name, rows));
       else out.push({ file: f.name, error: 'Not a daily report, RSA report, roster or store leader list. Check that the first row has the column names.' });
     } catch (e) { out.push({ file: f.name, error: e.message }); }
   }
@@ -2475,22 +2479,34 @@ function prepRsa(file, rows, rosterOverride) {
     publish: () => S.be.publishRsa({ from: range.from, to: range.to, file, people }) };
 }
 // Store leader list (store-leader-logins export): one leader per store. Names the leader on visits.
+// Store leadership: either the Store Leadership Contacts export (Location, Role, Name, Email; one row
+// per person, OPEN for empty seats) or the older logins file (email, name, role, stores).
+// It never touches the sales team roster. ASMs and Sales Leads can be on both: they lead and sell.
+const LEAD_RANK = r => /^general manager/i.test(r) ? 0 : /assistant general/i.test(r) ? 1 : /assistant selling|asm/i.test(r) ? 2 : /sales lead/i.test(r) ? 3 : 4;
+const isGM = r => /^general manager|^gm$/i.test(String(r || '').trim());
 function prepStoreLeaders(file, rows) {
-  const leaders = [], bad = new Set();
+  const leaders = [], open = [], bad = new Set();
   rows.forEach(r => {
     const o = {}; for (const [k, v] of Object.entries(r)) o[k.trim().toLowerCase()] = String(v ?? '').trim();
-    if (!o.name || !o.stores) return;
-    o.stores.split(/[;|,]/).map(x => x.trim()).filter(Boolean).forEach(st => {
+    const list = o.location ? [o.location] : String(o.stores || '').split(/[;|,]/).map(x => x.trim()).filter(Boolean);
+    if (!o.name || !list.length) return;
+    list.forEach(st => {
       const store = canonicalStore(st);
       if (!isKnownStore(store)) { bad.add(st); return; }
-      leaders.push({ store, name: o.name, email: (o.email || '').toLowerCase() });
+      const role = o.location ? o.role : (/leader/i.test(o.role) ? 'Store leader' : o.role);
+      if (/^open$/i.test(o.name)) { open.push({ store, role }); return; }
+      leaders.push({ store, name: o.name, email: (o.email || '').toLowerCase(), role });
     });
   });
+  leaders.sort((a, b) => a.store.localeCompare(b.store) || LEAD_RANK(a.role) - LEAD_RANK(b.role));
   const covered = new Set(leaders.map(l => l.store));
   const missing = STORES.filter(s => !covered.has(s.name)).map(s => s.name);
+  const hasRoles = leaders.some(l => isGM(l.role));
+  const noGM = hasRoles ? STORES.filter(s => !leaders.some(l => l.store === s.name && isGM(l.role))).map(s => s.name) : [];
+  const byRole = {}; leaders.forEach(l => { byRole[l.role] = (byRole[l.role] || 0) + 1; });
   return { file, kind: 'leaders', label: 'store leader list',
-    summary: `Store leaders · <b>${leaders.length}</b> across ${covered.size} stores`,
-    extra: (missing.length ? `<p class="small warn">No leader listed for: ${missing.map(esc).join(', ')}</p>` : '') + (bad.size ? `<p class="small warn">Rows skipped (store not recognized): ${[...bad].map(esc).join(', ')}</p>` : ''),
+    summary: `Store leaders · <b>${leaders.length}</b> across ${covered.size} stores${hasRoles ? ` · ${Object.entries(byRole).map(([r, n]) => `${n} ${esc(r)}${n > 1 ? 's' : ''}`).join(', ')}` : ''}${open.length ? ` · ${open.length} open seats` : ''}. The sales team roster is not changed.`,
+    extra: (noGM.length ? `<p class="small warn"><b>No GM (${noGM.length}):</b> ${noGM.map(esc).join(', ')}. The app weighs these when it picks anchor stores.</p>` : '') + (missing.length ? `<p class="small warn">No leader listed for: ${missing.map(esc).join(', ')}</p>` : '') + (bad.size ? `<p class="small warn">Rows skipped (store not recognized): ${[...bad].map(esc).join(', ')}</p>` : ''),
     publish: async () => { await S.be.saveStoreLeaders(leaders); S.storeLeaders = leaders; } };
 }
 function prepRoster(file, rows) {
@@ -2527,7 +2543,7 @@ function marketsSection(groups) {
         <label for="manchor">Anchor store<select id="manchor"><option value="">Let the app decide (default)</option><option value="__none" ${m.anchorMode === 'none' ? 'selected' : ''}>Never anchor this market</option>${STORES.map(st => `<option ${m.anchor === st.name ? 'selected' : ''}>${esc(st.name)}</option>`).join('')}</select></label>
         <label for="manchordays">Anchor mornings per week<select id="manchordays">${[5, 4, 3, 2, 1].map(n => `<option value="${n}" ${(+m.anchorDays || 5) === n ? 'selected' : ''}>${n === 5 ? 'Every work day (5)' : n}</option>`).join('')}</select></label>
       </div>
-      <p class="small" style="margin:0 0 8px">Anchor store: the Market Leader spends mornings there to set the tone, then goes to a second store for the afternoon. By default the app decides each week from the numbers (the store with the most at stake, weighting need by revenue, that is well above the rest and short on sales or SPG with cancellations, or has no store leader on file). Pick a store here to lock one in. The Market Leader can still change it for a week with a reason.</p>
+      <p class="small" style="margin:0 0 8px">Anchor store: the Market Leader spends mornings there to set the tone, then goes to a second store for the afternoon. By default the app decides each week from the numbers (the store with the most at stake, weighting need by revenue, that is well above the rest and short on sales or SPG with cancellations, or has no GM). Pick a store here to lock one in. The Market Leader can still change it for a week with a reason.</p>
       <p class="small" style="margin:0 0 8px">Not on the list? Add them under Logins below with the Market Leader or Director role, then come back.</p>
       <p class="small" style="margin:4px 0"><b>Stores</b> (greyed out = in another market; checking it moves it here)</p>
       <div class="storepick">${Object.entries(groups).map(([k, arr]) => `<div class="grp">${esc(DISTRICTS[k])}</div>${arr.map(st => {
