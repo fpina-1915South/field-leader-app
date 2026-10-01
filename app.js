@@ -272,7 +272,7 @@ function demoBackend() {
   let storeLeaders = [];
   let markets = [
     { id: 'jax', name: 'Jacksonville', leader: 'east@demo', director: 'director@demo', stores: ['Town Center', 'Orange Park', 'Yulee', 'St. Augustine'] },
-    { id: 'nc', name: 'Carolinas', leader: 'nc@demo', director: '', stores: ['Greensboro', 'Winston Salem', 'Burlington', 'Danville', 'Outlet Greensboro'], anchor: 'Danville', anchorDays: 5 },
+    { id: 'nc', name: 'Carolinas', leader: 'nc@demo', director: '', stores: ['Greensboro', 'Winston Salem', 'Burlington', 'Danville', 'Outlet Greensboro'] },
     { id: 'gulf', name: 'Gulf Coast', leader: 'gulf@demo', director: '', stores: ['Mobile', "D'Iberville", 'Spanish Fort', 'Pensacola', 'Crestview', 'Ft. Walton'] }
   ];
   // Last week, for the 1 on 1: a plan and visits for each leader, the RSA copy from the Saturday
@@ -422,10 +422,28 @@ async function loadShared() {
   S.lastVisit = latestVisitMap(visits);
   S.scores = scoresFor(daily);
 }
+// Priority = need, weighted by revenue. A big store a few points behind is more dollars than a small
+// store far behind, so volume moves a store up or down: a store doing twice the company average gets
+// about 1.7x its need, half the average gets about 0.6x (capped at 0.5x to 1.75x).
+const VOL_POW = 0.75, VOL_MIN = 0.5, VOL_MAX = 1.75;
 function scoresFor(daily) {
   const out = {};
   if (!daily) return out;
-  for (const st of STORES) if (daily.stores[st.name]) out[st.name] = needScore(daily.stores[st.name], { lastVisit: S.lastVisit[st.name], today: today(), team: S.teams?.[st.name] });
+  const sales = STORES.map(st => daily.stores[st.name]?.mtd?.k?.netSales).filter(v => v > 0);
+  const avg = sales.length ? sales.reduce((a, b) => a + b, 0) / sales.length : null;
+  const ranked = STORES.filter(st => daily.stores[st.name]?.mtd?.k?.netSales > 0).sort((a, b) => daily.stores[b.name].mtd.k.netSales - daily.stores[a.name].mtd.k.netSales).map(st => st.name);
+  const money = n => '$' + Math.round(n).toLocaleString('en-US');
+  for (const st of STORES) {
+    const snap = daily.stores[st.name]; if (!snap) continue;
+    const raw = needScore(snap, { lastVisit: S.lastVisit[st.name], today: today(), team: S.teams?.[st.name] });
+    const m = snap.mtd, ns = m?.k?.netSales, bud = m?.budget?.netSales;
+    const factor = avg && ns > 0 ? Math.max(VOL_MIN, Math.min(VOL_MAX, Math.pow(ns / avg, VOL_POW))) : 1;
+    const behind = ns != null && bud != null && bud > ns ? bud - ns : 0;
+    const lead = [];
+    if (behind > 0) lead.push({ key: 'dollars', pts: 0, text: `${money(behind)} behind budget this month` });
+    if (ns > 0 && factor >= 1.1) lead.push({ key: 'volume', pts: 0, text: `High-volume store: ${money(ns)} this month, #${ranked.indexOf(st.name) + 1} of ${ranked.length}` });
+    out[st.name] = { score: Math.min(100, Math.round(raw.score * factor)), need: raw.score, factor, behind, sales: ns ?? null, parts: [...lead, ...raw.parts] };
+  }
   return out;
 }
 const isAdmin = () => S.user?.role === 'admin';
@@ -517,7 +535,7 @@ const dataLine = () => {
   const age = daysApart(d, today());
   return `Numbers through <b>${esc(longDate(d))}</b>${age > 2 ? ` <span class="warn">(${age} days old)</span>` : ''}${S.rsa?.to ? ` · Consultants through ${esc(shortDate(S.rsa.to))}` : ''}`;
 };
-const needChip = s => s == null ? '<span class="need low">--</span>' : `<span class="need ${band(s)}" title="Need score, 0 to 100">${s}</span>`;
+const needChip = s => s == null ? '<span class="need low">--</span>' : `<span class="need ${band(s)}" title="Priority: need weighted by revenue, 0 to 100">${s}</span>`;
 
 
 // ---------------------------------------------------------------- schedule change alerts
@@ -592,12 +610,14 @@ async function viewWeek() {
   let [plan, to] = await Promise.all([S.be.plan(email, week), S.be.timeOff(email, week)]);
   const canEdit = email === S.user.email || isAdmin();
   if (!plan && week === thisWeek && canEdit) {
-    plan = newPlan(who, week, to?.off);
+    const prevPlan = await S.be.plan(email, addDays(week, -7)).catch(() => null);
+    const carry = prevPlan?.anchorChoice && prevPlan.anchorChoice.mode !== 'auto' ? { ...prevPlan.anchorChoice, carried: true } : undefined;
+    plan = newPlan(who, week, to?.off, carry);
     await S.be.savePlan(plan);
   }
   // A plan built early (when days off were picked) refreshes with the newest numbers once its week starts.
   if (plan && week === thisWeek && canEdit && S.daily && (plan.preview ? S.meta.latestDaily > plan.basisDate : !plan.basisDate) && !plan.days.some(d => d.status === 'done')) {
-    plan = { ...newPlan(who, week, plan.off), pivots: plan.pivots || [], dismissed: plan.dismissed || [] };
+    plan = { ...newPlan(who, week, plan.off, plan.anchorChoice), pivots: plan.pivots || [], dismissed: plan.dismissed || [] };
     await S.be.savePlan(plan);
   }
   const t = today();
@@ -625,6 +645,7 @@ async function viewWeek() {
   ${!plan && S.daily && week < thisWeek ? `<div class="panel"><h2>No plan for this week</h2><p>Nothing was planned or logged.</p></div>` : ''}
   ${S.lastAlert && S.lastAlert.weekStart === week ? `<div class="warnbox" style="border-left-color:var(--green)"><b>${esc(vpNames())} was alerted in the app.</b> <a href="${alertMailto(S.lastAlert)}">Email them too</a></div>` : ''}
   <div id="swapreason" class="panel" hidden></div>
+  ${plan && week >= thisWeek ? anchorPanel(plan, who, canEdit) : ''}
   ${sugg ? pivotCard(sugg) : ''}
   ${week >= thisWeek && !plan ? offPanel(week, off, to, who, canEdit, plan, week === thisWeek) : ''}
   ${plan ? `
@@ -637,7 +658,7 @@ async function viewWeek() {
     </div>
     <div class="panel" style="align-self:start">
       <h3>Where you are needed most</h3>
-      <p class="small">Need score from the store numbers (sales and SPG with cancellations against budget and LY, close rate, cancellations, protection, finance), the consultants (below minimum or slipping this week) and days since the last visit. Higher needs you more.</p>
+      <p class="small">Priority from the store numbers (sales and SPG with cancellations against budget and LY, close rate, cancellations, protection, finance), the consultants (below minimum or slipping this week) and days since the last visit, weighted by revenue. High-volume stores move up because that's where the dollars are. Higher needs you more.</p>
       <ul class="rank">${who.stores.slice().sort((a, b) => (S.scores[b]?.score ?? -1) - (S.scores[a]?.score ?? -1)).map(s => `
         <li>${needChip(S.scores[s]?.score)}<span class="nm">${esc(s)}<small>${esc(S.scores[s]?.parts?.[0]?.text || 'No flags')}</small></span><button class="link" data-open="${esc(s)}">Open</button></li>`).join('')}</ul>
     </div>
@@ -650,6 +671,7 @@ async function viewWeek() {
   v.querySelectorAll('[data-remote]').forEach(b => b.onclick = () => openVisit({ store: b.dataset.remote, date: today(), email, kind: 'remote', remote: true }));
   wireOffPanel(week, who, plan, week === thisWeek);
   if (!plan) return;
+  wireAnchor(plan, who, week, week === thisWeek);
   v.querySelectorAll('[data-go]').forEach(b => b.onclick = () => { const d = plan.days[+b.dataset.go]; openVisit({ store: d.store, date: d.date, email, kind: d.kind, dayIndex: +b.dataset.go }); });
   v.querySelectorAll('[data-gostop]').forEach(b => b.onclick = () => { const [i, j] = b.dataset.gostop.split(':').map(Number); const d = plan.days[i], x = d.stops[j]; openVisit({ store: x.store, date: d.date, email, kind: x.kind || 'first', dayIndex: i, stop: j }); });
   // Adding a stop is more coverage, so no reason needed. The day's first store becomes the morning.
@@ -706,6 +728,58 @@ async function viewWeek() {
     };
   }
 }
+// ---------------------------------------------------------------- anchor store
+function anchorPanel(plan, who, canEdit) {
+  const aw = plan.anchorWhy || {};
+  const ch = plan.anchorChoice || { mode: 'auto' };
+  const auto = autoAnchor(who.stores || []);
+  const src = { leader: `${who.email === S.user.email ? 'You' : esc(firstOf(who.name) || 'They')} picked it${ch.carried ? ' (carried from last week)' : ''}`, admin: 'Set on the market in Setup', app: 'The app picked it from the numbers' }[aw.source] || '';
+  const head = aw.store ? `<b>${esc(aw.store)}</b>, ${aw.days === plan.days.length ? 'every work day' : aw.days + ' mornings'} this week. <span class="small muted">${src}.</span>`
+    : `<b>No anchor store this week.</b> <span class="small muted">${ch.mode === 'none' ? (who.email === S.user.email ? 'You turned it off.' : 'Turned off for this week.') : esc(aw.why || '')}</span>`;
+  const why = aw.store && (aw.why || []).length ? `<ul class="blist small" style="margin:6px 0 0">${aw.why.map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : '';
+  const appSays = (auto.store || '') !== (aw.store || '') ? `<p class="small" style="margin:6px 0 0"><b>The numbers say:</b> ${auto.store ? `${esc(auto.store)}, ${auto.days} mornings.` : 'no anchor needed.'}</p>` : '';
+  const stores = who.stores || [];
+  return `<section class="panel" style="border-left:6px solid #F68C2C">
+    <div class="spread" style="margin:0"><div><p class="eyebrow">Anchor store</p><p style="margin:0">${head}</p>${why}${appSays}</div>
+    ${canEdit && who.role === 'leader' ? `<button class="btn tiny" type="button" id="anchoredit">Change</button>` : ''}</div>
+    <div id="anchorform" hidden style="margin-top:12px">
+      <p class="small" style="margin:0 0 8px">An anchor store gets your mornings to set the tone, then you go to a second store for the afternoon. Use it for a store that's struggling, a store without a GM, or a new leader who needs you there. You know things the numbers don't.</p>
+      <div class="two">
+        <label for="anmode">Anchor<select id="anmode"><option value="auto" ${ch.mode === 'auto' ? 'selected' : ''}>Let the app decide${auto.store ? ` (${esc(auto.store)})` : ' (none right now)'}</option>${stores.map(s => `<option value="store:${esc(s)}" ${ch.mode === 'store' && ch.store === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}<option value="none" ${ch.mode === 'none' ? 'selected' : ''}>No anchor this week</option></select></label>
+        <label for="andays">Mornings this week<select id="andays">${[5, 4, 3, 2, 1].filter(n => n <= plan.days.length).map(n => `<option value="${n}" ${(+ch.days || aw.days || 5) === n ? 'selected' : ''}>${n === plan.days.length ? `Every work day (${n})` : n}</option>`).join('')}</select></label>
+      </div>
+      <div id="anreason" style="margin-top:10px"></div>
+      <div class="row" style="margin-top:10px"><button class="btn primary" type="button" id="ansave">Save and rebuild my week</button><button class="link" type="button" id="ancancel">Cancel</button><span class="small muted">Visits already logged stay put.</span></div>
+    </div>
+  </section>`;
+}
+function wireAnchor(plan, who, week, isCurrent) {
+  const ed = $('#anchoredit'); if (!ed) return;
+  const form = $('#anchorform');
+  ed.onclick = () => { form.hidden = false; ed.hidden = true; };
+  $('#ancancel').onclick = () => viewWeek();
+  $('#ansave').onclick = async () => {
+    const v = $('#anmode').value, days = +$('#andays').value;
+    const choice = v === 'auto' ? { mode: 'auto' } : v === 'none' ? { mode: 'none' } : { mode: 'store', store: v.slice(6), days };
+    if (choice.mode === 'auto') choice.days = null;
+    const auto = autoAnchor(who.stores || []);
+    const save = async (reason, note) => {
+      if (reason) choice.reason = `${reason}${note ? ': ' + note : ''}`;
+      choice.by = S.user.email; choice.at = new Date().toISOString();
+      const fresh = isCurrent ? rebuildPlan(plan, who, plan.off, week, choice) : { ...newPlan(who, week, plan.off, choice), preview: plan.preview, pivots: plan.pivots || [], dismissed: plan.dismissed || [] };
+      fresh.anchorChoice = choice;
+      const label = choice.mode === 'auto' ? `the app's pick (${auto.store || 'none'})` : choice.mode === 'none' ? 'no anchor' : `${choice.store}, ${days} mornings`;
+      fresh.pivots = [...(fresh.pivots || []), { date: today(), from: 'Anchor', to: label, reason: choice.reason || 'Anchor changed', at: choice.at, by: S.user.email }];
+      await S.be.savePlan(fresh);
+      if (reason) await sendScheduleAlert(who, week, reason, `Anchor store set to ${label}. The numbers say ${auto.store ? auto.store + ', ' + auto.days + ' mornings' : 'no anchor'}.${note ? ' ' + note : ''}`, scheduleDiff(plan.days, fresh.days), 'anchor');
+      toast(`Anchor: ${label}. Week rebuilt.${reason ? ` ${vpNames()} was alerted.` : ''}`); viewWeek();
+    };
+    // Going with the numbers needs no reason. Overriding them does, and the VP hears about it.
+    const overrides = choice.mode !== 'auto' && !(choice.mode === 'store' && choice.store === auto.store);
+    if (overrides && needsReason()) { $('#ansave').disabled = true; return askReason('#anreason', 'Why this anchor? Tell your VP what you know.', save); }
+    try { await save(null, ''); } catch (e) { toast(friendly(e), true); }
+  };
+}
 // ---------------------------------------------------------------- days off
 // Leaders pick any 2 days off for each week. Saving builds (or rebuilds) that week's plan right away.
 function offPanel(week, off, to, who, canEdit, plan, isCurrent) {
@@ -730,7 +804,7 @@ function offPanel(week, off, to, who, canEdit, plan, isCurrent) {
 function offStores(week, off, who, plan) {
   const out = {};
   const same = plan && [...(plan.off || [])].sort().join() === [...off].sort().join();
-  const src = same ? plan.days : validOff(off) ? newPlan(who, week, off).days : [];
+  const src = same ? plan.days : validOff(off) ? newPlan(who, week, off, plan?.anchorChoice).days : [];
   src.forEach(d => { if (d.store) out[d.date] = dayText(d); });
   return out;
 }
@@ -750,7 +824,7 @@ function wireOffPanel(week, who, plan, isCurrent) {
     const picked = [...$('#view').querySelectorAll('.offday.isoff')].map(b => +b.dataset.offday).sort();
     if (!validOff(picked)) return toast('Pick exactly 2 days off.', true);
     const to0 = await S.be.timeOff(who.email, week).catch(() => null);
-    const build = () => (isCurrent && plan) ? rebuildPlan(plan, who, picked, week) : { ...newPlan(who, week, picked), preview: !isCurrent, pivots: plan?.pivots || [], dismissed: plan?.dismissed || [] };
+    const build = () => (isCurrent && plan) ? rebuildPlan(plan, who, picked, week) : { ...newPlan(who, week, picked, plan?.anchorChoice), preview: !isCurrent, pivots: plan?.pivots || [], dismissed: plan?.dismissed || [] };
     const commit = async (reason, note) => {
       const fresh = build();
       await S.be.saveTimeOff({ email: who.email, weekStart: week, off: picked, at: new Date().toISOString(), by: S.user.email, ...(reason ? { reason, note } : {}) });
@@ -772,8 +846,8 @@ function wireOffPanel(week, who, plan, isCurrent) {
 }
 // Keep logged visits on their days, then fill the other work days from today on: stores not seen yet
 // first (highest need first), then second visits to the highest-need stores.
-function rebuildPlan(plan, who, off, week) {
-  const fresh = newPlan(who, week, off);
+function rebuildPlan(plan, who, off, week, choice) {
+  const fresh = newPlan(who, week, off, choice === undefined ? plan.anchorChoice : choice);
   // Logged visits and days already past stay as they were.
   const done = plan.days.filter(d => d.status === 'done' || d.date < today());
   const open = fresh.days.map(d => d.date).filter(dt => dt >= today() && !done.some(k => k.date === dt));
@@ -808,23 +882,64 @@ function remotePanel(plan, who, canEdit) {
         ${canEdit ? `<button type="button" class="btn tiny" data-remote="${esc(s)}">${done.some(v => v.date === t) ? 'Open today\'s' : 'Log remote coaching'}</button>` : ''}</div>`;
     }).join('')}</div></div>`;
 }
-function newPlan(who, week, off) {
+function newPlan(who, week, off, choice) {
   const plan = { email: who.email, name: who.name || who.email,
     ...buildPlan({ weekStart: week, stores: who.stores, scores: S.scores, off: safeOff(off || who.off, who.role), role: who.role }),
     builtAt: new Date().toISOString(), basisDate: S.meta.latestDaily, pivots: [], dismissed: [] };
-  const m = (S.markets || []).find(x => x.leader === who.email && x.anchor && (who.stores || []).includes(x.anchor));
-  return m ? anchorPlan(plan, who, m.anchor, +m.anchorDays || 5) : plan;
+  if (choice) plan.anchorChoice = choice;
+  const a = anchorFor(who, choice);
+  plan.anchorWhy = a ? { store: a.store, days: a.days, source: a.source, why: a.why } : { none: true, why: autoAnchor(who.stores || []).whyNot || '' };
+  return a ? anchorPlan(plan, who, a.store, a.days) : plan;
+}
+// Who decides the anchor, in order: the Market Leader's choice for the week (they may know something
+// the numbers don't), then an anchor Frank set on the market in Setup, then the app from the numbers.
+function anchorFor(who, choice) {
+  const mine = who.stores || [];
+  if (choice?.mode === 'none') return null;
+  if (choice?.mode === 'store' && mine.includes(choice.store)) return { store: choice.store, days: +choice.days || 5, source: 'leader', why: choice.reason ? [choice.reason] : [] };
+  const m = (S.markets || []).find(x => x.leader === who.email);
+  if (m?.anchorMode === 'none') return null;
+  if (m?.anchor && mine.includes(m.anchor)) return { store: m.anchor, days: +m.anchorDays || 5, source: 'admin', why: ['Set on the market in Setup'] };
+  if (who.role !== 'leader') return null;
+  const auto = autoAnchor(mine);
+  return auto.store ? auto : null;
+}
+// The app's call: one store well below the rest of the market, short on sales or SPG with
+// cancellations, gets anchor mornings. No store leader on file makes the case stronger.
+// More need, more mornings: 75+ gets every work day, 65+ gets 4, otherwise 3.
+function autoAnchor(stores) {
+  const rows = stores.map(s => ({ s, sc: S.scores[s]?.score, m: S.daily?.stores?.[s]?.mtd })).filter(r => r.sc != null).sort((a, b) => b.sc - a.sc);
+  if (rows.length < 2) return { whyNot: rows.length ? 'Only one store in the market.' : 'No numbers yet.' };
+  const top = rows[0], rest = rows.slice(1), avg = rest.reduce((t, r) => t + r.sc, 0) / rest.length;
+  const bud = top.m?.vsBud?.netSales, spg = top.m?.vsLy?.spg;
+  const listOnFile = (S.storeLeaders || []).length > 0;
+  const noLeader = listOnFile && !(S.storeLeaders || []).some(l => l.store === top.s);
+  const gap = top.sc - avg, short = (bud != null && bud <= -10) || (spg != null && spg <= -10);
+  const yes = (top.sc >= 55 && short && gap >= 15) || (top.sc >= 45 && noLeader && gap >= 10);
+  if (!yes) return { whyNot: `No store stands out enough. ${top.s} has the highest priority at ${top.sc}, ${Math.round(gap)} points above the rest of the market. The app anchors a store at 55+ priority (need weighted by revenue), 15+ points above the rest, and 10% or more short on sales or SPG with cancellations.` };
+  const why = [`Priority ${top.sc}, ${Math.round(gap)} points above the rest of the market`];
+  const sc0 = S.scores[top.s];
+  if (sc0?.behind > 0) why.push(`$${Math.round(sc0.behind).toLocaleString('en-US')} behind budget this month${sc0.factor >= 1.1 ? ', one of the bigger stores' : ''}`);
+  if (bud != null) why.push(`Sales ${pct(bud)} to budget this month`);
+  if (spg != null) why.push(`SPG with cancellations ${pct(spg)} vs LY`);
+  const t = S.teams?.[top.s]; if (t?.below?.length) why.push(`${t.below.length} consultant${t.below.length > 1 ? 's' : ''} below the minimum`);
+  if (noLeader) why.push('No store leader on file');
+  return { store: top.s, days: top.sc >= 75 ? 5 : top.sc >= 65 ? 4 : 3, source: 'app', why };
 }
 // Anchor store: an underperforming store with no GM. The Market Leader spends the morning there on
 // anchor days to set the tone, then travels to a second store for the afternoon. The other stores
 // rotate through the afternoons and any full days left, highest need first.
 function anchorPlan(plan, who, anchor, n) {
+  n = Math.min(n, plan.days.length);
+  // Mid-week rebuilds only fill days from today on, so the anchor mornings go there first.
+  const t0 = today(), order = plan.days.map((d, i) => i).sort((a, b) => (plan.days[a].date < t0) - (plan.days[b].date < t0) || a - b);
+  const anchorIdx = new Set(order.slice(0, n));
   const others = (who.stores || []).filter(s => s !== anchor).sort((a, b) => (S.scores[b]?.score ?? 0) - (S.scores[a]?.score ?? 0) || a.localeCompare(b));
   let k = 0; const next = () => others.length ? others[k++ % others.length] : null;
   const seen = new Set();
   const kindOf = st => { const kd = seen.has(st) ? 'second' : 'first'; seen.add(st); return kd; };
   plan.days = plan.days.map((d, i) => {
-    if (i < n) {
+    if (anchorIdx.has(i)) {
       const pm = next();
       const day = { date: d.date, store: anchor, kind: kindOf(anchor), anchor: true, part: 'AM', status: 'planned', score: S.scores[anchor]?.score ?? null, stops: [] };
       if (pm) day.stops.push({ store: pm, part: 'PM', kind: kindOf(pm), status: 'planned' });
@@ -2409,10 +2524,10 @@ function marketsSection(groups) {
         <div style="margin:0 0 12px">${fieldInput('mname', 'Market name', m.name, '', '', 'required placeholder="For example: Jacksonville" style="width:100%"')}</div>
         <label for="mleader">Market Leader<select id="mleader"><option value="">None yet</option>${byRole('leader').map(u => `<option value="${esc(u.email)}" ${m.leader === u.email ? 'selected' : ''}>${esc(u.name || u.email)}</option>`).join('')}</select></label>
         <label for="mdirector">Director<select id="mdirector"><option value="">None yet</option>${byRole('director').map(u => `<option value="${esc(u.email)}" ${m.director === u.email ? 'selected' : ''}>${esc(u.name || u.email)}</option>`).join('')}</select></label>
-        <label for="manchor">Anchor store <span class="small muted">(optional)</span><select id="manchor"><option value="">No anchor store</option>${STORES.map(st => `<option ${m.anchor === st.name ? 'selected' : ''}>${esc(st.name)}</option>`).join('')}</select></label>
+        <label for="manchor">Anchor store<select id="manchor"><option value="">Let the app decide (default)</option><option value="__none" ${m.anchorMode === 'none' ? 'selected' : ''}>Never anchor this market</option>${STORES.map(st => `<option ${m.anchor === st.name ? 'selected' : ''}>${esc(st.name)}</option>`).join('')}</select></label>
         <label for="manchordays">Anchor mornings per week<select id="manchordays">${[5, 4, 3, 2, 1].map(n => `<option value="${n}" ${(+m.anchorDays || 5) === n ? 'selected' : ''}>${n === 5 ? 'Every work day (5)' : n}</option>`).join('')}</select></label>
       </div>
-      <p class="small" style="margin:0 0 8px">Anchor store: an underperforming store with no GM. The Market Leader spends the morning there on anchor days to set the tone, then goes to a second store for the afternoon. It must be one of this market's stores.</p>
+      <p class="small" style="margin:0 0 8px">Anchor store: the Market Leader spends mornings there to set the tone, then goes to a second store for the afternoon. By default the app decides each week from the numbers (the store with the most at stake, weighting need by revenue, that is well above the rest and short on sales or SPG with cancellations, or has no store leader on file). Pick a store here to lock one in. The Market Leader can still change it for a week with a reason.</p>
       <p class="small" style="margin:0 0 8px">Not on the list? Add them under Logins below with the Market Leader or Director role, then come back.</p>
       <p class="small" style="margin:4px 0"><b>Stores</b> (greyed out = in another market; checking it moves it here)</p>
       <div class="storepick">${Object.entries(groups).map(([k, arr]) => `<div class="grp">${esc(DISTRICTS[k])}</div>${arr.map(st => {
@@ -2425,7 +2540,7 @@ function marketsSection(groups) {
     </form>` : ''}
     <div class="scroller"><table class="grid"><thead><tr><th>Market</th><th>Market Leader</th><th>Director</th><th>Stores</th><th></th></tr></thead><tbody>
       ${ms.map(x => `<tr><td class="nm">${esc(x.name)}</td><td>${esc(nameOf(x.leader)) || '<span class="warn">None</span>'}</td><td>${esc(nameOf(x.director)) || '<span class="muted">None</span>'}</td>
-        <td style="white-space:normal;min-width:220px">${x.stores.map(esc).join(', ') || '<span class="muted">--</span>'}${x.anchor ? `<br><span class="pill anchor">Anchor: ${esc(x.anchor)}, ${+x.anchorDays === 5 || !x.anchorDays ? 'every work day' : x.anchorDays + ' mornings'}</span>` : ''}</td><td><button class="btn tiny" type="button" data-em="${esc(x.id)}">Edit</button></td></tr>`).join('') || '<tr><td colspan="5">No markets yet. Add your first one.</td></tr>'}
+        <td style="white-space:normal;min-width:220px">${x.stores.map(esc).join(', ') || '<span class="muted">--</span>'}<br><span class="pill ${x.anchor ? 'anchor' : ''}">Anchor: ${x.anchor ? `${esc(x.anchor)}, ${+x.anchorDays === 5 || !x.anchorDays ? 'every work day' : x.anchorDays + ' mornings'}` : x.anchorMode === 'none' ? 'never' : 'app decides'}</span></td><td><button class="btn tiny" type="button" data-em="${esc(x.id)}">Edit</button></td></tr>`).join('') || '<tr><td colspan="5">No markets yet. Add your first one.</td></tr>'}
     </tbody></table></div>
   </section>`;
 }
@@ -2447,9 +2562,9 @@ function wireMarkets() {
     const name = $('#mname').value.trim(); if (!name) return toast('Give the market a name.', true);
     const stores = [...f.querySelectorAll('.storepick input:checked')].map(x => x.value);
     const id = S.editMarket === '__new' ? slug(name) + '-' + Date.now().toString(36) : S.editMarket;
-    const anchor = $('#manchor').value;
+    const av = $('#manchor').value, anchor = av && av !== '__none' ? av : '';
     if (anchor && !stores.includes(anchor)) return toast(`${anchor} isn't checked as one of this market's stores.`, true);
-    const doc = { id, name, leader: $('#mleader').value, director: $('#mdirector').value, stores, anchor, anchorDays: anchor ? +$('#manchordays').value : null };
+    const doc = { id, name, leader: $('#mleader').value, director: $('#mdirector').value, stores, anchor, anchorMode: av === '__none' ? 'none' : anchor ? 'store' : 'auto', anchorDays: anchor ? +$('#manchordays').value : null };
     const list = (S.markets || []).filter(x => x.id !== id).map(x => ({ ...x, stores: x.stores.filter(st => !stores.includes(st)) }));
     list.push(doc); list.sort((a, b) => a.name.localeCompare(b.name));
     saveMarketList(list, `${name} saved.`);
