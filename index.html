@@ -124,6 +124,10 @@ button.offday:disabled{cursor:default;opacity:.55}
 #msgout{font-family:var(--font);font-size:15px;line-height:1.55;min-height:320px}
 .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
 /* multi-stop days and anchor stores */
+.dstop{display:flex;flex-direction:column;gap:6px;padding:10px 0 0;border-top:1px dashed var(--line)}
+.day .dstop:first-of-type{border-top:0;padding-top:0}
+.dstop ul{margin:0;padding-left:18px;font-size:13px}
+.dstop.isdone{opacity:.75}
 .day .part{font-size:11px;font-weight:700;letter-spacing:.05em;color:#fff;background:var(--blue);border-radius:4px;padding:1px 6px;vertical-align:middle}
 .day .stop{display:flex;align-items:center;gap:8px;flex-wrap:wrap;border-top:1px dashed var(--line);padding-top:8px;font-size:15px;color:var(--navy)}
 .pill.anchor{background:#F68C2C;color:#fff}
@@ -292,6 +296,6 @@ details.vis summary b{color:var(--navy)}
 </div></header>
 <main id="app"><p class="loading">Loading…</p></main>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
-<script type="module" src="./app.js?v=202610010743"></script>
+<script type="module" src="./app.js?v=202610010747"></script>
 </body>
 </html>

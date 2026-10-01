@@ -1,14 +1,14 @@
-import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610010743';
-import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610010743';
+import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610010747';
+import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610010747';
 import {
   STORES, DISTRICTS, canonicalStore, isKnownStore, parseRsa, rangeFromFileName, parseTeamRoster, resolveReportNames,
   paceFactor, DEFAULT_GOALS, cidOf, status, fmt, goalsFor, TEAM_FOCUS, pickStoreFocus
-} from './base.js?v=202610010743';
+} from './base.js?v=202610010747';
 import {
   iso, fromIso, addDays, daysApart, weekStartOf, DAY_NAMES, DAY_LONG, dow, DEFAULT_OFF, validOff, safeOff, VISIT_DAYS, STORE_GOALS,
   parseDaily, needScore, band, pct, environment, buildPlan, pivotSuggestion, ELEMENTS, SEGMENTS, AORS, PRACTICE, VISIT_TYPES, kindToType, visitScore, visitSummary, consultantCoaching, drillFor, draggers, helpers, STORE_TO_RSA, hasCommitment, commitmentText, blackoutFor, offChoicesFor, storeFocus, rsaPicks, consultantWeeks, teamSignals,
   STORE_METRICS, slug, COACHING, METRICS, PLAIN, isOutlet, driveMin, driveText, MAX_SPLIT_MIN, LEVERS, leverStatus, suggestLever
-} from './ml.js?v=202610010743';
+} from './ml.js?v=202610010747';
 
 const DEMO = !firebaseConfig.apiKey || firebaseConfig.apiKey.startsWith('PASTE');
 const FB = 'https://www.gstatic.com/firebasejs/10.12.2/';
@@ -1061,22 +1061,38 @@ function pivotCard(s) {
 }
 function dayCard(d, i, plan, canEdit) {
   const t = today(), past = d.date < t, isToday = d.date === t;
-  const sc = S.scores[d.store];
-  const kind = d.kind === 'second' ? '<span class="pill check">Check the plan</span>' : d.kind === 'first' ? '<span class="pill set">Set the plan</span>' : '';
-  const state = d.status === 'done' ? '<span class="pill done">Visited</span>' : past ? '<span class="pill off">Not logged</span>' : isToday ? '<span class="pill">Today</span>' : '';
   const stores = S.users.find(u => u.email === plan.email)?.stores || (plan.email === S.user.email ? S.user.stores : Object.keys(plan.basis));
-  return `<article class="day ${isToday ? 'today' : ''} ${d.status === 'done' ? 'isdone' : ''}">
-    <div class="row" style="justify-content:space-between"><span class="dname">${esc(DAY_LONG[dow(d.date)])} ${esc(shortDate(d.date))}</span>${needChip(sc?.score)}</div>
-    <div class="store">${esc(d.store || 'Open day')}${d.part ? ` <span class="part">${d.part}</span>` : ''}</div>
-    <div class="row">${d.anchor ? '<span class="pill anchor">Anchor store</span>' : ''}${kind}${state}</div>
-    ${(d.stops || []).map((x, j) => `<div class="stop"><span class="part">${esc(x.part || 'Stop')}</span><b>${esc(x.store)}</b>${needChip(S.scores[x.store]?.score)}${(() => { const m = driveMin(j ? d.stops[j - 1].store : d.store, x.store); return m != null ? `<span class="small ${m > MAX_SPLIT_MIN ? 'warn' : 'muted'}">~${driveText(m)} drive</span>` : ''; })()}${x.status === 'done' ? '<span class="pill done">Visited</span>' : ''}
-      <span class="row" style="gap:6px;margin-left:auto"><button class="btn tiny" type="button" data-gostop="${i}:${j}">${x.status === 'done' ? 'See visit' : 'Open'}</button>${canEdit && x.status !== 'done' && !past ? `<button class="link" type="button" data-delstop="${i}:${j}" aria-label="Remove ${esc(x.store)}">Remove</button>` : ''}</span></div>`).join('')}
-    ${d.status !== 'done' && sc?.parts?.length ? `<ul>${sc.parts.slice(0, 2).map(p => `<li>${esc(p.text)}</li>`).join('')}</ul>` : ''}
-    ${d.status !== 'done' && S.teams?.[d.store] && (S.teams[d.store].below.length || S.teams[d.store].slipping.length) ? `<p class="small" style="margin:0"><b>See first:</b> ${[...S.teams[d.store].below.map(r => esc(titleName(r.name)) + ' (below min)'), ...S.teams[d.store].slipping.map(r => esc(titleName(r.name)) + ' (slipping)')].slice(0, 3).join(', ')}</p>` : ''}
+  const multi = (d.stops || []).length > 0;
+  const kindPill = k => k === 'second' ? '<span class="pill check">Check the plan</span>' : k === 'first' ? '<span class="pill set">Set the plan</span>' : '';
+  const statePill = st => st === 'done' ? '<span class="pill done">Visited</span>' : past ? '<span class="pill off">Not logged</span>' : isToday ? '<span class="pill">Today</span>' : '';
+  // One block per store on the day: a preview of why you're going and who to see, and its own visit button.
+  const block = (store, part, kind, status, btn, extra = '') => {
+    const sc = S.scores[store], team = S.teams?.[store];
+    const see = team ? [...team.below.map(r => titleName(r.name) + ' (below min)'), ...team.slipping.map(r => titleName(r.name) + ' (slipping)')].slice(0, 3) : [];
+    const lv = suggestLever(S.daily?.stores?.[store]?.mtd), lvL = lv ? LEVERS.find(l => l.key === lv)?.label : null;
+    return `<div class="dstop ${status === 'done' ? 'isdone' : ''}">
+      <div class="row" style="justify-content:space-between;flex-wrap:nowrap"><span class="store">${part ? `<span class="part">${esc(part)}</span> ` : ''}${esc(store)}</span>${needChip(sc?.score)}</div>
+      ${extra}
+      <div class="row">${kindPill(kind)}${statePill(status)}</div>
+      ${status !== 'done' && sc?.parts?.length ? `<ul>${sc.parts.slice(0, 2).map(p => `<li>${esc(p.text)}</li>`).join('')}</ul>` : ''}
+      ${status !== 'done' && lvL ? `<p class="small" style="margin:0"><b>Lever:</b> ${esc(lvL)}</p>` : ''}
+      ${status !== 'done' && see.length ? `<p class="small" style="margin:0"><b>See first:</b> ${see.map(esc).join(', ')}</p>` : ''}
+      <div class="row" style="gap:6px">${btn}</div>
+    </div>`;
+  };
+  const primaryBtn = d.store ? `<button class="btn tiny ${isToday ? 'primary' : ''}" data-go="${i}">${d.status === 'done' ? 'See visit' : `Open ${multi ? (d.part || 'AM') + ' ' : ''}visit`}</button>` : '';
+  return `<article class="day ${isToday ? 'today' : ''} ${d.status === 'done' && !multi ? 'isdone' : ''}">
+    <div class="row" style="justify-content:space-between"><span class="dname">${esc(DAY_LONG[dow(d.date)])} ${esc(shortDate(d.date))}</span>${multi ? `<span class="small muted">${dayStores(d).length} stores</span>` : ''}</div>
+    ${d.store ? block(d.store, multi ? (d.part || 'AM') : '', d.kind, d.status, primaryBtn, d.anchor ? '<div class="row"><span class="pill anchor">Anchor store</span></div>' : '') : '<div class="store">Open day</div>'}
+    ${(d.stops || []).map((x, j) => {
+      const m = driveMin(j ? d.stops[j - 1].store : d.store, x.store);
+      const drive = m != null ? `<p class="small ${m > MAX_SPLIT_MIN ? 'warn' : 'muted'}" style="margin:0">~${driveText(m)} drive from ${esc(j ? d.stops[j - 1].store : d.store)}</p>` : '';
+      const btn = `<button class="btn tiny ${isToday ? 'primary' : ''}" type="button" data-gostop="${i}:${j}">${x.status === 'done' ? 'See visit' : `Open ${esc(x.part || 'stop')} visit`}</button>${canEdit && x.status !== 'done' && !past ? `<button class="link" type="button" data-delstop="${i}:${j}" aria-label="Remove ${esc(x.store)}">Remove</button>` : ''}`;
+      return block(x.store, x.part || 'Stop', x.kind, x.status, btn, drive);
+    }).join('')}
     <div class="foot">
-      ${d.store ? `<button class="btn tiny ${isToday ? 'primary' : ''}" data-go="${i}">${d.status === 'done' ? 'See visit' : 'Open visit'}</button>` : ''}
       ${canEdit && !past && d.store ? `<select data-addstop="${i}" aria-label="Add a stop on ${esc(DAY_LONG[dow(d.date)])}"><option value="" disabled selected>+ Add a stop</option>${(() => { const from = dayStores(d).slice(-1)[0]; return stores.filter(s => !dayStores(d).includes(s)).map(s => ({ s, m: driveMin(from, s) })).sort((a, b) => (a.m ?? 999) - (b.m ?? 999)).map(o => `<option value="${esc(o.s)}">${esc(o.s)}${o.m != null ? ` (~${driveText(o.m)})` : ''}</option>`).join(''); })()}</select>` : ''}
-      ${canEdit && d.status !== 'done' && !past ? `<select data-swap="${i}" aria-label="Change store for ${esc(DAY_LONG[dow(d.date)])}"><option value="" disabled selected>Change store</option>${stores.filter(s => s !== d.store).map(s => `<option>${esc(s)}</option>`).join('')}</select>` : ''}
+      ${canEdit && d.status !== 'done' && !past ? `<select data-swap="${i}" aria-label="Change ${multi ? 'the morning store' : 'store'} for ${esc(DAY_LONG[dow(d.date)])}"><option value="" disabled selected>Change ${multi ? 'AM store' : 'store'}</option>${stores.filter(s => s !== d.store).map(s => `<option>${esc(s)}</option>`).join('')}</select>` : ''}
     </div>
   </article>`;
 }
