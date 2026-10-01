@@ -183,6 +183,37 @@ export function buildPlan({ weekStart, stores, scores, off = DEFAULT_OFF, role =
   };
 }
 
+
+// ---------------------------------------------------------------- drive time between stores
+// City-level coordinates for each store. Drive time is an estimate: straight-line miles x 1.15 for
+// roads, at 60 mph. Good enough to keep a Market Leader from a 3-hour afternoon drive; not routing.
+export const STORE_GEO = {
+  'Tallahassee': [30.44, -84.28], 'Thomasville': [30.84, -83.98], 'Albany': [31.58, -84.16], 'Macon': [32.84, -83.63],
+  'Warner Robins': [32.61, -83.62], 'Dothan': [31.22, -85.39], 'Enterprise': [31.32, -85.86], 'Panama City': [30.18, -85.66],
+  'Valdosta': [30.83, -83.28], 'Opelika': [32.65, -85.38], 'Columbus': [32.46, -84.99],
+  'Town Center': [30.26, -81.53], 'North': [30.48, -81.63], 'Orange Park': [30.17, -81.71], 'Brunswick': [31.15, -81.49],
+  'Yulee': [30.63, -81.61], 'St. Augustine': [29.90, -81.31], 'Outlet Regency': [30.33, -81.55],
+  'Mobile': [30.68, -88.15], "D'Iberville": [30.43, -88.89], 'Spanish Fort': [30.67, -87.92], 'Pensacola': [30.47, -87.21],
+  'Crestview': [30.76, -86.57], 'Ft. Walton': [30.42, -86.62], 'Outlet Pensacola': [30.47, -87.21],
+  'Greensboro': [36.07, -79.79], 'Winston Salem': [36.10, -80.24], 'Burlington': [36.10, -79.44], 'Danville': [36.59, -79.40],
+  'Outlet Greensboro': [36.07, -79.79],
+  'Baton Rouge': [30.45, -91.15], 'Lafayette': [30.22, -92.02], 'Gonzales': [30.24, -90.92], 'Harahan': [29.94, -90.20],
+  'Houma': [29.60, -90.72], 'Lake Charles': [30.23, -93.22], 'Opelousas': [30.53, -92.08], 'Ponchatoula': [30.44, -90.44],
+  'Hattiesburg': [31.33, -89.29], 'Flowood': [32.31, -90.14], 'Harvey': [29.90, -90.08]
+};
+export function driveMin(a, b) {
+  const p = STORE_GEO[a], q = STORE_GEO[b];
+  if (!p || !q || a === b) return a === b ? 0 : null;
+  const R = 3959, rad = x => x * Math.PI / 180;
+  const dLat = rad(q[0] - p[0]), dLon = rad(q[1] - p[1]);
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(rad(p[0])) * Math.cos(rad(q[0])) * Math.sin(dLon / 2) ** 2;
+  const miles = 2 * R * Math.asin(Math.sqrt(h)) * 1.15;
+  return Math.round(miles / 60 * 60 / 5) * 5;
+}
+export const driveText = m => m == null ? '' : m < 60 ? `${Math.max(m, 5)} min` : `${Math.floor(m / 60)} hr${m % 60 >= 15 ? ` ${m % 60} min` : ''}`;
+// A half-day split only works if the afternoon store is close. Over this, it's a full day instead.
+export const MAX_SPLIT_MIN = 75;
+
 // ---------------------------------------------------------------- mid-week pivot
 // After a new upload: is there a store that now needs the leader more than one still on the plan?
 // Suggest one swap at a time. The leader accepts or keeps the plan.

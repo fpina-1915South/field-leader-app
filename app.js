@@ -7,7 +7,7 @@ import {
 import {
   iso, fromIso, addDays, daysApart, weekStartOf, DAY_NAMES, DAY_LONG, dow, DEFAULT_OFF, validOff, safeOff, VISIT_DAYS, STORE_GOALS,
   parseDaily, needScore, band, pct, environment, buildPlan, pivotSuggestion, ELEMENTS, SEGMENTS, AORS, PRACTICE, VISIT_TYPES, kindToType, visitScore, visitSummary, consultantCoaching, drillFor, draggers, helpers, STORE_TO_RSA, hasCommitment, commitmentText, blackoutFor, offChoicesFor, storeFocus, rsaPicks, consultantWeeks, teamSignals,
-  STORE_METRICS, slug, COACHING, METRICS, PLAIN, isOutlet
+  STORE_METRICS, slug, COACHING, METRICS, PLAIN, isOutlet, driveMin, driveText, MAX_SPLIT_MIN
 } from './ml.js';
 
 const DEMO = !firebaseConfig.apiKey || firebaseConfig.apiKey.startsWith('PASTE');
@@ -677,11 +677,12 @@ async function viewWeek() {
   // Adding a stop is more coverage, so no reason needed. The day's first store becomes the morning.
   v.querySelectorAll('[data-addstop]').forEach(sel => sel.onchange = async () => {
     const i = +sel.dataset.addstop, d = plan.days[i], st = sel.value;
-    d.stops = [...(d.stops || []), { store: st, part: d.stops?.length ? 'Stop ' + (d.stops.length + 2) : 'PM', kind: plan.days.some((x, j) => j < i && dayStores(x).includes(st)) ? 'second' : 'first', status: 'planned' }];
+    const dm = driveMin(dayStores(d).slice(-1)[0], st);
+    d.stops = [...(d.stops || []), { drive: dm, store: st, part: d.stops?.length ? 'Stop ' + (d.stops.length + 2) : 'PM', kind: plan.days.some((x, j) => j < i && dayStores(x).includes(st)) ? 'second' : 'first', status: 'planned' }];
     if (!d.part) d.part = 'AM';
     plan.calls = (plan.calls || []).filter(c => c !== st);
     plan.pivots = [...(plan.pivots || []), { date: d.date, from: d.store, to: dayText(d), reason: 'Added a stop', at: new Date().toISOString(), by: S.user.email }];
-    await S.be.savePlan(plan); toast(`${st} added to ${dayLabel(d.date)}.`); viewWeek();
+    await S.be.savePlan(plan); toast(`${st} added to ${dayLabel(d.date)}.${dm > MAX_SPLIT_MIN ? ` Heads up: that's about a ${driveText(dm)} drive.` : ''}`); viewWeek();
   });
   // Taking a stop off is a schedule change: reason and alert, same as a swap.
   v.querySelectorAll('[data-delstop]').forEach(b => b.onclick = () => {
@@ -889,7 +890,7 @@ function newPlan(who, week, off, choice) {
   if (choice) plan.anchorChoice = choice;
   const a = anchorFor(who, choice);
   plan.anchorWhy = a ? { store: a.store, days: a.days, source: a.source, why: a.why } : { none: true, why: autoAnchor(who.stores || []).whyNot || '' };
-  return a ? anchorPlan(plan, who, a.store, a.days) : plan;
+  return a ? anchorPlan(plan, who, a.store, a.days, a.source) : plan;
 }
 // Who decides the anchor, in order: the Market Leader's choice for the week (they may know something
 // the numbers don't), then an anchor Frank set on the market in Setup, then the app from the numbers.
@@ -930,23 +931,34 @@ function autoAnchor(stores) {
 // Anchor store: an underperforming store with no GM. The Market Leader spends the morning there on
 // anchor days to set the tone, then travels to a second store for the afternoon. The other stores
 // rotate through the afternoons and any full days left, highest need first.
-function anchorPlan(plan, who, anchor, n) {
+function anchorPlan(plan, who, anchor, n, source) {
   n = Math.min(n, plan.days.length);
+  // When the app picks the anchor, stores too far for an afternoon still get a full day each,
+  // so it gives back anchor mornings (never fewer than 2). A leader's own pick is kept as set.
+  if (source === 'app') {
+    const farN = (who.stores || []).filter(s => s !== anchor && (driveMin(anchor, s) ?? 999) > MAX_SPLIT_MIN).length;
+    n = Math.max(Math.min(2, n), Math.min(n, plan.days.length - farN));
+  }
   // Mid-week rebuilds only fill days from today on, so the anchor mornings go there first.
   const t0 = today(), order = plan.days.map((d, i) => i).sort((a, b) => (plan.days[a].date < t0) - (plan.days[b].date < t0) || a - b);
   const anchorIdx = new Set(order.slice(0, n));
   const others = (who.stores || []).filter(s => s !== anchor).sort((a, b) => (S.scores[b]?.score ?? 0) - (S.scores[a]?.score ?? 0) || a.localeCompare(b));
-  let k = 0; const next = () => others.length ? others[k++ % others.length] : null;
+  // Afternoons only go to stores within a short drive of the anchor. Far stores get full days.
+  const near = others.filter(s => (driveMin(anchor, s) ?? 999) <= MAX_SPLIT_MIN), far = others.filter(s => !near.includes(s));
+  let kn = 0, kf = 0, kAll = 0;
+  const nextNear = () => near.length ? near[kn++ % near.length] : null;
+  const nextFull = () => far.length && kf < far.length ? far[kf++] : others.length ? others[kAll++ % others.length] : null;
   const seen = new Set();
   const kindOf = st => { const kd = seen.has(st) ? 'second' : 'first'; seen.add(st); return kd; };
   plan.days = plan.days.map((d, i) => {
     if (anchorIdx.has(i)) {
-      const pm = next();
-      const day = { date: d.date, store: anchor, kind: kindOf(anchor), anchor: true, part: 'AM', status: 'planned', score: S.scores[anchor]?.score ?? null, stops: [] };
-      if (pm) day.stops.push({ store: pm, part: 'PM', kind: kindOf(pm), status: 'planned' });
+      const pm = nextNear();
+      const day = { date: d.date, store: anchor, kind: kindOf(anchor), anchor: true, part: pm ? 'AM' : null, status: 'planned', score: S.scores[anchor]?.score ?? null, stops: [] };
+      if (!pm) delete day.part;
+      if (pm) day.stops.push({ store: pm, part: 'PM', kind: kindOf(pm), status: 'planned', drive: driveMin(anchor, pm) });
       return day;
     }
-    const st = next() || anchor;
+    const st = nextFull() || anchor;
     return { date: d.date, store: st, kind: kindOf(st), status: 'planned', score: S.scores[st]?.score ?? null };
   });
   plan.anchor = anchor; plan.anchorDays = n;
@@ -976,13 +988,13 @@ function dayCard(d, i, plan, canEdit) {
     <div class="row" style="justify-content:space-between"><span class="dname">${esc(DAY_LONG[dow(d.date)])} ${esc(shortDate(d.date))}</span>${needChip(sc?.score)}</div>
     <div class="store">${esc(d.store || 'Open day')}${d.part ? ` <span class="part">${d.part}</span>` : ''}</div>
     <div class="row">${d.anchor ? '<span class="pill anchor">Anchor store</span>' : ''}${kind}${state}</div>
-    ${(d.stops || []).map((x, j) => `<div class="stop"><span class="part">${esc(x.part || 'Stop')}</span><b>${esc(x.store)}</b>${needChip(S.scores[x.store]?.score)}${x.status === 'done' ? '<span class="pill done">Visited</span>' : ''}
+    ${(d.stops || []).map((x, j) => `<div class="stop"><span class="part">${esc(x.part || 'Stop')}</span><b>${esc(x.store)}</b>${needChip(S.scores[x.store]?.score)}${(() => { const m = driveMin(j ? d.stops[j - 1].store : d.store, x.store); return m != null ? `<span class="small ${m > MAX_SPLIT_MIN ? 'warn' : 'muted'}">~${driveText(m)} drive</span>` : ''; })()}${x.status === 'done' ? '<span class="pill done">Visited</span>' : ''}
       <span class="row" style="gap:6px;margin-left:auto"><button class="btn tiny" type="button" data-gostop="${i}:${j}">${x.status === 'done' ? 'See visit' : 'Open'}</button>${canEdit && x.status !== 'done' && !past ? `<button class="link" type="button" data-delstop="${i}:${j}" aria-label="Remove ${esc(x.store)}">Remove</button>` : ''}</span></div>`).join('')}
     ${d.status !== 'done' && sc?.parts?.length ? `<ul>${sc.parts.slice(0, 2).map(p => `<li>${esc(p.text)}</li>`).join('')}</ul>` : ''}
     ${d.status !== 'done' && S.teams?.[d.store] && (S.teams[d.store].below.length || S.teams[d.store].slipping.length) ? `<p class="small" style="margin:0"><b>See first:</b> ${[...S.teams[d.store].below.map(r => esc(titleName(r.name)) + ' (below min)'), ...S.teams[d.store].slipping.map(r => esc(titleName(r.name)) + ' (slipping)')].slice(0, 3).join(', ')}</p>` : ''}
     <div class="foot">
       ${d.store ? `<button class="btn tiny ${isToday ? 'primary' : ''}" data-go="${i}">${d.status === 'done' ? 'See visit' : 'Open visit'}</button>` : ''}
-      ${canEdit && !past && d.store ? `<select data-addstop="${i}" aria-label="Add a stop on ${esc(DAY_LONG[dow(d.date)])}"><option value="" disabled selected>+ Add a stop</option>${stores.filter(s => !dayStores(d).includes(s)).map(s => `<option>${esc(s)}</option>`).join('')}</select>` : ''}
+      ${canEdit && !past && d.store ? `<select data-addstop="${i}" aria-label="Add a stop on ${esc(DAY_LONG[dow(d.date)])}"><option value="" disabled selected>+ Add a stop</option>${(() => { const from = dayStores(d).slice(-1)[0]; return stores.filter(s => !dayStores(d).includes(s)).map(s => ({ s, m: driveMin(from, s) })).sort((a, b) => (a.m ?? 999) - (b.m ?? 999)).map(o => `<option value="${esc(o.s)}">${esc(o.s)}${o.m != null ? ` (~${driveText(o.m)})` : ''}</option>`).join(''); })()}</select>` : ''}
       ${canEdit && d.status !== 'done' && !past ? `<select data-swap="${i}" aria-label="Change store for ${esc(DAY_LONG[dow(d.date)])}"><option value="" disabled selected>Change store</option>${stores.filter(s => s !== d.store).map(s => `<option>${esc(s)}</option>`).join('')}</select>` : ''}
     </div>
   </article>`;
@@ -1007,7 +1019,7 @@ async function openVisit(x) {
       v.innerHTML = `<div class="panel"><p class="eyebrow">${esc(dayLabel(x.date))}</p>
         <h2 style="margin:0 0 6px">${planned === 'Off' ? `This is your day off` : `Your plan has you at ${esc(planned)}`}</h2>
         <p style="margin:0 0 12px">You're opening a visit at <b>${esc(x.store)}</b>.${planned !== 'Off' ? ` Going to ${esc(planned)} instead? ` : ''}</p>
-        ${planned !== 'Off' ? `<div class="row" style="margin:0 0 8px"><button class="btn" id="goplan" type="button">Open ${esc(planned)} instead</button><button class="btn primary" id="addplan" type="button">Add ${esc(x.store)} as a stop today</button></div><p class="small" style="margin:0 0 12px">Adding a stop keeps ${esc(dayText(day))} on your day. Replacing it takes a reason below.</p>` : ''}
+        ${planned !== 'Off' ? `<div class="row" style="margin:0 0 8px"><button class="btn" id="goplan" type="button">Open ${esc(planned)} instead</button><button class="btn primary" id="addplan" type="button">Add ${esc(x.store)} as a stop today${(() => { const m = driveMin(dayStores(day).slice(-1)[0], x.store); return m != null ? ` (~${driveText(m)} drive)` : ''; })()}</button></div><p class="small" style="margin:0 0 12px">Adding a stop keeps ${esc(dayText(day))} on your day. Replacing it takes a reason below.</p>` : ''}
         <div id="visitreason"></div></div>`;
       const gp = $('#goplan'); if (gp) gp.onclick = () => openVisit({ ...x, store: planned, kind: day.kind, dayIndex: idx });
       const ap = $('#addplan'); if (ap) ap.onclick = async () => {
