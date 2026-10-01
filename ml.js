@@ -4,7 +4,7 @@
 import {
   normalizeHeader, toNumber, parseDate, slug, canonicalStore, isKnownStore, REGIONS, STORE_METRICS,
   COACHING, METRICS, pickFocus, pickStoreFocus, goalsFor, DEFAULT_GOALS, isOutlet, minSphFor, fmt, weeklyTarget
-} from './base.js?v=202610011643';
+} from './base.js?v=202610011652';
 
 const numOrNull = v => (v === '' || v === null || v === undefined ? null : toNumber(v));
 
@@ -719,33 +719,39 @@ export function fromSums(s) {
   return { k, hours: s.hours };
 }
 const monthOf = d => d ? d.slice(0, 7) : '';
-// src = { mtd, base, baseMonthEnd, lastMonth, ytd, ytdSnap, monthEnds: [reports] }. All are RSA uploads (people lists).
-// Returns { [cid]: { ytd, lastMonth, mtd, wtd } } plus labels.
+// src: { mtd, lastMonth, ytd, ytdSnap, monthEnds, wk: [{ plus, minus }], day: [{ plus, minus }] }
+// Each piece is an RSA copy (people list); a period made of pieces is the sum of (plus minus minus).
 export function consultantTrends(src) {
   const by = r => new Map((r?.people || []).map(p => [p.cid, p]));
-  const M = by(src.mtd), B = by(src.base), BE = by(src.baseMonthEnd), L = by(src.lastMonth), Y = by(src.ytd), YS = by(src.ytdSnap);
+  const M = by(src.mtd), L = by(src.lastMonth), Y = by(src.ytd), YS = by(src.ytdSnap);
   const ends = (src.monthEnds || []).map(by);
+  const pieces = list => (list || []).map(x => ({ plus: by(x.plus), minus: x.minus ? by(x.minus) : null }));
+  const WK = pieces(src.wk), DY = pieces(src.day);
+  const sumPieces = (ps, cid) => {
+    if (!ps.length) return null;
+    let tot = null;
+    for (const x of ps) {
+      const a = toSums(x.plus.get(cid)); if (!a) continue;
+      const part = x.minus ? (x.minus.get(cid) ? subSums(a, toSums(x.minus.get(cid))) : a) : a;
+      tot = tot ? addSums(tot, part) : part;
+    }
+    return tot;
+  };
   const mtdMonth = monthOf(src.mtd?.to);
   const out = {};
-  const cids = new Set([...M.keys(), ...Y.keys(), ...L.keys()]);
+  const cids = new Set([...M.keys(), ...Y.keys(), ...L.keys(), ...WK.flatMap(x => [...x.plus.keys()])]);
   for (const cid of cids) {
     const m = toSums(M.get(cid));
-    // This week: same month = MTD minus Saturday. Week started last month = (last month's final minus Saturday) + MTD.
-    let w = null;
-    if (src.base && monthOf(src.base.to) === mtdMonth) w = m && B.get(cid) ? subSums(m, toSums(B.get(cid))) : null;
-    else if (src.base && src.baseMonthEnd) w = addSums(m, BE.get(cid) && B.get(cid) ? subSums(toSums(BE.get(cid)), toSums(B.get(cid))) : null);
-    else if (src.weekStartsThisMonth) w = m;
-    // Year to date: an uploaded YTD report, rolled forward with this month if it stops before it.
     let y = null;
     if (src.ytd) {
       const ys = toSums(Y.get(cid));
-      if (!src.ytd.to || src.ytd.to >= (src.mtd?.to || '')) y = ys;
-      else if (monthOf(src.ytd.to) === mtdMonth) { const sn = toSums(YS.get(cid)); y = src.ytdSnap && m && sn ? addSums(ys, subSums(m, sn)) : ys; }
-      else y = addSums(ys, m);
+      if (!m || !src.mtd || src.ytd.to >= src.mtd.to) y = ys;
+      else if (monthOf(src.ytd.to) === mtdMonth) { const sn = toSums(YS.get(cid)); y = src.ytdSnap && sn ? addSums(ys, subSums(m, sn)) : ys; }
+      else y = ys ? addSums(ys, m) : m;
     } else if (ends.length) {
-      y = m; ends.forEach(e => { y = addSums(y, toSums(e.get(cid))); });
+      y = m; ends.forEach(e => { const v = toSums(e.get(cid)); y = y ? addSums(y, v) : v; });
     }
-    out[cid] = { ytd: fromSums(y), lastMonth: fromSums(toSums(L.get(cid))), mtd: fromSums(m), wtd: fromSums(w) };
+    out[cid] = { ytd: fromSums(y), lastMonth: fromSums(toSums(L.get(cid))), mtd: fromSums(m), wtd: fromSums(sumPieces(WK, cid)), day: fromSums(sumPieces(DY, cid)) };
   }
   return out;
 }
@@ -763,13 +769,14 @@ export const trendFmt = (r, v) => v == null ? '--' : r.fmt === 'money' ? '$' + M
 export function trendRead(t) {
   if (!t) return { rows: {}, up: null, down: null };
   const useWk = t.wtd?.hours >= 8;
-  const recentP = useWk ? 'wtd' : 'mtd';
   const baseP = t.ytd ? 'ytd' : t.lastMonth ? 'lastMonth' : null;
+  // Most recent period with enough to go on: this week, then this month, then last month (early in a month).
+  const fallback = t.mtd?.hours >= 8 ? 'mtd' : baseP === 'ytd' && t.lastMonth ? 'lastMonth' : t.mtd ? 'mtd' : null;
+  const recentP = useWk ? 'wtd' : fallback;
   const rows = {}; let up = null, down = null;
-  if (!baseP || !t[recentP]) return { rows, up, down, recentP, baseP };
+  if (!baseP || !recentP || recentP === baseP) return { rows, up, down, recentP, baseP };
   for (const r of TREND_ROWS) {
-    // This week when it has the number, otherwise this month.
-    const per = useWk && t.wtd.k[r.key] != null ? 'wtd' : 'mtd';
+    const per = useWk && t.wtd.k[r.key] != null ? 'wtd' : fallback;
     const a = t[baseP].k[r.key], b = t[per]?.k?.[r.key];
     if (a == null || b == null || !a) continue;
     let ch = (b - a) / Math.abs(a);
@@ -782,4 +789,4 @@ export function trendRead(t) {
   }
   return { rows, up, down, recentP, baseP };
 }
-export const TREND_LABEL = { ytd: 'this year', lastMonth: 'last month', mtd: 'this month', wtd: 'this week' };
+export const TREND_LABEL = { ytd: 'this year', lastMonth: 'last month', mtd: 'this month', wtd: 'this week', day: 'yesterday' };

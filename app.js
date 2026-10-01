@@ -1,16 +1,16 @@
-import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610011643';
-import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610011643';
+import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610011652';
+import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610011652';
 import {
   STORES, DISTRICTS, canonicalStore, isKnownStore, parseRsa, rangeFromFileName, parseTeamRoster, resolveReportNames,
   paceFactor, DEFAULT_GOALS, cidOf, status, fmt, goalsFor, TEAM_FOCUS, pickStoreFocus
-} from './base.js?v=202610011643';
+} from './base.js?v=202610011652';
 import {
   iso, fromIso, addDays, daysApart, weekStartOf, DAY_NAMES, DAY_LONG, dow, DEFAULT_OFF, validOff, safeOff, VISIT_DAYS, STORE_GOALS,
   parseDaily, needScore, band, pct, environment, buildPlan, pivotSuggestion, ELEMENTS, SEGMENTS, AORS, PRACTICE, VISIT_TYPES, kindToType, visitScore, visitSummary, consultantCoaching, drillFor, draggers, helpers, STORE_TO_RSA, hasCommitment, commitmentText, blackoutFor, offChoicesFor, storeFocus, rsaPicks, consultantWeeks, teamSignals,
   STORE_METRICS, slug, COACHING, METRICS, PLAIN, isOutlet, driveMin, driveText, MAX_SPLIT_MIN, LEVERS, leverStatus, suggestLever,
   consultantTrends, TREND_ROWS, trendFmt, trendRead, TREND_LABEL,
   OFFER_DEFAULT, PLAY, PLAY_CHECKS, PLAY_CHECKS_REMOTE, offerActive, offerMath, FLIQ_CHECKS, FLIQ_CHECKS_REMOTE, FLIQ_DAILY
-} from './ml.js?v=202610011643';
+} from './ml.js?v=202610011652';
 
 const DEMO = !firebaseConfig.apiKey || firebaseConfig.apiKey.startsWith('PASTE');
 const FB = 'https://www.gstatic.com/firebasejs/10.12.2/';
@@ -427,23 +427,46 @@ async function seedFieldTeam() {
     try { await S.be.saveUser(u); S.users.push(u); } catch (e) { console.warn('Could not add', t.email, e); }
   }
 }
-// Year to date, last month, this month and this week for every consultant, from the kept RSA copies.
+// Weeks for consultant numbers run Monday to Sunday.
+const mondayOf = d => addDays(d, -((dow(d) + 6) % 7));
+const isMtdCopy = r => !!r && (!r.from || !r.to || r.from === r.to.slice(0, 8) + '01');
+// Year to date, last month, this month, this week and yesterday for every consultant, from the kept RSA copies.
+// Periods follow today's date: on October 1 there is no October yet, and September is last month.
 async function loadTrends(rsa) {
   if (!rsa?.to) return {};
-  const dates = S.meta.rsaDates || [], mm = rsa.to.slice(0, 7);
-  const finalOf = month => dates.filter(d => d.slice(0, 7) === month).sort().reverse()[0];
-  const cache = {}, at = d => d ? (cache[d] ||= S.be.rsaAt(d).catch(() => null)) : null;
-  const [y, mo] = mm.split('-').map(Number);
-  const prev = mo === 1 ? `${y - 1}-12` : `${y}-${String(mo - 1).padStart(2, '0')}`;
-  const base = S.rsaBase;
-  const baseEndDate = base && base.to.slice(0, 7) !== mm ? finalOf(base.to.slice(0, 7)) : null;
+  const t = today(), cur = t.slice(0, 7);
+  const dates = S.meta.rsaDates || [];
+  const cache = {}, at = d => d ? (cache[d] ||= (d === rsa.to ? Promise.resolve(rsa) : S.be.rsaAt(d).catch(() => null)).then(r => isMtdCopy(r) ? r : null)) : Promise.resolve(null);
+  const finalOf = async month => { for (const d of dates.filter(x => x.slice(0, 7) === month).sort().reverse()) { const r = await at(d); if (r) return r; } return null; };
+  const onOrBefore = async (day) => { for (const d of dates.filter(x => x <= day && x.slice(0, 7) === day.slice(0, 7)).sort().reverse()) { const r = await at(d); if (r) return r; } return null; };
+  const prevMonth = m => { const [y, mo] = m.split('-').map(Number); return mo === 1 ? `${y - 1}-12` : `${y}-${String(mo - 1).padStart(2, '0')}`; };
+  const monthEnd = m => { const [y, mo] = m.split('-').map(Number); return iso(new Date(y, mo, 0)); };
+  const mtd = rsa.to.slice(0, 7) === cur ? rsa : null;
+  const lastMonth = await finalOf(prevMonth(cur));
+  // This week: everything after last Sunday. A week can cross into a new month.
+  const sun = addDays(mondayOf(t), -1);
+  const wk = [];
+  if (rsa.to > sun) {
+    if (sun.slice(0, 7) === rsa.to.slice(0, 7)) { const b = await onOrBefore(sun); if (b) wk.push({ plus: rsa, minus: b }); }
+    else {
+      // Week started last month: (last month's final copy minus last Sunday's) plus this month so far.
+      let ok = true;
+      if (sun !== monthEnd(sun.slice(0, 7))) { const e = await finalOf(sun.slice(0, 7)), b = await onOrBefore(sun); if (e && b) { if (e.to > b.to) wk.push({ plus: e, minus: b }); } else ok = false; }
+      if (ok) wk.push({ plus: rsa, minus: null }); else wk.length = 0;
+    }
+  }
+  // Yesterday (the last day in the newest copy).
+  const day = [];
+  if (rsa.to.endsWith('-01')) day.push({ plus: rsa, minus: null });
+  else { const b = await at(dates.includes(addDays(rsa.to, -1)) ? addDays(rsa.to, -1) : null); if (b) day.push({ plus: rsa, minus: b }); }
   let ytd = await (S.be.rsaYtd ? S.be.rsaYtd().catch(() => null) : null);
-  if (ytd && ytd.to?.slice(0, 4) !== mm.slice(0, 4)) ytd = null;
-  const ytdSnapDate = ytd && ytd.to < rsa.to && ytd.to.slice(0, 7) === mm && dates.includes(ytd.to) ? ytd.to : null;
-  const endDates = ytd ? [] : Array.from({ length: mo - 1 }, (_, i) => finalOf(`${y}-${String(i + 1).padStart(2, '0')}`)).filter(Boolean);
-  const [baseMonthEnd, lastMonth, ytdSnap, ...monthEnds] = await Promise.all([at(baseEndDate && baseEndDate > base.to ? baseEndDate : null), at(finalOf(prev)), at(ytdSnapDate), ...endDates.map(at)]);
-  S.trendInfo = { lastMonth: lastMonth?.to || null, ytd: ytd ? { from: ytd.from, to: ytd.to, uploaded: true } : monthEnds.length ? { from: monthEnds.map(r => r?.from || r?.to).filter(Boolean).sort()[0], to: rsa.to, uploaded: false } : null };
-  return consultantTrends({ mtd: rsa, base, baseMonthEnd, lastMonth, ytd, ytdSnap, monthEnds: monthEnds.filter(Boolean), weekStartsThisMonth: weekStartOf(today()) >= mm + '-01' });
+  if (ytd && ytd.to?.slice(0, 4) !== cur.slice(0, 4) && ytd.to?.slice(0, 4) !== rsa.to.slice(0, 4)) ytd = null;
+  const ytdSnap = ytd && mtd && ytd.to < mtd.to && ytd.to.slice(0, 7) === cur ? await at(dates.includes(ytd.to) ? ytd.to : null) : null;
+  const [y, mo] = cur.split('-').map(Number);
+  const monthEnds = ytd ? [] : (await Promise.all(Array.from({ length: mo - 1 }, (_, i) => finalOf(`${y}-${String(i + 1).padStart(2, '0')}`)))).filter(Boolean);
+  S.trendInfo = { cur, lastMonth: lastMonth?.to || prevMonth(cur) + '-01', week: { from: mondayOf(t), to: rsa.to }, day: rsa.to, wkOk: wk.length > 0,
+    ytd: ytd ? { from: ytd.from, to: ytd.to, uploaded: true } : monthEnds.length ? { from: monthEnds.map(r => r.from || r.to).sort()[0], to: rsa.to, uploaded: false } : null };
+  return consultantTrends({ mtd, lastMonth, ytd, ytdSnap, monthEnds, wk, day });
 }
 async function loadShared() {
   $('#app').innerHTML = '<p class="loading">Loading the latest numbers…</p>';
@@ -456,9 +479,9 @@ async function loadShared() {
   S.offer = (await S.be.offer().catch(() => null)) || OFFER_DEFAULT;
   await seedFieldTeam();
   // Consultant week: compare today's RSA upload with the one through last Saturday.
-  const sat = addDays(weekStartOf(today()), -1);
+  const sat = addDays(mondayOf(today()), -1);
   const baseDate = (S.meta.rsaDates || []).filter(d => d <= sat && (!rsa?.to || d < rsa.to)).sort().reverse()[0];
-  S.rsaBase = baseDate ? await S.be.rsaAt(baseDate).catch(() => null) : null;
+  S.rsaBase = baseDate ? await S.be.rsaAt(baseDate).then(r => isMtdCopy(r) ? r : null).catch(() => null) : null;
   S.weeks = consultantWeeks(rsa, S.rsaBase);
   // Yesterday by consultant: today's RSA upload minus the one before it.
   const prevDate = (S.meta.rsaDates || []).filter(d => rsa?.to && d < rsa.to).sort().reverse()[0];
@@ -1540,11 +1563,13 @@ async function viewVisit() {
   // Year to date, last month, this month and this week side by side, with which way each is moving.
   const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   const lmLabel = S.trendInfo?.lastMonth ? MON[+S.trendInfo.lastMonth.slice(5, 7) - 1] : 'Last mo';
+  const wkNote = S.trendInfo ? ` This week runs Monday to Sunday (${esc(shortDate(S.trendInfo.week.from))} on)${S.trendInfo.wkOk ? '' : ', and needs the RSA copy through last Sunday to show'}.` : '';
   const trendBlock = (cid, p) => {
     const t = S.trends?.[cid];
     if (!t || !(t.mtd || t.ytd || t.lastMonth)) return '';
     const rd = trendRead(t), g = goalsFor(DEFAULT_GOALS, x.store);
-    const cols = [['ytd', 'YTD'], ['lastMonth', lmLabel], ['mtd', 'MTD'], ['wtd', 'This wk']];
+    const ti = S.trendInfo || {};
+    const cols = [['ytd', 'YTD'], ['lastMonth', lmLabel], ['mtd', ti.cur ? MON[+ti.cur.slice(5, 7) - 1] + ' MTD' : 'MTD'], ['wtd', 'This wk'], ['day', ti.day ? shortDate(ti.day) : 'Prev day']];
     const cell = (per, r) => { const v = t[per]?.k?.[r.key]; const gl = g[r.key]; const cls = v == null || gl == null ? '' : status({ lower: r.lower }, v, gl) === 'green' ? 'good' : status({ lower: r.lower }, v, gl) === 'red' ? 'bad' : ''; return `<td class="num ${cls}">${trendFmt(r, v)}</td>`; };
     const arrow = k => rd.rows[k] === 'up' ? '<td class="ar good" title="Getting better">▲</td>' : rd.rows[k] === 'down' ? '<td class="ar bad" title="Slipping">▼</td>' : '<td class="ar muted">·</td>';
     const hrs = per => t[per]?.hours != null ? Math.round(t[per].hours).toLocaleString('en-US') : '--';
@@ -1557,7 +1582,7 @@ async function viewVisit() {
         <tr class="hrs"><td>Hours</td>${cols.map(([k]) => `<td class="num">${hrs(k)}</td>`).join('')}<td></td></tr>
         ${TREND_ROWS.map(r => `<tr><td>${r.label}</td>${cols.map(([k]) => cell(k, r)).join('')}${arrow(r.key)}</tr>`).join('')}
       </tbody></table></div>
-      <p class="small muted" style="margin:4px 0 0">Green is at goal, red is well off it. ▲ ▼ compare ${rd.recentP === 'wtd' ? 'this week (or this month when the week is too short)' : 'this month'} with ${TREND_LABEL[rd.baseP] || 'the longer run'}.${ytdNote}</p>
+      <p class="small muted" style="margin:4px 0 0">Green is at goal, red is well off it. ▲ ▼ compare ${rd.recentP === 'wtd' ? 'this week' : TREND_LABEL[rd.recentP] || 'the latest numbers'} with ${TREND_LABEL[rd.baseP] || 'the longer run'}.${wkNote}${ytdNote}</p>
     </div>`;
   };
   // A question to open with, from the trend: ask about what changed instead of reading the number at them.
