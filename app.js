@@ -1,14 +1,15 @@
-import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610010747';
-import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610010747';
+import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610010759';
+import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610010759';
 import {
   STORES, DISTRICTS, canonicalStore, isKnownStore, parseRsa, rangeFromFileName, parseTeamRoster, resolveReportNames,
   paceFactor, DEFAULT_GOALS, cidOf, status, fmt, goalsFor, TEAM_FOCUS, pickStoreFocus
-} from './base.js?v=202610010747';
+} from './base.js?v=202610010759';
 import {
   iso, fromIso, addDays, daysApart, weekStartOf, DAY_NAMES, DAY_LONG, dow, DEFAULT_OFF, validOff, safeOff, VISIT_DAYS, STORE_GOALS,
   parseDaily, needScore, band, pct, environment, buildPlan, pivotSuggestion, ELEMENTS, SEGMENTS, AORS, PRACTICE, VISIT_TYPES, kindToType, visitScore, visitSummary, consultantCoaching, drillFor, draggers, helpers, STORE_TO_RSA, hasCommitment, commitmentText, blackoutFor, offChoicesFor, storeFocus, rsaPicks, consultantWeeks, teamSignals,
-  STORE_METRICS, slug, COACHING, METRICS, PLAIN, isOutlet, driveMin, driveText, MAX_SPLIT_MIN, LEVERS, leverStatus, suggestLever
-} from './ml.js?v=202610010747';
+  STORE_METRICS, slug, COACHING, METRICS, PLAIN, isOutlet, driveMin, driveText, MAX_SPLIT_MIN, LEVERS, leverStatus, suggestLever,
+  OFFER_DEFAULT, PLAY, PLAY_CHECKS, offerActive, offerMath, FLIQ_CHECKS, FLIQ_DAILY
+} from './ml.js?v=202610010759';
 
 const DEMO = !firebaseConfig.apiKey || firebaseConfig.apiKey.startsWith('PASTE');
 const FB = 'https://www.gstatic.com/firebasejs/10.12.2/';
@@ -137,6 +138,8 @@ async function firebaseBackend() {
     onePrivate: id => get('oneprivate', id),
     saveOnePrivate: d => F.setDoc(F.doc(db, 'oneprivate', d.id), d),
     alerts: () => all('alerts'),
+    offer: async () => (await get('config', 'offer'))?.offer || null,
+    saveOffer: o => F.setDoc(F.doc(db, 'config', 'offer'), { offer: o, at: new Date().toISOString() }),
     saveAlert: a => F.setDoc(F.doc(db, 'alerts', a.id), a)
   };
   return be;
@@ -148,7 +151,7 @@ function demoBackend() {
   const t = today(), week = weekStartOf(t);
   const leaders = [
     { email: 'east@demo', name: 'Demo Market Leader (Jacksonville)', role: 'leader', stores: ['Town Center', 'Orange Park', 'Yulee', 'St. Augustine'], off: DEFAULT_OFF },
-    { email: 'nc@demo', name: 'Demo Market Leader (Carolinas)', role: 'leader', stores: ['Greensboro', 'Winston Salem', 'Burlington', 'Danville', 'Outlet Greensboro'], off: DEFAULT_OFF },
+    { email: 'nc@demo', name: 'Demo Market Leader (Carolinas)', role: 'leader', pilots: ['frontlineiq'], stores: ['Greensboro', 'Winston Salem', 'Burlington', 'Danville', 'Outlet Greensboro'], off: DEFAULT_OFF },
     { email: 'director@demo', name: 'Demo Director (East)', role: 'director', stores: ['Town Center', 'North', 'Orange Park', 'Brunswick', 'Yulee', 'St. Augustine', 'Outlet Regency'], off: [0, 6] },
     { email: 'gulf@demo', name: 'Demo Market Leader (Gulf Coast)', role: 'leader', stores: ['Mobile', "D'Iberville", 'Spanish Fort', 'Pensacola', 'Crestview', 'Ft. Walton'], off: [2, 3] }
   ];
@@ -305,6 +308,7 @@ function demoBackend() {
   }
   meta.rsaDates = Object.keys(rsaHist).sort().reverse();
   const ones = {};
+  let offerDoc = null;
   const alerts = { demo1: { id: 'demo1', type: 'schedule', email: 'nc@demo', name: users['nc@demo'].name, weekStart: week, at: addDays(t, -1) + 'T07:40:00', seen: false,
     reason: 'Called into a store (issue or emergency)', note: 'Two closers out at Danville. Covering the floor Tuesday, moved Winston Salem to Friday.',
     changes: [{ date: addDays(week, 2), from: 'Winston Salem', to: 'Danville' }, { date: addDays(week, 5), from: 'Burlington', to: 'Winston Salem' }] } };
@@ -353,6 +357,8 @@ function demoBackend() {
     onePrivate: async id => clone(ones['p_' + id] || null),
     async saveOnePrivate(d) { ones['p_' + d.id] = clone(d); },
     alerts: async () => clone(Object.values(alerts)),
+    offer: async () => clone(offerDoc),
+    async saveOffer(o) { offerDoc = clone(o); },
     async saveAlert(a) { alerts[a.id] = clone(a); }
   };
 }
@@ -386,7 +392,7 @@ async function boot() {
 // in the Market Leader and Director dropdowns right away. Stores come from the markets they're put on.
 const FIELD_TEAM = [
   { email: 'ocruz@1915south.com', name: 'Orlando Cruz', role: 'director' },
-  { email: 'jmccord@1915south.com', name: 'Jourdain McCord', role: 'leader' },
+  { email: 'jmccord@1915south.com', name: 'Jourdain McCord', role: 'leader', pilots: ['frontlineiq'] },
   { email: 'msevert@1915south.com', name: 'Meagan Severt', role: 'leader' },
   { email: 'ccarritz@1915south.com', name: 'Cole Carritz', role: 'leader' },
   { email: 'jkeene@1915south.com', name: 'Jonathan Keene', role: 'leader' }
@@ -394,7 +400,10 @@ const FIELD_TEAM = [
 async function seedFieldTeam() {
   if (S.user?.role !== 'admin') return;
   for (const t of FIELD_TEAM) {
-    if (S.users.some(u => u.email === t.email)) continue;
+    const have = S.users.find(u => u.email === t.email);
+    // Pilots are set once; after that, Setup controls them.
+    if (have && t.pilots && have.pilots === undefined) { have.pilots = t.pilots; try { await S.be.saveUser(have); } catch (e) {} }
+    if (have) continue;
     const u = { ...t, stores: [], off: DEFAULT_OFF };
     try { await S.be.saveUser(u); S.users.push(u); } catch (e) { console.warn('Could not add', t.email, e); }
   }
@@ -407,6 +416,7 @@ async function loadShared() {
   ]);
   Object.assign(S, { daily, rsa, users, visits, roster, markets, storeLeaders });
   S.alerts = seesAll() ? await S.be.alerts().catch(() => []) : [];
+  S.offer = (await S.be.offer().catch(() => null)) || OFFER_DEFAULT;
   await seedFieldTeam();
   // Consultant week: compare today's RSA upload with the one through last Saturday.
   const sat = addDays(weekStartOf(today()), -1);
@@ -447,6 +457,8 @@ function scoresFor(daily) {
   return out;
 }
 const isAdmin = () => S.user?.role === 'admin';
+const hasFliq = u => (u?.pilots || []).includes('frontlineiq');
+const activeOffer = () => offerActive(S.offer, today()) ? S.offer : null;
 const seesAll = () => ['admin', 'exec'].includes(S.user?.role);
 // Field leaders = Market Leaders and directors. Each store has one Market Leader; directors can overlap.
 const leaders = () => S.users.filter(u => FIELD.includes(u.role) && (u.stores || []).length).sort((a, b) => (a.role === 'leader' ? 0 : 1) - (b.role === 'leader' ? 0 : 1) || (a.name || a.email).localeCompare(b.name || b.email));
@@ -1235,9 +1247,33 @@ const fieldBox = (id, label, value, rows = 3, hint = '', field = '', dis = '') =
   ${hint ? `<p class="small" style="margin:0 0 4px">${esc(hint)}</p>` : ''}
   <textarea id="${id}" rows="${rows}" ${field ? `data-field="${field}"` : ''} ${dis}>${esc(value || '')}</textarea>`;
 
+// ---------------------------------------------------------------- run the play, and FrontLine IQ, on a visit
+function playBlock(V, canLog, dis, tri) {
+  const o = activeOffer();
+  const ex = offerMath(3000);
+  return `<div class="play">${PLAY.map((p, i) => `<div class="pstep"><span class="pnum">${i + 1}</span><div><b>${esc(p.t)}</b><p class="small" style="margin:2px 0 0">${esc(p.d)}</p></div></div>`).join('')}</div>
+    ${o ? `<div class="offer"><p class="eyebrow" style="margin:0">${esc(o.name)}${o.end ? ` · through ${esc(shortDate(o.end))}` : ''}</p>
+      <ul class="blist small" style="margin:6px 0">${(o.lines || []).map(l => `<li>${esc(l)}</li>`).join('')}</ul>
+      <p class="small" style="margin:0"><b>Say it in dollars:</b> on a $3,000 room, financing or the bundle saves $${ex.one}. Financing AND the bundle saves $${ex.both}.</p>
+      ${o.fine ? `<p class="small muted" style="margin:4px 0 0">${esc(o.fine)}</p>` : ''}</div>` : ''}
+    <p class="small" style="margin:12px 0 6px"><b>Watch one live guest, or run it as a practice.</b> Connection comes first.</p>
+    ${PLAY_CHECKS.map((t, i) => `<div class="item"><div class="txt">${esc(t)}</div>${tri(`play.${i}`, V.play?.[i])}</div>`).join('')}
+    ${fieldBox('playnotes', 'What you saw', V.playNotes, 2, '', 'playNotes', dis)}`;
+}
+function fliqBlock(V, canLog, dis, tri) {
+  const f = V.fliq || {};
+  return `<p class="small" style="margin:0 0 8px"><b>Today's focus:</b> ${esc(FLIQ_DAILY[dow(V.date)])}</p>
+    <div class="two">
+      <div>${fieldInput('fliqUsing', 'Associates who used it today', f.using, 'fliq.using', dis, 'inputmode="numeric" placeholder="For example 4" style="width:100%"')}</div>
+      <div>${fieldInput('fliqFloor', 'Associates on the floor', f.floor, 'fliq.floor', dis, 'inputmode="numeric" placeholder="For example 6" style="width:100%"')}</div>
+    </div>
+    ${FLIQ_CHECKS.map((t, i) => `<div class="item"><div class="txt">${esc(t)}</div>${tri(`fliq.c.${i}`, f.c?.[i])}</div>`).join('')}
+    ${fieldBox('fliqnotes', 'What FrontLine IQ flagged, and what you did with it', f.notes, 3, 'Which associates, what it coached them on, and what you saw on the floor.', 'fliq.notes', dis)}`;
+}
+
 // ---------------------------------------------------------------- levers on a visit
 // Targets for inputs counted on the floor (no number in the daily report).
-const COUNT_TARGET = { cart: '8 of 10 guests', pieces: 'One more piece per ticket', quality: 'Every guest', price: 'No discount without a leader' };
+const COUNT_TARGET = { bundle: 'Every sale', cart: '8 of 10 guests', pieces: 'One more piece per ticket', quality: 'Every guest', price: 'No discount without a leader' };
 // The inputs to coach by default once a lever is picked: the ones below goal first, then a floor input.
 function defaultInputs(L) {
   const below = L.inputs.filter(i => i.ratio != null && i.ratio < 1).sort((a, b) => a.ratio - b.ratio).map(i => i.key);
@@ -1276,7 +1312,7 @@ function leverBlock(V, x, snap, people, canLog, dis) {
 // ---------------------------------------------------------------- the visit
 // One page the leader works through in the store, top to bottom. It opens already knowing why they
 // are there, what to coach and who to see. Everything autosaves as a draft; Submit closes it out.
-const V_OPEN = new Set(['why', 'win', 'follow', 'lever', 'focus', 'people', 'photos', 'action', 'leadercommit', 'el2', 'el3']);
+const V_OPEN = new Set(['why', 'win', 'follow', 'play', 'fliq', 'lever', 'focus', 'people', 'photos', 'action', 'leadercommit', 'el2', 'el3']);
 const PHOTO_MAX = 30;
 const PHOTO_ELS = ['assortment', 'visual', 'facilities'];   // every area in these gets a photo, asked for right where it's scored
 // The areas that need a photo on every in-person visit, so every Market Leader walks the same store.
@@ -1437,6 +1473,9 @@ async function viewVisit() {
     ${priorSum.leaderCommit ? `<div class="item"><div class="txt"><b>${esc(priorSum.leaderName || 'Store leader')} committed to:</b> ${esc(priorSum.leaderCommit)}</div>${followBadge(S.lcAuto?.v, S.lcAuto)}</div>` : ''}
     ${priorSum.support ? `<div class="item"><div class="txt"><b>Support promised by ${esc(prior.name)}:</b> ${esc(priorSum.support)}</div><p class="small muted" style="margin:4px 0 0">Review it with the leader.</p></div>` : ''}`
     : '<p class="small">Nothing to check. Your action plan today becomes the start of the next visit.</p>', true)}
+
+  ${sec('play', '▶', 'Connect, build value, run the play', activeOffer() ? `How we sell, and the ${esc(S.offer.name)} offer that rewards the bundle.` : 'How we sell, on every guest.', playBlock(V, canLog, dis, tri), true)}
+  ${hasFliq(who) ? sec('fliq', '◆', 'FrontLine IQ', 'Pilot: the AI sales coach for your associates. Check it on every visit.', fliqBlock(V, canLog, dis, tri), true) : ''}
 
   ${sec('lever', '⚑', 'Pull a lever', 'Close rate, average ticket or effective margin. Pick the outcome, then coach the inputs that move it.', leverBlock(V, x, snap, people, canLog, dis), true)}
 
@@ -1674,7 +1713,7 @@ function commitmentOptions(V, snap, priorRaw = []) {
   const out = [];
   priorRaw.forEach(a => {
     const au = autoFollow(a, snap, V); if (au?.v === 'yes') return;
-    out.push({ group: 'Carry forward (not there yet)', key: a.cid ? a.key : (a.key || metricKeyFor(a) || undefined), cid: a.cid, rkey: a.rkey, what: String(a.what || a.behavior || '').trim(), from: au?.now || a.from, to: a.to, how: a.how || '', owner: a.owner || leader, due: nextDay, carried: true });
+    out.push({ group: 'Carry forward (not there yet)', key: a.cid ? a.key : (a.key || metricKeyFor(a) || undefined), cid: a.cid, rkey: a.rkey, what: String(a.what || a.behavior || '').trim(), from: au?.now || a.from || 'Not there yet', to: a.to || 'Every guest', how: a.how || '', owner: a.owner || leader, due: nextDay, carried: true });
   });
   const L = V.lever ? leverStatus(snap?.mtd).find(l => l.key === V.lever) : null;
   if (L) [...L.inputs].sort((a, b) => ((V.leverInputs || []).includes(b.key) ? 1 : 0) - ((V.leverInputs || []).includes(a.key) ? 1 : 0)).forEach(inp => {
@@ -1683,6 +1722,14 @@ function commitmentOptions(V, snap, priorRaw = []) {
     if (inp.metric && inp.value != null) out.push({ group: `Lever: ${L.label}`, key: inp.metric, what: `${first} (${inp.label})`, from: fmtMetric(inp.metric, inp.value), to: fmtMetric(inp.metric, inp.goal), how, owner: leader, due: nextDay, lever: (V.leverInputs || []).includes(inp.key) });
     else if (!inp.metric) out.push({ group: `Lever: ${L.label}`, what: `${first} (${inp.label})`, from: `Count today: ${inp.count.toLowerCase()}`, to: COUNT_TARGET[inp.key] || 'Every guest', how, owner: leader, due: nextDay, lever: (V.leverInputs || []).includes(inp.key) });
   });
+  const playGap = Object.values(V.play || {}).some(x => x === 'no' || x === 'partial');
+  const bundleMiss = ['no', 'partial'].includes(V.play?.[3]);
+  out.push({ group: 'Run the play', what: 'Present every option with financing + Protection + Premium Delivery (the bundle)', from: bundleMiss ? 'Not presented on today\'s guest' : 'Count today: sales with the full bundle', to: 'Every sale',
+    how: `Connect and start a cart first, build value from Best, then buying power and the bundle.${activeOffer() ? ` Show the savings in dollars: $100 off every $1,000 with financing AND the bundle (${S.offer.name}).` : ''} Practice "Running the play" at the huddle.`, owner: leader, due: nextDay, playFirst: playGap });
+  if (['no', 'partial'].includes(V.play?.[0])) out.push({ group: 'Run the play', what: 'Connect first: greet like a referral and start a cart with every guest', from: 'Missed on today\'s guest', to: '8 of 10 guests with a cart', how: 'Practice "Building the cart" standing up. The leader counts carts started at every huddle.', owner: leader, due: nextDay, playFirst: true });
+  const vWho = S.users.find(u => u.email === V.email);
+  if (hasFliq(vWho)) { const u = numOf(V.fliq?.using), fl = numOf(V.fliq?.floor);
+    out.push({ group: 'FrontLine IQ', what: 'Every associate gets reps in FrontLine IQ before their first guest', from: u != null && fl ? `${u} of ${fl} associates` : 'Count today', to: fl ? `${fl} of ${fl} associates` : 'Every associate', how: 'Leader checks FrontLine IQ use at open and goes over what it flagged at the huddle.', owner: leader, due: nextDay, fliqFirst: true }); }
   const opps = storeFocus(snap, 6).filter(f => !f.stretch && COACHING[f.key]);
   const focusFirst = [...opps.filter(f => (V.focus || []).includes(f.key)), ...opps.filter(f => !(V.focus || []).includes(f.key))];
   focusFirst.forEach(f => out.push({ group: "Store opportunities", key: f.key, what: `${beh(f.key)} (${f.label})`, from: fmtMetric(f.key, f.value), to: fmtMetric(f.key, f.target ?? f.goal),
@@ -1701,7 +1748,7 @@ function commitmentOptions(V, snap, priorRaw = []) {
 // coached, then 6 Elements fixes and other store opportunities. Returns how many it filled.
 function fillCommitments(V, focusAll, opts) {
   const all = opts || commitmentOptions(V, S.vSnap, S.vPriorRaw || []);
-  const rank = o => o.carried ? 0 : o.lever ? 0.5 : o.coached ? 1 : o.group === 'People coached today' ? 2 : o.group === '6 Elements fixes' ? 3 : String(o.group).startsWith('Lever') ? 3.5 : 4;
+  const rank = o => o.carried ? 0 : o.lever ? 0.5 : o.playFirst ? 0.6 : o.fliqFirst ? 0.7 : o.coached ? 1 : o.group === 'People coached today' ? 2 : o.group === '6 Elements fixes' ? 3 : String(o.group).startsWith('Lever') ? 3.5 : 4;
   const sugg = [...all].sort((a, b) => rank(a) - rank(b));
   const have = new Set(V.actions.filter(hasCommitment).map(a => String(a.what || a.behavior).toLowerCase()));
   let n = 0;
@@ -1709,7 +1756,7 @@ function fillCommitments(V, focusAll, opts) {
     if (hasCommitment(V.actions[i])) continue;
     const next = sugg.find(x => !have.has(x.what.toLowerCase()));
     if (!next) break;
-    have.add(next.what.toLowerCase()); const { group, coached, lever, ...rest } = next; V.actions[i] = { ...(V.actions[i] || {}), ...rest, suggested: true }; n++;
+    have.add(next.what.toLowerCase()); const { group, coached, lever, playFirst, fliqFirst, ...rest } = next; V.actions[i] = { ...(V.actions[i] || {}), ...rest, suggested: true }; n++;
   }
   return n;
 }
@@ -1737,6 +1784,7 @@ function setPath(o, path, val) {
 function getPath(o, path) { return path.split('.').reduce((c, k) => (c == null ? undefined : c[k]), o); }
 let vTimer = null;
 function saveDraft(now) {
+  S.vEdits = (S.vEdits || 0) + 1;
   const V = S.V; if (!V) return;
   V.at = new Date().toISOString(); V.by = S.user.email;
   V.needScore = S.scores[V.store]?.score ?? null;
@@ -1791,9 +1839,12 @@ function wireVisit(V, canLog, snap) {
     V.actions = V.actions.map(a => a?.suggested && !a.carried ? {} : a); fillCommitments(V);
     saveDraft(); V_OPEN.add('lever'); viewVisit();
   });
+  // The list is rebuilt when opened, so it reflects what was scored since the page drew.
+  const apickHtml = () => { S.cOpts = commitmentOptions(V, S.vSnap, S.vPriorRaw || []); return `<option value="">Choose from today's opportunities and coaching…</option>${[...new Set(S.cOpts.map(o => o.group))].map(gr => `<optgroup label="${esc(gr)}">${S.cOpts.map((o, k) => o.group === gr ? `<option value="${k}">${esc(o.what)}: ${esc(o.from)} to ${esc(o.to)}</option>` : '').join('')}</optgroup>`).join('')}`; };
+  v.querySelectorAll('[data-apick]').forEach(sel => { sel.onfocus = sel.onmousedown = () => { if (sel.dataset.fresh !== String(S.vEdits || 0)) { sel.innerHTML = apickHtml(); sel.dataset.fresh = String(S.vEdits || 0); } }; });
   v.querySelectorAll('[data-apick]').forEach(sel => sel.onchange = () => {
     const o = S.cOpts[+sel.value]; if (!o) return;
-    const { group, coached, lever, ...rest } = o; V.actions[+sel.dataset.apick] = { ...rest, suggested: false };
+    const { group, coached, lever, playFirst, fliqFirst, ...rest } = o; V.actions[+sel.dataset.apick] = { ...rest, suggested: false };
     saveDraft(); V_OPEN.add('action'); viewVisit(); toast('Commitment filled in. Change anything.');
   });
   wireLeaderPicks(v);
@@ -2091,6 +2142,11 @@ async function viewBriefInner() {
       <p class="small" style="margin:4px 0 0">Here's ${esc(perLabel)} across your ${stores.length} stores. ${dataLine()}</p></div>
     ${picker}
   </div>
+  ${activeOffer() ? `<section class="panel offerbar"><p class="eyebrow" style="margin:0">Connect, build value, run the play · ${esc(S.offer.name)} through ${esc(shortDate(S.offer.end))}</p>
+    <p style="margin:4px 0 0">6 or 12 month financing AND Protection + Premium Delivery is <b>$100 off every $1,000</b>. Either one alone is $50. Connection first, every guest.</p></section>` : ''}
+  ${hasFliq(who) ? `<section class="panel" style="border-left:6px solid #3F738D"><h3 style="margin:0 0 4px">FrontLine IQ: today's focus</h3>
+    <p style="margin:0">${esc(FLIQ_DAILY[dow(t)])}</p>
+    <p class="small" style="margin:6px 0 0">Check in with each store leader: who used it yesterday, what it flagged, and who needs a follow-up. It's on every visit too.</p></section>` : ''}
   <section class="panel today">
     <h3>Today</h3>
     ${todayDay?.store ? `<p style="margin:0 0 4px"><b>${todayDay.stops?.length ? `${todayDay.anchor ? 'Anchor store, ' : ''}${esc(todayDay.part || 'AM')}: ${esc(todayDay.store)}` : `Full-day visit: ${esc(todayDay.store)}`}</b> ${needChip(S.scores[todayDay.store]?.score)} ${todayDay.status === 'done' ? '<span class="pill done">Visited</span>' : ''}${(todayDay.stops || []).map(x => `<br><b>${esc(x.part || 'Stop')}: ${esc(x.store)}</b> ${needChip(S.scores[x.store]?.score)} ${x.status === 'done' ? '<span class="pill done">Visited</span>' : `<button class="link" type="button" data-bstop="${esc(x.store)}">Open</button>`}`).join('')}</p>
@@ -2418,6 +2474,8 @@ async function viewOne() {
       ${tileFor('Commitments', String(commitN), 'set on visits', '')}
     </div>
     ${notSeen.length ? `<div class="warnbox"><b>No visit or call:</b> ${notSeen.map(esc).join(', ')}</div>` : ''}
+    ${hasFliq(who) ? (() => { const fv = vw.filter(x => numOf(x.fliq?.floor)); const u = fv.reduce((t2, x) => t2 + (numOf(x.fliq.using) || 0), 0), fl = fv.reduce((t2, x) => t2 + numOf(x.fliq.floor), 0);
+      return `<p class="small" style="margin:8px 0 0"><b>FrontLine IQ:</b> ${fv.length ? `${u} of ${fl} associates using it across ${fv.length} visit${fv.length > 1 ? 's' : ''} (${Math.round(u / fl * 100)}%).` : 'not checked on any visit that week.'}</p>`; })() : ''}
     ${schedChanges.length ? `<p class="eyebrow" style="margin-top:10px">Schedule changes that week</p><ul class="blist">${schedChanges.map(a => `<li><b>${esc(a.reason)}</b>${a.note ? ': ' + esc(a.note) : ''} <span class="small muted">(${esc(changeLines(a).join('; '))})</span></li>`).join('')}</ul>` : ''}
     <p class="eyebrow" style="margin-top:10px">Commitments due last week</p>
     ${dueWk.length ? `<ul class="blist">${dueWk.map(({ x, a, au }) => `<li><b>${esc(x.store)}:</b> ${esc(commitmentText(a))} ${au?.v ? `<span class="rv ${au.v === 'yes' ? 'done' : au.v === 'partial' ? 'part' : 'not'}">${au.v === 'yes' ? 'Done' : au.v === 'partial' ? 'Moving' : 'Not yet'}</span>` : ''}</li>`).join('')}</ul>` : '<p class="small muted">None were due that week.</p>'}`)}
@@ -2596,7 +2654,7 @@ async function viewMessages() {
   const tp = { people: S.rsa?.people || [], weeks: S.weeks || {}, tops: S.msgTops !== false };
   let text = '';
   if (!S.daily && type !== 'recap') text = 'Waiting on the first daily report upload.';
-  else if (type === 'dailyStore') text = dailyStore({ store: S.msgStore, snap, asOf, plan, today: today(), sender: who.name, ...tp });
+  else if (type === 'dailyStore') text = dailyStore({ store: S.msgStore, snap, asOf, plan, today: today(), sender: who.name, ...tp, offer: activeOffer(), fliq: hasFliq(who) ? FLIQ_DAILY[dow(today())] : null });
   else if (type === 'dailyMarket') text = dailyMarket({ stores, daily: S.daily, asOf, plan, today: today(), sender: who.name, ...tp });
   else if (type === 'kickoff') text = kickoff({ store: S.msgStore, snap, asOf, people: S.rsa?.people || [], goals: DEFAULT_GOALS, pace: paceFactor(S.rsa?.to), visitDays, pastDays, sender: who.name, weekStart: week, ...tp });
   else if (type === 'marketUpdate') text = marketUpdate({ stores, daily: S.daily, scores: S.scores, plan, sender: who.name, asOf, ...tp });
@@ -2887,7 +2945,20 @@ function viewSetup() {
   const taken = s => S.users.find(l => l.role === 'leader' && l.email !== u?.email && (l.stores || []).includes(s));
   const groups = {};
   STORES.forEach(st => (groups[st.district] ||= []).push(st));
+  const of = S.offer || OFFER_DEFAULT;
   v.innerHTML = `
+  <section class="panel">
+    <h2 style="margin:0 0 4px">In-store offer</h2>
+    <p class="small">Shows on every visit under "Run the play", on the daily brief, and in the daily huddle message while it's running. Update it when the next event starts.</p>
+    <div class="focus" style="gap:0 16px">
+      <div>${fieldInput('ofname', 'Event name', of.name, '', '', 'style="width:100%"')}</div>
+      <label for="ofstart">Starts<input type="date" id="ofstart" value="${esc(of.start || '')}"></label>
+      <label for="ofend">Ends<input type="date" id="ofend" value="${esc(of.end || '')}"></label>
+    </div>
+    ${fieldBox('oflines', 'The offer, one line each', (of.lines || []).join('\n'), 4)}
+    ${fieldBox('offine', 'Fine print', of.fine, 2)}
+    <div class="row" style="margin-top:10px"><button class="btn primary" type="button" id="ofsave">Save offer</button><span class="small ${offerActive(of, today()) ? 'good' : 'muted'}">${offerActive(of, today()) ? 'Running now' : 'Not running today'}</span></div>
+  </section>
   ${marketsSection(groups)}
   <section class="panel">
     <div class="spread" style="margin:0 0 8px"><h2 style="margin:0">Logins and store assignment</h2><button class="btn primary" id="adduser">Add a person</button></div>
@@ -2905,6 +2976,8 @@ function viewSetup() {
         const t = taken(st.name);
         return `<label class="check" for="st_${st.id}" ${t ? `title="Now with ${esc(t.name || t.email)}" style="opacity:.6"` : ''}><input type="checkbox" id="st_${st.id}" value="${esc(st.name)}" ${(u.stores || []).includes(st.name) ? 'checked' : ''}>${esc(st.name)}</label>`;
       }).join('')}`).join('')}</div></div>
+      <p class="small" style="margin:12px 0 4px"><b>Pilots</b></p>
+      <label class="check" for="upfliq"><input type="checkbox" id="upfliq" ${hasFliq(u) ? 'checked' : ''}>FrontLine IQ (AI sales coach). Adds it to their visits and daily brief.</label>
       <p class="small" style="margin:12px 0 4px"><b>Default days off</b> (pick 2; Tue, Wed or Thu works best. They can change any week from their own page.)</p>
       <div class="dayspick">${DAY_LONG.map((n, i) => `<label class="check" for="uo${i}"><input type="checkbox" id="uo${i}" value="${i}" ${safeOff(u.off).includes(i) ? 'checked' : ''}>${n}</label>`).join('')}</div>
       <div class="row" style="margin-top:14px"><button class="btn primary" type="submit">Save</button><button class="link" type="button" id="ucancel">Cancel</button>
@@ -2919,6 +2992,10 @@ function viewSetup() {
     </tbody></table></div>
   </section>`;
   $('#adduser').onclick = () => { S.editUser = '__new'; viewSetup(); };
+  $('#ofsave').onclick = async () => {
+    const o = { name: $('#ofname').value.trim() || 'In-store offer', start: $('#ofstart').value, end: $('#ofend').value, lines: $('#oflines').value.split('\n').map(x => x.trim()).filter(Boolean), fine: $('#offine').value.trim() };
+    try { await S.be.saveOffer(o); S.offer = o; toast('Offer saved.'); viewSetup(); } catch (e) { toast(friendly(e), true); }
+  };
   wireMarkets();
   wireMics(v);
   v.querySelectorAll('[data-eu]').forEach(b => b.onclick = () => { S.editUser = b.dataset.eu; viewSetup(); });
@@ -2937,7 +3014,8 @@ function viewSetup() {
     const off = [...v.querySelectorAll('.dayspick input:checked')].map(x => +x.value);
     const role = $('#urole').value;
     if (FIELD.includes(role) && !validOff(off)) return toast('Pick exactly 2 default days off.', true);
-    const doc = { ...(S.users.find(x => x.email === email) || {}), email, name: $('#uname').value.trim(), role, stores, off };
+    const prevPilots = (S.users.find(x => x.email === email)?.pilots || []).filter(p => p !== 'frontlineiq');
+    const doc = { ...(S.users.find(x => x.email === email) || {}), email, name: $('#uname').value.trim(), role, stores, off, pilots: [...prevPilots, ...($('#upfliq').checked ? ['frontlineiq'] : [])] };
     try {
       // A store has one Market Leader: take moved stores off any other Market Leader. Directors can overlap.
       for (const other of S.users.filter(x => role === 'leader' && x.role === 'leader' && x.email !== email && (x.stores || []).some(s => stores.includes(s)))) {

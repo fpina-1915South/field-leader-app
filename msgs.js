@@ -1,6 +1,6 @@
 // Team messages: plain text the Market Leader copies into Teams, text or email.
 // Pure functions. Written plain and direct, no em dashes, SPG always with cancellations, close with "Let's go."
-import { DAY_LONG, DAY_NAMES, dow, fromIso, weekStartOf, STORE_GOALS, storeFocus, rsaPicks, visitSummary, draggers, helpers } from './ml.js?v=202610010747';
+import { DAY_LONG, DAY_NAMES, dow, fromIso, weekStartOf, STORE_GOALS, storeFocus, rsaPicks, visitSummary, draggers, helpers } from './ml.js?v=202610010759';
 
 const money = v => (v < 0 ? '-$' : '$') + Math.abs(Math.round(v)).toLocaleString('en-US');
 const p1 = v => (Math.round(v * 10) / 10).toString();
@@ -144,7 +144,7 @@ function whereToday(plan, todayIso) {
   return d?.store || null;
 }
 // 4. Daily huddle note to one store.
-export function dailyStore({ store, snap, asOf, plan, today, sender, people = [], weeks = {}, tops = true }) {
+export function dailyStore({ store, snap, asOf, plan, today, sender, people = [], weeks = {}, tops = true, offer = null, fliq = null }) {
   if (!snap?.mtd) return `${store} team, no numbers for this store in the latest daily report yet.`;
   const dw = dayOrWeek(snap), m = snap.mtd, w = snap.wtd;
   const out = [];
@@ -175,6 +175,8 @@ export function dailyStore({ store, snap, asOf, plan, today, sender, people = []
     if (hp.length) out.push(`${hp[0]} is doing this well. Have them show the team at the huddle.`);
     if (dr.length) out.push(`Leaders, work with ${dr.join(' and ').replace(/ and (?=.* and )/, ', ')} on this today.`);
   }
+  if (offer) out.push('', `Connect, build value, run the play. ${offer.name}: 6 or 12 month financing AND Protection + Premium Delivery is $100 off every $1,000. Present the bundle on every option.`);
+  if (fliq) out.push('', `FrontLine IQ: get your reps in before your first guest. ${fliq}`);
   const best = tops ? topPerformers({ people, weeks, stores: [store], period: 'week' }) : [];
   if (best.length) out.push('', ...best);
   const at = whereToday(plan, today);

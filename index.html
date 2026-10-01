@@ -123,6 +123,11 @@ button.offday:disabled{cursor:default;opacity:.55}
 .msgtypes button.on{background:#003B4A;border-color:#003B4A;color:#fff}
 #msgout{font-family:var(--font);font-size:15px;line-height:1.55;min-height:320px}
 .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+/* run the play */
+.play{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin:0 0 12px}
+.pstep{display:flex;gap:10px;align-items:flex-start;background:var(--icy);border-radius:10px;padding:10px 12px}
+.pnum{flex:0 0 26px;height:26px;border-radius:50%;background:#003B4A;color:#fff;font-weight:700;display:flex;align-items:center;justify-content:center;font-size:13px}
+.offer,.offerbar{border-left:5px solid #F68C2C;background:var(--amber-bg);border-radius:8px;padding:10px 14px}
 /* multi-stop days and anchor stores */
 .dstop{display:flex;flex-direction:column;gap:6px;padding:10px 0 0;border-top:1px dashed var(--line)}
 .day .dstop:first-of-type{border-top:0;padding-top:0}
@@ -296,6 +301,6 @@ details.vis summary b{color:var(--navy)}
 </div></header>
 <main id="app"><p class="loading">Loading…</p></main>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
-<script type="module" src="./app.js?v=202610010747"></script>
+<script type="module" src="./app.js?v=202610010759"></script>
 </body>
 </html>

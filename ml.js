@@ -4,7 +4,7 @@
 import {
   normalizeHeader, toNumber, parseDate, slug, canonicalStore, isKnownStore, REGIONS, STORE_METRICS,
   COACHING, METRICS, pickFocus, pickStoreFocus, goalsFor, DEFAULT_GOALS, isOutlet, minSphFor, fmt, weeklyTarget
-} from './base.js?v=202610010747';
+} from './base.js?v=202610010759';
 
 const numOrNull = v => (v === '' || v === null || v === undefined ? null : toNumber(v));
 
@@ -210,6 +210,9 @@ export const LEVERS = [
     { key: 'quality', label: 'Quality of the pieces: start at Best', metric: null, count: 'Guests shown Best first', drill: 'quality',
       behavior: 'Start at Best and walk down only if the guest asks.',
       ask: 'Which option do you show first?' },
+    { key: 'bundle', label: 'Run the play: the bundle', metric: null, count: 'Sales with financing + Protection + Premium Delivery', drill: 'bundle',
+      behavior: 'Present every option with 6 or 12 month financing plus Protection and Premium Delivery. The bundle is how the guest gets the biggest savings.',
+      ask: 'How many of your last 10 sales had the full bundle?' },
     { key: 'bedding', label: 'Bedding: start the conversation', metric: 'beddingPct', drill: 'bedding',
       behavior: 'Ask every guest how they are sleeping. Start the conversation even when they came in for something else.',
       ask: 'How many guests today did you ask about their sleep?' },
@@ -227,6 +230,9 @@ export const LEVERS = [
     { key: 'delivery', label: 'Delivery', metric: 'deliveryPct', drill: 'delivery',
       behavior: 'Quote the delivered price first on every sale.',
       ask: 'Which price do you quote first?' },
+    { key: 'bundle', label: 'Run the play: the bundle', metric: null, count: 'Sales with financing + Protection + Premium Delivery', drill: 'bundle',
+      behavior: 'Present every option with 6 or 12 month financing plus Protection and Premium Delivery. The bundle is how the guest gets the biggest savings, and it protects our margin.',
+      ask: 'How many of your last 10 sales had the full bundle?' },
     { key: 'price', label: 'Hold price', metric: null, count: 'Sales with no discount', drill: 'effMargin',
       behavior: 'Build value and show the monthly payment first. No discount without a leader, and only after finance.',
       ask: 'What happened the last time a guest asked for a better price?' }
@@ -253,6 +259,52 @@ export function suggestLever(p) {
   const worst = st.sort((a, b) => a.ratio - b.ratio)[0];
   return worst && worst.ratio < 1 ? worst.key : st.length ? null : null;
 }
+
+
+// ---------------------------------------------------------------- run the play (the in-store offer)
+// Connect, build value, run the play. The offer is the current in-store event; Frank can change it in Setup.
+export const OFFER_DEFAULT = {
+  name: 'Fall Savings Event', start: '2026-09-15', end: '2026-10-26',
+  lines: [
+    '$50 off every $1,000 with 6 or 12 month financing, OR with the Protection + Premium Delivery bundle (cash, credit or Acima)',
+    'Double your savings: $100 off every $1,000 with 6 or 12 month financing AND the Protection + Premium Delivery bundle',
+    'Plus $300 off any premium mattress $1,999 or more, or 5% military discount (active and retired)'
+  ],
+  fine: 'Not combined with other offers or financing over 12 months. Excludes clearance, floor models, protection plans, and select premium mattress brands.'
+};
+export const PLAY = [
+  { key: 'connect', t: 'Connect', d: 'Greet like a referral, learn how they live, and start a cart with every guest.' },
+  { key: 'value', t: 'Build value', d: 'Start at Best, show the whole room, tell the Ashley story. Value before price, every time.' },
+  { key: 'play', t: 'Run the play', d: 'Buying power early with 6 or 12 month financing, then present every option with Protection + Premium Delivery. That is the double savings.' }
+];
+export const PLAY_CHECKS = [
+  'Connected first: greeted like a referral and started a cart',
+  'Built value before price: started at Best and showed the whole room',
+  'Buying power early: 6 or 12 month financing offered in the first 10 minutes',
+  'Bundle presented: every option with Protection + Premium Delivery',
+  'Showed the guest their savings in dollars and asked which option feels right'
+];
+export const offerActive = (o, day) => !!o && (!o.start || day >= o.start) && (!o.end || day <= o.end);
+// What the bundle saves on a ticket, so the consultant can say it in dollars.
+export const offerMath = amount => { const k = Math.floor(amount / 1000); return { one: k * 50, both: k * 100 }; };
+
+// ---------------------------------------------------------------- FrontLine IQ pilot
+// An AI sales coach in the store for sales associates. Only for Market Leaders flagged as pilots.
+export const FLIQ_CHECKS = [
+  'Associates on the floor today have used FrontLine IQ',
+  'Reps in before the first guest: practiced with it at open',
+  'Leader went over what FrontLine IQ flagged at the huddle',
+  'One associate coached on something FrontLine IQ flagged'
+];
+export const FLIQ_DAILY = [
+  'Sunday: go over last week\'s FrontLine IQ use with each store leader. Who used it, who didn\'t.',
+  'Monday: reps before the first guest. Every associate runs one FrontLine IQ practice at open.',
+  'Tuesday: connection. Practice the greeting and starting a cart in FrontLine IQ.',
+  'Wednesday: buying power. Practice bringing up financing in the first 10 minutes.',
+  'Thursday: run the play. Practice presenting the bundle and the double savings.',
+  'Friday: weekend prep. Every associate role-plays the weekend guest in FrontLine IQ.',
+  'Saturday: recognize the associate who used FrontLine IQ the most this week.'
+];
 
 // ---------------------------------------------------------------- drive time between stores
 // City-level coordinates for each store. Drive time is an estimate: straight-line miles x 1.15 for
@@ -488,6 +540,8 @@ export function teamSignals(people, weeks, store, goals = DEFAULT_GOALS) {
 // One drill per coaching lever. The leader plays the guest, the consultant runs the rep,
 // the leader scores what they see, gives one adjustment, and they run it again.
 const D = {
+  bundle: { title: 'Running the play', guest: 'Ask "Is there any deal going on right now?" before the salesperson brings it up.',
+    watch: ['Connected and started a cart before talking about the offer', 'Built value first: started at Best and showed the whole room', 'Got buying power with 6 or 12 month financing', 'Presented every option with Protection + Premium Delivery and showed the double savings'] },
   cart: { title: 'Building the cart', guest: 'Say "I\'m just looking at sofas today." Like two pieces, but don\'t ask for anything.',
     watch: ['Started a cart in the first 10 minutes', 'Added every piece the guest liked as they went', 'Asked about the rest of the room and added to the cart', 'Walked the guest through the cart before any talk of price'] },
   quality: { title: 'Starting at Best', guest: 'Ask "What\'s the difference between these three?"',
@@ -514,7 +568,7 @@ const D = {
     watch: ['Recognized the pause as the moment to offer the app', 'Explained it takes a few minutes and has no cost to check', 'Made a clear ask instead of "if you want"', 'Walked you through it or handed it off to a leader'] }
 };
 export const DRILLS = {
-  cart: D.cart, quality: D.quality, finance: D.finance, room: D.room, bedding: D.bedding, protection: D.protection, delivery: D.delivery,
+  bundle: D.bundle, cart: D.cart, quality: D.quality, finance: D.finance, room: D.room, bedding: D.bedding, protection: D.protection, delivery: D.delivery,
   sph: D.connection, closeRate: D.close, cancelPct: D.cancel, avgTicket: D.room, effMargin: D.price, discountPct: D.price,
   financePct: D.finance, appsToTraffic: D.apps, creditApps: D.apps, beddingPct: D.bedding, beddingSph: D.bedding,
   protectionPct: D.protection, protectionSph: D.protection, protectionAttach: D.protection, deliveryPct: D.delivery
