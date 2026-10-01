@@ -1,16 +1,16 @@
-import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610011652';
-import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610011652';
+import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610011659';
+import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610011659';
 import {
   STORES, DISTRICTS, canonicalStore, isKnownStore, parseRsa, rangeFromFileName, parseTeamRoster, resolveReportNames,
   paceFactor, DEFAULT_GOALS, cidOf, status, fmt, goalsFor, TEAM_FOCUS, pickStoreFocus
-} from './base.js?v=202610011652';
+} from './base.js?v=202610011659';
 import {
   iso, fromIso, addDays, daysApart, weekStartOf, DAY_NAMES, DAY_LONG, dow, DEFAULT_OFF, validOff, safeOff, VISIT_DAYS, STORE_GOALS,
   parseDaily, needScore, band, pct, environment, buildPlan, pivotSuggestion, ELEMENTS, SEGMENTS, AORS, PRACTICE, VISIT_TYPES, kindToType, visitScore, visitSummary, consultantCoaching, drillFor, draggers, helpers, STORE_TO_RSA, hasCommitment, commitmentText, blackoutFor, offChoicesFor, storeFocus, rsaPicks, consultantWeeks, teamSignals,
   STORE_METRICS, slug, COACHING, METRICS, PLAIN, isOutlet, driveMin, driveText, MAX_SPLIT_MIN, LEVERS, leverStatus, suggestLever,
   consultantTrends, TREND_ROWS, trendFmt, trendRead, TREND_LABEL,
   OFFER_DEFAULT, PLAY, PLAY_CHECKS, PLAY_CHECKS_REMOTE, offerActive, offerMath, FLIQ_CHECKS, FLIQ_CHECKS_REMOTE, FLIQ_DAILY
-} from './ml.js?v=202610011652';
+} from './ml.js?v=202610011659';
 
 const DEMO = !firebaseConfig.apiKey || firebaseConfig.apiKey.startsWith('PASTE');
 const FB = 'https://www.gstatic.com/firebasejs/10.12.2/';
@@ -475,6 +475,8 @@ async function loadShared() {
     S.meta.latestDaily ? S.be.daily(S.meta.latestDaily) : null, S.be.rsa(), S.be.users().catch(() => [S.user]), S.be.visits(), S.be.roster(), S.be.markets().catch(() => []), S.be.storeLeaders().catch(() => [])
   ]);
   Object.assign(S, { daily, rsa, users, visits, roster, markets, storeLeaders });
+  // Each store's numbers carry the store name, so store goals (like the outlet ticket goal) apply.
+  Object.entries(daily?.stores || {}).forEach(([name, snap]) => Object.values(snap || {}).forEach(per => { if (per && typeof per === 'object' && per.k) per.store = name; }));
   S.alerts = seesAll() ? await S.be.alerts().catch(() => []) : [];
   S.offer = (await S.be.offer().catch(() => null)) || OFFER_DEFAULT;
   await seedFieldTeam();
@@ -1570,7 +1572,7 @@ async function viewVisit() {
     const rd = trendRead(t), g = goalsFor(DEFAULT_GOALS, x.store);
     const ti = S.trendInfo || {};
     const cols = [['ytd', 'YTD'], ['lastMonth', lmLabel], ['mtd', ti.cur ? MON[+ti.cur.slice(5, 7) - 1] + ' MTD' : 'MTD'], ['wtd', 'This wk'], ['day', ti.day ? shortDate(ti.day) : 'Prev day']];
-    const cell = (per, r) => { const v = t[per]?.k?.[r.key]; const gl = g[r.key]; const cls = v == null || gl == null ? '' : status({ lower: r.lower }, v, gl) === 'green' ? 'good' : status({ lower: r.lower }, v, gl) === 'red' ? 'bad' : ''; return `<td class="num ${cls}">${trendFmt(r, v)}</td>`; };
+    const cell = (per, r) => { const v = t[per]?.k?.[r.key]; const gl = r.total ? (per === 'lastMonth' ? g[r.key] : null) : g[r.key]; const cls = v == null || gl == null ? '' : status({ lower: r.lower }, v, gl) === 'green' ? 'good' : status({ lower: r.lower }, v, gl) === 'red' ? 'bad' : ''; return `<td class="num ${cls}">${trendFmt(r, v)}</td>`; };
     const arrow = k => rd.rows[k] === 'up' ? '<td class="ar good" title="Getting better">▲</td>' : rd.rows[k] === 'down' ? '<td class="ar bad" title="Slipping">▼</td>' : '<td class="ar muted">·</td>';
     const hrs = per => t[per]?.hours != null ? Math.round(t[per].hours).toLocaleString('en-US') : '--';
     const ytdNote = S.trendInfo?.ytd && !S.trendInfo.ytd.uploaded ? ` YTD is built from the monthly copies on file since ${esc(shortDate(S.trendInfo.ytd.from))}.` : !S.trendInfo?.ytd ? ' Upload a year-to-date RSA report to fill in YTD.' : '';
@@ -1726,8 +1728,8 @@ async function viewVisit() {
       <p class="small muted" style="margin:4px 0 0">This store's whole team shows first, including anyone without RSA numbers yet. Anyone in the RSA report works, and a name not on either list can be coached too.${rosterOnly.length ? ` ${storePeople.length} of ${storePeople.length + rosterOnly.length} on the ${esc(x.store)} team have RSA numbers${S.rsa?.to ? ' through ' + esc(shortDate(S.rsa.to)) : ''}.` : ''}</p>` : ''}
     <div class="cnotes" style="margin-top:12px">${fieldBox('teamnotes', 'Notes on the team', V.teamNotes, 3, 'Anything about the sales team as a whole: energy, staffing, who is ready for more.', 'teamNotes', dis)}</div>
     ${team?.rows.length ? `<details style="margin-top:10px"><summary class="small" style="cursor:pointer;font-weight:600;color:var(--navy)">Whole team: year, month and this week (${team.rows.length})</summary>
-      <div class="scroller" style="margin-top:8px"><table class="grid"><thead><tr><th>Consultant</th><th class="num">YTD SPH</th><th class="num">Month SPH</th><th class="num">Before this week</th><th class="num">This week</th><th class="num">Hrs</th><th>Flag</th></tr></thead><tbody>
-      ${team.rows.map(r => `<tr><td class="nm">${esc(titleName(r.name))}</td><td class="num">${S.trends?.[r.cid]?.ytd ? '$' + Math.round(S.trends[r.cid].ytd.k.sph) : '--'}</td><td class="num ${r.below ? 'bad' : ''}">$${Math.round(r.sph)}</td><td class="num">${r.wk.priorSph ? '$' + Math.round(r.wk.priorSph) : '--'}</td><td class="num ${r.slipping ? 'bad' : r.rising ? 'good' : ''}">${r.wk.sph != null && r.wk.hours >= 1 ? '$' + Math.round(r.wk.sph) : '--'}</td><td class="num">${r.wk.hours >= 1 ? Math.round(r.wk.hours) : '--'}</td><td>${r.below ? '<span class="tag below">Below min</span>' : r.slipping ? '<span class="tag slipping">Slipping</span>' : r.rising ? '<span class="tag model">Rising</span>' : ''}</td></tr>`).join('')}
+      <div class="scroller" style="margin-top:8px"><table class="grid"><thead><tr><th>Consultant</th><th class="num">Revenue MTD</th><th class="num">YTD SPH</th><th class="num">Month SPH</th><th class="num">Before this week</th><th class="num">This week</th><th class="num">Hrs</th><th>Flag</th></tr></thead><tbody>
+      ${team.rows.map(r => `<tr><td class="nm">${esc(titleName(r.name))}</td><td class="num">${(() => { const v = people.find(q => q.cid === r.cid)?.k?.netSales; return v != null ? '$' + Math.round(v).toLocaleString('en-US') : '--'; })()}</td><td class="num">${S.trends?.[r.cid]?.ytd ? '$' + Math.round(S.trends[r.cid].ytd.k.sph) : '--'}</td><td class="num ${r.below ? 'bad' : ''}">$${Math.round(r.sph)}</td><td class="num">${r.wk.priorSph ? '$' + Math.round(r.wk.priorSph) : '--'}</td><td class="num ${r.slipping ? 'bad' : r.rising ? 'good' : ''}">${r.wk.sph != null && r.wk.hours >= 1 ? '$' + Math.round(r.wk.sph) : '--'}</td><td class="num">${r.wk.hours >= 1 ? Math.round(r.wk.hours) : '--'}</td><td>${r.below ? '<span class="tag below">Below min</span>' : r.slipping ? '<span class="tag slipping">Slipping</span>' : r.rising ? '<span class="tag model">Rising</span>' : ''}</td></tr>`).join('')}
       </tbody></table></div></details>` : ''}`)}
 
   ${x.remote ? '' : ELEMENTS.map(e => sec('el' + e.n, e.n, e.t, PHOTO_ELS.includes(e.key) ? `${e.q} Photos: ${photoAreas(e).filter(a => (S.vPhotos || []).some(p => p.el === e.key && p.item === a)).length} of ${photoAreas(e).length}` : e.q, `

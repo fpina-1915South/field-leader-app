@@ -139,7 +139,8 @@ export const DEFAULT_GOALS = {
   standard: { netSales: 46648, sph: 400, avgTicket: 2200, effMargin: 55.5, financePct: 65, creditApps: 18,
     beddingPct: 20, beddingSph: 60, protectionPct: 8, protectionSph: 32, protectionAttach: 60, deliveryPct: 8,
     cancelPct: 4, discountPct: 12, appsToTraffic: 10 },
-  outlet: null,
+  // Outlets: lower ticket goal (Outlet Regency, Outlet Pensacola, Outlet Greensboro).
+  outlet: { avgTicket: 1400 },
   outletStores: OUTLETS,
   minSph: 250, outletMinSph: 150
 };

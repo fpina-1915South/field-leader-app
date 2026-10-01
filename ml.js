@@ -4,7 +4,7 @@
 import {
   normalizeHeader, toNumber, parseDate, slug, canonicalStore, isKnownStore, REGIONS, STORE_METRICS,
   COACHING, METRICS, pickFocus, pickStoreFocus, goalsFor, DEFAULT_GOALS, isOutlet, minSphFor, fmt, weeklyTarget
-} from './base.js?v=202610011652';
+} from './base.js?v=202610011659';
 
 const numOrNull = v => (v === '' || v === null || v === undefined ? null : toNumber(v));
 
@@ -243,7 +243,7 @@ const LEVER_DEFAULT = { closeRate: null, avgTicket: 2200, effMargin: 55.5 };
 export function leverStatus(p) {
   if (!p?.k) return [];
   return LEVERS.map(L => {
-    const value = p.k[L.key], goal = p.budget?.[L.key] ?? LEVER_DEFAULT[L.key];
+    const value = p.k[L.key], goal = p.budget?.[L.key] ?? (L.key === 'avgTicket' && p.store && isOutlet(DEFAULT_GOALS, p.store) ? DEFAULT_GOALS.outlet.avgTicket : LEVER_DEFAULT[L.key]);
     const ratio = value != null && goal ? value / goal : null;
     const inputs = L.inputs.map(inp => {
       if (!inp.metric) return { ...inp, value: null, goal: null, ratio: null };
@@ -757,6 +757,7 @@ export function consultantTrends(src) {
 }
 // Rows shown on a consultant card. better: which way is good.
 export const TREND_ROWS = [
+  { key: 'netSales', label: 'Revenue', say: 'revenue', fmt: 'money', total: true },
   { key: 'sph', label: 'SPH', say: 'SPH', fmt: 'money' }, { key: 'avgTicket', label: 'Avg ticket', say: 'average ticket', fmt: 'money' },
   { key: 'financePct', label: 'Finance', say: 'finance', fmt: 'pct' }, { key: 'appsPer40', label: 'Apps / 40 hrs', say: 'credit apps', fmt: 'num' },
   { key: 'beddingPct', label: 'Bedding', say: 'bedding', fmt: 'pct' }, { key: 'protectionPct', label: 'Protection', say: 'protection', fmt: 'pct' },
@@ -776,6 +777,7 @@ export function trendRead(t) {
   const rows = {}; let up = null, down = null;
   if (!baseP || !recentP || recentP === baseP) return { rows, up, down, recentP, baseP };
   for (const r of TREND_ROWS) {
+    if (r.total) continue; // a total depends on how long the period is, so it gets no arrow
     const per = useWk && t.wtd.k[r.key] != null ? 'wtd' : fallback;
     const a = t[baseP].k[r.key], b = t[per]?.k?.[r.key];
     if (a == null || b == null || !a) continue;
