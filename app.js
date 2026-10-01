@@ -1,14 +1,14 @@
-import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610010621';
-import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610010621';
+import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610010628';
+import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610010628';
 import {
   STORES, DISTRICTS, canonicalStore, isKnownStore, parseRsa, rangeFromFileName, parseTeamRoster, resolveReportNames,
   paceFactor, DEFAULT_GOALS, cidOf, status, fmt, goalsFor, TEAM_FOCUS, pickStoreFocus
-} from './base.js?v=202610010621';
+} from './base.js?v=202610010628';
 import {
   iso, fromIso, addDays, daysApart, weekStartOf, DAY_NAMES, DAY_LONG, dow, DEFAULT_OFF, validOff, safeOff, VISIT_DAYS, STORE_GOALS,
   parseDaily, needScore, band, pct, environment, buildPlan, pivotSuggestion, ELEMENTS, SEGMENTS, AORS, PRACTICE, VISIT_TYPES, kindToType, visitScore, visitSummary, consultantCoaching, drillFor, draggers, helpers, STORE_TO_RSA, hasCommitment, commitmentText, blackoutFor, offChoicesFor, storeFocus, rsaPicks, consultantWeeks, teamSignals,
   STORE_METRICS, slug, COACHING, METRICS, PLAIN, isOutlet, driveMin, driveText, MAX_SPLIT_MIN
-} from './ml.js?v=202610010621';
+} from './ml.js?v=202610010628';
 
 const DEMO = !firebaseConfig.apiKey || firebaseConfig.apiKey.startsWith('PASTE');
 const FB = 'https://www.gstatic.com/firebasejs/10.12.2/';
@@ -1181,6 +1181,35 @@ function wireMics(root) {
     try { rec.start(); b.classList.add('on'); b.querySelector('span').textContent = 'Stop'; box.focus(); } catch (x) { toast('Could not start talk to text.', true); rec = null; }
   });
 }
+// Store leader picker for a visit: the store's leaders from the store leader list (GM first), plus
+// ASMs and Sales Leads on the sales roster, then "Someone else" to type a name.
+function leaderOptions(store) {
+  const list = [], seen = new Set();
+  const add = (name, role) => { const n = titleName(String(name || '').trim()); if (!n || seen.has(n.toLowerCase())) return; seen.add(n.toLowerCase()); list.push({ n, r: role }); };
+  (S.storeLeaders || []).filter(l => l.store === store).forEach(l => add(l.name, l.role || 'Leader'));
+  (S.roster || []).filter(r => r.store === store && ['ASM', 'Sales Lead'].includes(r.title)).forEach(r => add(r.name, r.title === 'ASM' ? 'Assistant Selling Manager' : r.title));
+  return list;
+}
+function leaderField(id, label, value, field, dis, store) {
+  const opts = leaderOptions(store), v = String(value || '').trim();
+  if (!opts.length) return fieldInput(id, label, v, field, dis, 'placeholder="Leader name" style="width:100%"');
+  const known = opts.some(o => o.n.toLowerCase() === v.toLowerCase());
+  return `<label for="${id}_sel" style="margin:0 0 4px">${esc(label)}<select id="${id}_sel" data-leadsel="${id}" ${dis}>
+      ${v ? '' : '<option value="" selected disabled>Pick the leader</option>'}${opts.map(o => `<option value="${esc(o.n)}" ${o.n.toLowerCase() === v.toLowerCase() ? 'selected' : ''}>${esc(o.n)} · ${esc(o.r)}</option>`).join('')}
+      <option value="__other" ${v && !known ? 'selected' : ''}>Someone else…</option></select></label>
+    <div data-leadother="${id}" ${v && !known ? '' : 'hidden'} style="margin-top:6px">${fieldInput(id, 'Their name', v, field, dis, 'placeholder="Leader name" style="width:100%"')}</div>`;
+}
+function wireLeaderPicks(root) {
+  root.querySelectorAll('[data-leadsel]').forEach(sel => sel.onchange = () => {
+    const id = sel.dataset.leadsel, inp = $('#' + id), other = root.querySelector(`[data-leadother="${id}"]`);
+    if (sel.value === '__other') { other.hidden = false; inp.value = ''; inp.focus(); }
+    else { other.hidden = true; inp.value = sel.value; }
+    inp.dispatchEvent(new Event('input'));
+    // The store leader notes follow the leader picked for the win, until they're set on their own.
+    if (id === 'lwname' && sel.value !== '__other') { const lc = $('#lcname_sel'); if (lc && !lc.dataset.touched) { lc.value = sel.value; lc.dispatchEvent(new Event('change')); delete lc.dataset.touched; } }
+    if (id === 'lcname') sel.dataset.touched = '1';
+  });
+}
 // A one-line field with talk to text: type it or say it.
 const fieldInput = (id, label, value, field = '', dis = '', extra = '') => `
   <div class="fieldhead"><label for="${id}">${esc(label)}</label>${dis ? '' : micBtn(id)}</div>
@@ -1321,7 +1350,7 @@ async function viewVisit() {
 
   ${sec('win', '★', 'Leader win', 'Start here. Celebrate the leader before anything else.', `
     ${winList.length ? `<div class="wins"><p class="eyebrow" style="margin:0 0 4px">Wins to celebrate</p><ul>${winList.map(w => `<li>${esc(w)}</li>`).join('')}</ul></div>` : '<p class="small muted">No wins in the numbers yet. Find one on the floor and call it out.</p>'}
-    <div style="margin-bottom:10px">${fieldInput('lwname', 'Leader', V.leaderWin?.name, 'leaderWin.name', dis, 'placeholder="Leader name" style="width:100%"')}</div>
+    <div style="margin-bottom:10px">${leaderField('lwname', 'Leader', V.leaderWin?.name, 'leaderWin.name', dis, x.store)}</div>
     ${fieldBox('lwtext', 'What you will celebrate with the leader and the team', V.leaderWin?.text, 4, V.leaderWin?.suggested ? 'Started from the wins above. Add what you saw on the floor.' : '', 'leaderWin.text', dis)}`, true)}
 
   ${sec('follow', '↻', "Last visit's commitments", prior ? `From ${esc(dayLabel(prior.date))}${prior.email !== x.email ? ' (' + esc(prior.name) + ')' : ''}. Review each one with the leader.` : 'No earlier visit to this store.', (priorSum?.commitments.length || priorSum?.leaderCommit || priorSum?.support) ? `
@@ -1465,7 +1494,7 @@ async function viewVisit() {
     <div style="margin-top:12px">${fieldBox('vwork', 'What is working (goes in the recap message)', V.working, 2, '', 'working', dis)}</div>`, true)}
 
   ${sec('leadercommit', '✓', 'Store leader notes', `Notes on what the leader commits to, and the support they need from ${who.role === 'director' ? 'their director' : 'their Market Leader'}.`, `
-    <div style="margin-bottom:10px">${fieldInput('lcname', 'Store leader', V.leaderCommit?.name || V.leaderWin?.name, 'leaderCommit.name', dis, 'placeholder="Leader name" style="width:100%"')}</div>
+    <div style="margin-bottom:10px">${leaderField('lcname', 'Store leader', V.leaderCommit?.name || V.leaderWin?.name, 'leaderCommit.name', dis, x.store)}</div>
     <p class="small" style="margin:0 0 6px"><b>I commit to</b> <span class="muted">(in their words, from X to Y by a date. We suggest one; change anything.)</span></p>
     ${fieldInput('lcwhat', 'What', V.leaderCommit?.what, 'leaderCommit.what', dis, 'placeholder="The behavior or number" style="width:100%"')}
     <div class="two">
@@ -1639,6 +1668,7 @@ function wireVisit(V, canLog, snap) {
     drawScore(); saveDraft();
   });
   v.querySelectorAll('[data-field]').forEach(inp => inp.oninput = inp.onchange = () => { setPath(V, inp.dataset.field, inp.value); if (inp.dataset.field === 'leaderWin.text') { V.leaderWin.touched = true; V.leaderWin.suggested = false; } saveDraft(); });
+  wireLeaderPicks(v);
   v.querySelectorAll('[data-focus]').forEach(b => b.onclick = () => {
     const k = b.dataset.focus;
     if (V.focus.includes(k)) V.focus = V.focus.filter(x => x !== k);
