@@ -1,14 +1,14 @@
-import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610010632';
-import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610010632';
+import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610010723';
+import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610010723';
 import {
   STORES, DISTRICTS, canonicalStore, isKnownStore, parseRsa, rangeFromFileName, parseTeamRoster, resolveReportNames,
   paceFactor, DEFAULT_GOALS, cidOf, status, fmt, goalsFor, TEAM_FOCUS, pickStoreFocus
-} from './base.js?v=202610010632';
+} from './base.js?v=202610010723';
 import {
   iso, fromIso, addDays, daysApart, weekStartOf, DAY_NAMES, DAY_LONG, dow, DEFAULT_OFF, validOff, safeOff, VISIT_DAYS, STORE_GOALS,
   parseDaily, needScore, band, pct, environment, buildPlan, pivotSuggestion, ELEMENTS, SEGMENTS, AORS, PRACTICE, VISIT_TYPES, kindToType, visitScore, visitSummary, consultantCoaching, drillFor, draggers, helpers, STORE_TO_RSA, hasCommitment, commitmentText, blackoutFor, offChoicesFor, storeFocus, rsaPicks, consultantWeeks, teamSignals,
   STORE_METRICS, slug, COACHING, METRICS, PLAIN, isOutlet, driveMin, driveText, MAX_SPLIT_MIN
-} from './ml.js?v=202610010632';
+} from './ml.js?v=202610010723';
 
 const DEMO = !firebaseConfig.apiKey || firebaseConfig.apiKey.startsWith('PASTE');
 const FB = 'https://www.gstatic.com/firebasejs/10.12.2/';
@@ -1226,7 +1226,16 @@ const V_OPEN = new Set(['why', 'win', 'follow', 'focus', 'people', 'photos', 'ac
 const PHOTO_MAX = 30;
 const PHOTO_ELS = ['assortment', 'visual', 'facilities'];   // every area in these gets a photo, asked for right where it's scored
 // The areas that need a photo on every in-person visit, so every Market Leader walks the same store.
-const photoAreas = e => PHOTO_ELS.includes(e.key) ? (e.aor ? AORS : e.items) : [];
+// Items that are the same physical area as a Visual walk area share its photo, so nobody takes it twice.
+const PHOTO_SAME = {
+  'Bathrooms spotless': 'Restrooms', 'Backroom clean and safe': 'Backroom / Warehouse',
+  'Lighting fully functional, storefront and windows clean': 'Front Entrance and Windows',
+  'Markdown and clearance strategy: right product, right time, right place': 'Clearance / Outlet',
+  'Accessories and attachments available to complete the sale': 'Occasional / Accents / Accessories'
+};
+const photoKey = (el, item) => PHOTO_SAME[item] ? { el: 'visual', item: PHOTO_SAME[item] } : { el, item };
+// Unique photo asks per element: shared items count only where the area is walked (Visual).
+const photoAreas = e => PHOTO_ELS.includes(e.key) ? (e.aor ? AORS : e.items.filter(t => !PHOTO_SAME[t])) : [];
 const REMOTE_TYPES = ['Phone call', 'Video call', 'Teams or text'];
 const DRILL_KEYS = ['sph', 'closeRate', 'avgTicket', 'effMargin', 'financePct', 'appsToTraffic', 'beddingPct', 'protectionPct', 'deliveryPct', 'cancelPct'];
 function blankVisit(x, who) {
@@ -1269,6 +1278,7 @@ async function viewVisit() {
       V.consultants.push({ cid: ap.cid, name: ap.name, why: x.why || 'added', lever: x.lever || null, notes: '', practice: {}, ...(dk ? { drill: { key: dk, title: drillFor(dk).title } } : {}) }); }
     x.addCid = null;
   }
+  S.vSnap = snap; S.vPriorRaw = priorRaw;
   if (canLog && !later && !V.actions.some(hasCommitment)) fillCommitments(V, focusAll);
   // Wins to celebrate, built from the numbers: store results, last visit's commitments that moved,
   // and the people carrying the store. The leader win box starts with these; change anything.
@@ -1320,8 +1330,10 @@ async function viewVisit() {
         ${canLog ? `<button type="button" class="link" data-delphoto="${esc(ph.id)}" style="color:var(--red);padding-left:0">Remove</button>` : ''}</figcaption></figure>`;
   const photoStrip = (el, extraOnly) => { const areas = photoAreas(ELEMENTS.find(z => z.key === el) || {}); const list = (S.vPhotos || []).filter(p => p.el === el && (!extraOnly || !areas.includes(p.item))); return list.length ? `<div class="gallery" style="margin-top:10px">${list.map(photoCard).join('')}</div>` : ''; };
   // The photo ask for one area, under its score: the shots taken so far with comments, or the buttons.
-  const areaPhoto = (el, area, val) => {
+  const areaPhoto = (el0, area0, val) => {
+    const { el, item: area } = photoKey(el0, area0), shared = area !== area0;
     const list = (S.vPhotos || []).filter(p => p.el === el && p.item === area);
+    if (shared) return `<div class="aphoto ${list.length ? 'done' : ''}"><span class="small muted">Same photo as <b>${esc(area)}</b> in the Visual walk${list.length ? '' : ', take it there'}.</span>${list.map(ph => `<img class="pmini" src="${ph.data}" alt="${esc(ph.caption || area)}">`).join('')}</div>`;
     if (list.length) return `<div class="aphoto done"><div class="gallery">${list.map(photoCard).join('')}</div>${canLog ? `<div class="row" style="gap:6px"><span class="small good">Photo taken</span>${photoBtns(el, area).replace(/Take a photo/, 'Add another')}</div>` : ''}</div>`;
     if (!canLog) return '';
     return `<div class="aphoto"><span class="small ${flagged(val) ? 'warn' : 'muted'}">${flagged(val) ? 'Needs work: get a photo and say what has to change.' : 'Photo of this area'}</span>${photoBtns(el, area)}</div>`;
@@ -1362,9 +1374,10 @@ async function viewVisit() {
     <div style="margin-bottom:10px">${leaderField('lwname', 'Leader', V.leaderWin?.name, 'leaderWin.name', dis, x.store)}</div>
     ${fieldBox('lwtext', 'What you will celebrate with the leader and the team', V.leaderWin?.text, 4, V.leaderWin?.suggested ? 'Started from the wins above. Add what you saw on the floor.' : '', 'leaderWin.text', dis)}`, true)}
 
-  ${sec('follow', '↻', "Last visit's commitments", prior ? `From ${esc(dayLabel(prior.date))}${prior.email !== x.email ? ' (' + esc(prior.name) + ')' : ''}. Review each one with the leader.` : 'No earlier visit to this store.', (priorSum?.commitments.length || priorSum?.leaderCommit || priorSum?.support) ? `
-    ${priorSum.commitments.map((c, i) => { const au = autoFollow(priorRaw[i], snap, V); if (canLog) setPath(V, `follow.${i}`, au?.v ?? null);
-      return `<div class="item"><div class="txt">${esc(c)}</div>${followBadge(au?.v, au)}</div>`; }).join('')}
+  ${sec('follow', '↻', 'Inspect and follow up', prior ? `Last visit ${esc(dayLabel(prior.date))}${prior.email !== x.email ? ' (' + esc(prior.name) + ')' : ''}. Each commitment is checked against today's numbers. Watch for the behavior on the floor.` : 'No earlier visit to this store.', (priorSum?.commitments.length || priorSum?.leaderCommit || priorSum?.support) ? `
+    ${priorRaw.length ? `<p class="small" style="margin:0 0 8px"><span class="pill check">Inspection visit</span> ${priorRaw.filter(a => autoFollow(a, snap, V)?.v === 'yes').length} of ${priorRaw.length} commitments hit. Anything not there yet is ready to carry forward in today's action plan.</p>` : ''}
+    ${priorSum.commitments.map((c, i) => { const a = priorRaw[i] || {}; const au = autoFollow(a, snap, V); if (canLog) setPath(V, `follow.${i}`, au?.v ?? null);
+      return `<div class="item"><div class="txt">${esc(c)}${a.how ? `<p class="small" style="margin:4px 0 0"><b>Inspect on the floor:</b> ${esc(a.how)}</p>` : ''}</div>${followBadge(au?.v, au)}</div>`; }).join('')}
     ${priorSum.fixes.length ? `<p class="small" style="margin-top:10px">6 Elements flagged last time: ${priorSum.fixes.map(esc).join(', ')}</p>` : ''}
     ${(() => { const au = priorSum.leaderCommit ? autoFollow(prior.leaderCommit, snap, V) : null; if (canLog) setPath(V, 'follow.lc', au?.v ?? null); S.lcAuto = au; return ''; })()}
     ${priorSum.leaderCommit ? `<div class="item"><div class="txt"><b>${esc(priorSum.leaderName || 'Store leader')} committed to:</b> ${esc(priorSum.leaderCommit)}</div>${followBadge(S.lcAuto?.v, S.lcAuto)}</div>` : ''}
@@ -1483,7 +1496,9 @@ async function viewVisit() {
   ${x.remote ? `<div class="warnbox">This is a remote visit, so there's no 6 Elements walk or photos. Go over the numbers with the leader, coach the focus items and the consultants, and set commitments.</div>` : ''}
 
   ${sec('action', '✓', 'Action plan', 'Up to 3 commitments, each from X to Y by a date. We fill in suggestions. Change anything.', `
-    ${[0, 1, 2].map(i => { const a = V.actions[i] || {}; return `<div class="ap"><div class="row" style="justify-content:space-between"><p class="eyebrow" style="margin:0">Commitment ${i + 1}</p>${a.suggested ? '<span class="pill check">Suggested</span>' : ''}</div>
+    ${(() => { S.cOpts = canLog ? commitmentOptions(V, snap, priorRaw) : []; return ''; })()}
+    ${[0, 1, 2].map(i => { const a = V.actions[i] || {}; return `<div class="ap"><div class="row" style="justify-content:space-between"><p class="eyebrow" style="margin:0">Commitment ${i + 1}</p>${a.carried ? '<span class="pill">Carried forward</span>' : ''}${a.suggested ? '<span class="pill check">Suggested</span>' : ''}</div>
+      ${canLog && S.cOpts.length ? `<select data-apick="${i}" aria-label="Choose commitment ${i + 1}" style="width:100%;margin:6px 0"><option value="">Choose from today's opportunities and coaching…</option>${[...new Set(S.cOpts.map(o => o.group))].map(gr => `<optgroup label="${esc(gr)}">${S.cOpts.map((o, k) => o.group === gr ? `<option value="${k}">${esc(o.what)}: ${esc(o.from)} to ${esc(o.to)}</option>` : '').join('')}</optgroup>`).join('')}</select>` : ''}
       ${fieldInput(`apw${i}`, 'What', a.what || a.behavior, `actions.${i}.what`, dis, 'placeholder="The behavior or number" style="width:100%"')}
       <div class="two">
         <div>${fieldInput(`apf${i}`, 'From (today)', a.from, `actions.${i}.from`, dis, 'placeholder="Where it is now" style="width:100%"')}</div>
@@ -1545,7 +1560,7 @@ function leaderCoachText(cc, first, leader) {
   const out = [`You're coaching ${L} to coach ${first}. Walk ${L} through this, then practice it with them.`];
   lines.forEach(l => {
     if (/^Practice it standing up/.test(l)) out.push(`${L} runs the stand-up practice with ${first} on the floor: ${l.replace(/^Practice it standing up: /, '').replace(/You're the guest\./, `${L} plays the guest.`).replace(/Let [^,]+ run it, give one tip, then run it again\./, `${first} runs it, ${L} gives one tip, then they run it again.`)}`);
-    else if (/commitment this week/.test(l)) out.push(`${L} gets ${first}'s commitment in their own words and checks it before your next visit.`);
+    else if (/'s commitment/.test(l)) out.push(`${L} gets ${first}'s commitment in their own words${(l.match(/ from .+ to .+ by the next visit/) || [''])[0].replace(' by the next visit', '') ? ': ' + l.split(': ').slice(1).join(': ').replace(' We inspect it then.', '') : ''}, and checks it before your next visit.`);
     else out.push(l.replace(/^Open with a win\./, `${L} opens with a win.`).replace(/Sit down with the store leader and write a plan today/, `${L} writes the plan with them today`).replace(/^Coach /, `${L} coaches `).replace(/Ask what's going on before you talk numbers/, `${L} asks what's going on first`).replace(/Tell them\./, `${L} tells them.`));
   });
   return out.join('\n');
@@ -1556,6 +1571,15 @@ function followBadge(v, au) {
 }
 function autoFollow(a, snap, V) {
   if (!a) return null;
+  // A consultant's commitment: check their number in the latest RSA report.
+  if (a.cid && a.rkey) {
+    const p = (S.rsa?.people || []).find(q => q.cid === a.cid), now = p?.k?.[a.rkey];
+    const from = numOf(a.from), to = numOf(a.to);
+    if (now == null || from == null || to == null) return null;
+    const lower = !!METRICS.find(m => m.key === a.rkey)?.lower;
+    const v = (lower ? now <= to : now >= to) ? 'yes' : (lower ? now < from : now > from) ? 'partial' : 'no';
+    return { v, now: fmtMetric(a.rkey, now), text: `${titleName(p.name)} is at ${fmtMetric(a.rkey, now)} month to date (was ${a.from}, goal ${a.to}).` };
+  }
   const key = metricKeyFor(a);
   const from = numOf(a.from), to = numOf(a.to);
   if (key && from != null && to != null && snap) {
@@ -1564,7 +1588,7 @@ function autoFollow(a, snap, V) {
     const m = STORE_METRICS.find(x => x.key === key), lower = !!m?.lower;
     const better = (x, y) => lower ? x <= y : x >= y;
     const v = better(now, to) ? 'yes' : (lower ? now < from : now > from) ? 'partial' : 'no';
-    return { v, text: `Now ${fmtMetric(key, now)} ${per === 'wtd' ? 'this week' : 'this month'} (was ${a.from}, goal ${a.to}).` };
+    return { v, now: fmtMetric(key, now), text: `Now ${fmtMetric(key, now)} ${per === 'wtd' ? 'this week' : 'this month'} (was ${a.from}, goal ${a.to}).` };
   }
   const w = String(a.what || '').trim();
   const el = ELEMENTS.find(e => e.t.toLowerCase() === w.toLowerCase());
@@ -1583,28 +1607,45 @@ function autoFollow(a, snap, V) {
   }
   return null;
 }
-// Suggested commitments, in "from X to Y" form. Fills only empty slots; returns how many it filled.
-function fillCommitments(V, focusAll) {
-  const sugg = [];
-  // By when: the next planned visit to this store, or a week out.
-  const nextDay = (S.vPlans || []).flatMap(p => p.days || []).filter(d => d.store === V.store && d.date > V.date).map(d => d.date).sort()[0] || addDays(V.date, 7);
-  focusAll.filter(f => V.focus.includes(f.key)).forEach(f => sugg.push({
-    key: f.key, what: f.label, from: fmtMetric(f.key, f.value), to: fmtMetric(f.key, f.target ?? f.goal), how: f.coach.doThis.split('. ')[0].replace(/\.$/, ''), due: nextDay, suggested: true }));
-  const sm = visitSummary(V);
-  sm.fixes.forEach(fx => sugg.push({ what: fx, from: 'Needs work today', to: 'Grand Opening Ready', how: '', due: nextDay, suggested: true }));
-  (V.consultants || []).forEach(c => {
-    const d = c.drill, sc = Object.values(d?.scored || {});
-    if (!d?.key || !sc.length) return;
-    const pts = sc.reduce((a, x) => a + (x === 'yes' ? 1 : x === 'partial' ? 0.5 : 0), 0), tot = drillFor(d.key).watch.length;
-    if (pts < tot) sugg.push({ what: `${titleName(c.name)}: ${drillFor(d.key).title}`, from: `${pts} of ${tot} on today's practice`, to: `${tot} of ${tot}`, how: d.adjust || '', owner: titleName(c.name), due: nextDay, suggested: true });
+// Commitments to choose from, built from today's visit: last visit's commitments that aren't done yet,
+// the store's opportunities (as the behavior that moves them), the people coached today, and the
+// 6 Elements fixes. Every one is a behavior with a from X to Y, a how, an owner and a date.
+function commitmentOptions(V, snap, priorRaw = []) {
+  const nextDay = (S.vPlans || []).flatMap(p => p.days || []).filter(d => dayStores(d).includes(V.store) && d.date > V.date).map(d => d.date).sort()[0] || addDays(V.date, 7);
+  const leader = V.leaderCommit?.name || V.leaderWin?.name || 'Store leader';
+  const beh = k => String(COACHING[k]?.doThis || '').split('. ')[0].replace(/\.$/, '');
+  const rest = k => String(COACHING[k]?.doThis || '').split('. ').slice(1).join('. ');
+  const out = [];
+  priorRaw.forEach(a => {
+    const au = autoFollow(a, snap, V); if (au?.v === 'yes') return;
+    out.push({ group: 'Carry forward (not there yet)', key: a.key, cid: a.cid, rkey: a.rkey, what: String(a.what || a.behavior || '').trim(), from: au?.now || a.from, to: a.to, how: a.how || '', owner: a.owner || leader, due: nextDay, carried: true });
   });
+  const opps = storeFocus(snap, 6).filter(f => !f.stretch && COACHING[f.key]);
+  const focusFirst = [...opps.filter(f => (V.focus || []).includes(f.key)), ...opps.filter(f => !(V.focus || []).includes(f.key))];
+  focusFirst.forEach(f => out.push({ group: "Store opportunities", key: f.key, what: `${beh(f.key)} (${f.label})`, from: fmtMetric(f.key, f.value), to: fmtMetric(f.key, f.target ?? f.goal),
+    how: `${rest(f.key)} ${leader === 'Store leader' ? 'The leader' : titleName(leader).split(' ')[0]} checks it at every huddle.`.trim(), owner: leader, due: nextDay, coached: (V.focus || []).includes(f.key) }));
+  (V.consultants || []).forEach(c => {
+    const p = (S.rsa?.people || []).find(q => q.cid === c.cid); if (!p) return;
+    const cc = consultantCoaching({ p, store: p.store || V.store, why: c.why, goals: DEFAULT_GOALS, pace: paceFactor(S.rsa?.to), lever: c.lever });
+    if (cc.commit) out.push({ group: 'People coached today', cid: c.cid, rkey: cc.commit.key, what: cc.commit.what.replace(/^[^:]+:/, `${titleName(c.name)}:`), from: cc.commit.from, to: cc.commit.to, how: c.drill?.adjust ? `${cc.commit.how} Focus on: ${c.drill.adjust}` : cc.commit.how, owner: titleName(c.name), due: nextDay });
+  });
+  visitSummary(V).fixes.forEach(fx => out.push({ group: '6 Elements fixes', what: `${fx}: fix what was flagged on today's walk`, from: 'Needs work today', to: 'Grand Opening Ready', how: 'Leader walks it at open every day and sends a photo when it\'s right.', owner: leader, due: nextDay }));
+  const seen = new Set();
+  return out.filter(o => { const k = o.what.toLowerCase(); if (!o.what || seen.has(k)) return false; seen.add(k); return true; });
+}
+// Fills only empty slots, best first: carry-forwards, what the leader is coaching today, people
+// coached, then 6 Elements fixes and other store opportunities. Returns how many it filled.
+function fillCommitments(V, focusAll, opts) {
+  const all = opts || commitmentOptions(V, S.vSnap, S.vPriorRaw || []);
+  const rank = o => o.carried ? 0 : o.coached ? 1 : o.group === 'People coached today' ? 2 : o.group === '6 Elements fixes' ? 3 : 4;
+  const sugg = [...all].sort((a, b) => rank(a) - rank(b));
   const have = new Set(V.actions.filter(hasCommitment).map(a => String(a.what || a.behavior).toLowerCase()));
   let n = 0;
   for (let i = 0; i < 3; i++) {
     if (hasCommitment(V.actions[i])) continue;
     const next = sugg.find(x => !have.has(x.what.toLowerCase()));
     if (!next) break;
-    have.add(next.what.toLowerCase()); V.actions[i] = { ...(V.actions[i] || {}), ...next }; n++;
+    have.add(next.what.toLowerCase()); const { group, coached, ...rest } = next; V.actions[i] = { ...(V.actions[i] || {}), ...rest, suggested: true }; n++;
   }
   return n;
 }
@@ -1672,6 +1713,11 @@ function wireVisit(V, canLog, snap) {
     drawScore(); saveDraft();
   });
   v.querySelectorAll('[data-field]').forEach(inp => inp.oninput = inp.onchange = () => { setPath(V, inp.dataset.field, inp.value); if (inp.dataset.field === 'leaderWin.text') { V.leaderWin.touched = true; V.leaderWin.suggested = false; } saveDraft(); });
+  v.querySelectorAll('[data-apick]').forEach(sel => sel.onchange = () => {
+    const o = S.cOpts[+sel.value]; if (!o) return;
+    const { group, coached, ...rest } = o; V.actions[+sel.dataset.apick] = { ...rest, suggested: false };
+    saveDraft(); V_OPEN.add('action'); viewVisit(); toast('Commitment filled in. Change anything.');
+  });
   wireLeaderPicks(v);
   v.querySelectorAll('[data-focus]').forEach(b => b.onclick = () => {
     const k = b.dataset.focus;

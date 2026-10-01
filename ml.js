@@ -4,7 +4,7 @@
 import {
   normalizeHeader, toNumber, parseDate, slug, canonicalStore, isKnownStore, REGIONS, STORE_METRICS,
   COACHING, METRICS, pickFocus, pickStoreFocus, goalsFor, DEFAULT_GOALS, isOutlet, minSphFor, fmt, weeklyTarget
-} from './base.js?v=202610010632';
+} from './base.js?v=202610010723';
 
 const numOrNull = v => (v === '' || v === null || v === undefined ? null : toNumber(v));
 
@@ -533,7 +533,11 @@ export function consultantCoaching({ p, store, why = 'added', wk = null, goals =
   const drillKey = (main || items[0])?.key || 'sph';
   const drill = drillFor(drillKey);
   lines.push(`Practice it standing up: ${drill.title}. You're the guest. ${drill.guest} Let ${first} run it, give one tip, then run it again.`);
-  lines.push(main ? `${first}'s commitment this week: ${main.coach.doThis.split('. ')[0].replace(/\.$/, '').replace(/^./, c => c.toLowerCase())}. We check it next visit.` : `${first}'s commitment this week: teach one teammate what they do best.`);
-  return { items, strength, drillKey, drill, text: lines.join('\n') };
+  // The commitment is a behavior with a number on it: what they'll do, and where the number goes.
+  const behavior = main ? main.coach.doThis.split('. ')[0].replace(/\.$/, '') : null;
+  const commit = main ? { key: main.key, what: `${first}: ${behavior}`, from: fmtK(main.key, main.value), to: fmtK(main.key, main.target ?? main.goal),
+    how: `Practice "${drill.title}" standing up today, then do it with every guest. Store leader watches for it on the floor.` } : null;
+  lines.push(commit ? `${first}'s commitment: ${behavior.replace(/^./, c => c.toLowerCase())}. ${nm(main.key).replace(/^./, c => c.toUpperCase())} from ${commit.from} to ${commit.to} by the next visit. We inspect it then.` : `${first}'s commitment this week: teach one teammate what they do best.`);
+  return { items, strength, drillKey, drill, commit, text: lines.join('\n') };
 }
 export { COACHING, METRICS, STORE_METRICS, fmt, isOutlet, slug };
