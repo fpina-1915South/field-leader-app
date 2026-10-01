@@ -1,14 +1,14 @@
-import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js';
-import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js';
+import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610010621';
+import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610010621';
 import {
   STORES, DISTRICTS, canonicalStore, isKnownStore, parseRsa, rangeFromFileName, parseTeamRoster, resolveReportNames,
   paceFactor, DEFAULT_GOALS, cidOf, status, fmt, goalsFor, TEAM_FOCUS, pickStoreFocus
-} from './base.js';
+} from './base.js?v=202610010621';
 import {
   iso, fromIso, addDays, daysApart, weekStartOf, DAY_NAMES, DAY_LONG, dow, DEFAULT_OFF, validOff, safeOff, VISIT_DAYS, STORE_GOALS,
   parseDaily, needScore, band, pct, environment, buildPlan, pivotSuggestion, ELEMENTS, SEGMENTS, AORS, PRACTICE, VISIT_TYPES, kindToType, visitScore, visitSummary, consultantCoaching, drillFor, draggers, helpers, STORE_TO_RSA, hasCommitment, commitmentText, blackoutFor, offChoicesFor, storeFocus, rsaPicks, consultantWeeks, teamSignals,
   STORE_METRICS, slug, COACHING, METRICS, PLAIN, isOutlet, driveMin, driveText, MAX_SPLIT_MIN
-} from './ml.js';
+} from './ml.js?v=202610010621';
 
 const DEMO = !firebaseConfig.apiKey || firebaseConfig.apiKey.startsWith('PASTE');
 const FB = 'https://www.gstatic.com/firebasejs/10.12.2/';
@@ -651,7 +651,8 @@ async function viewWeek() {
   ${plan ? `
   <div class="cols">
     <div style="min-width:0">
-      <div class="days">${plan.days.map((d, i) => dayCard(d, i, plan, canEdit)).join('')}</div>
+      ${canEdit && week >= thisWeek ? `<div class="row" style="margin:0 0 12px"><button class="btn" type="button" id="wkedit">${S.editWeek ? 'Close editor' : 'Edit my week'}</button><button class="btn" type="button" id="wkrebuild">Rebuild from the numbers</button><span class="small muted">Set any day by hand, or let the app redo the open days.</span></div>` : ''}
+      ${S.editWeek && canEdit ? weekEditor(plan, who) : `<div class="days">${plan.days.map((d, i) => dayCard(d, i, plan, canEdit)).join('')}</div>`}
       <div class="offrow"><span>${doneCount} of ${plan.days.length} visits done</span><span>· Days off: <b>${off.map(x => DAY_LONG[x]).join(' and ')}</b></span></div>
       ${week === thisWeek ? remotePanel(plan, who, canEdit) : ''}
       ${(plan.pivots || []).length ? `<div class="panel"><h3>Changes made this week</h3><ul class="small">${plan.pivots.map(p => `<li>${esc(dayLabel(p.date))}: ${esc(p.from || 'open')} to <b>${esc(p.to)}</b>${p.reason ? '. ' + esc(p.reason) : ''}</li>`).join('')}</ul></div>` : ''}
@@ -665,13 +666,14 @@ async function viewWeek() {
   </div>
   ${week >= thisWeek ? offPanel(week, off, to, who, canEdit, plan, week === thisWeek) : ''}` : ''}`;
   wirePicker();
-  $('#prevw').onclick = () => { S.week = addDays(week, -7); viewWeek(); };
-  $('#nextw').onclick = () => { S.week = addDays(week, 7); viewWeek(); };
+  $('#prevw').onclick = () => { S.week = addDays(week, -7); S.editWeek = false; viewWeek(); };
+  $('#nextw').onclick = () => { S.week = addDays(week, 7); S.editWeek = false; viewWeek(); };
   v.querySelectorAll('[data-open]').forEach(b => b.onclick = () => openVisit({ store: b.dataset.open, date: today(), email, kind: 'drop-in' }));
   v.querySelectorAll('[data-remote]').forEach(b => b.onclick = () => openVisit({ store: b.dataset.remote, date: today(), email, kind: 'remote', remote: true }));
   wireOffPanel(week, who, plan, week === thisWeek);
   if (!plan) return;
   wireAnchor(plan, who, week, week === thisWeek);
+  wireWeekTools(plan, who, week, week === thisWeek);
   v.querySelectorAll('[data-go]').forEach(b => b.onclick = () => { const d = plan.days[+b.dataset.go]; openVisit({ store: d.store, date: d.date, email, kind: d.kind, dayIndex: +b.dataset.go }); });
   v.querySelectorAll('[data-gostop]').forEach(b => b.onclick = () => { const [i, j] = b.dataset.gostop.split(':').map(Number); const d = plan.days[i], x = d.stops[j]; openVisit({ store: x.store, date: d.date, email, kind: x.kind || 'first', dayIndex: i, stop: j }); });
   // Adding a stop is more coverage, so no reason needed. The day's first store becomes the morning.
@@ -728,6 +730,85 @@ async function viewWeek() {
       await S.be.savePlan(plan); toast('Kept your plan.'); viewWeek();
     };
   }
+}
+// ---------------------------------------------------------------- edit the week by hand
+// Every open day: a morning (or full-day) store and an optional afternoon store, with drive times.
+// Logged or past days are locked. Saving a hand-built week asks a Market Leader for a reason.
+function weekEditor(plan, who) {
+  const stores = who.stores || [];
+  const t = today();
+  const opt = (sel, list, none) => `${none ? `<option value="">${none}</option>` : ''}${list.map(o => `<option value="${esc(o.s)}" ${o.s === sel ? 'selected' : ''}>${esc(o.s)}${o.m != null ? ` (~${driveText(o.m)})` : ''}${S.scores[o.s]?.score != null ? ` · ${S.scores[o.s].score}` : ''}</option>`).join('')}`;
+  return `<div class="panel"><h3 style="margin:0 0 4px">Edit my week</h3>
+    <p class="small" style="margin:0 0 10px">Pick the morning store for each day, and an afternoon store if you're splitting the day. Afternoon choices are sorted by drive time from the morning store; the number after it is the store's priority. Days already logged or past are locked.</p>
+    <div class="scroller"><table class="grid"><thead><tr><th>Day</th><th>Morning / full day</th><th>Afternoon</th><th></th></tr></thead><tbody>
+    ${plan.days.map((d, i) => {
+      const lock = d.status === 'done' || d.date < t;
+      const pm = d.stops?.[0]?.store || '';
+      const amList = stores.map(s => ({ s, m: null })).sort((a, b) => (S.scores[b.s]?.score ?? 0) - (S.scores[a.s]?.score ?? 0));
+      const pmList = stores.filter(s => s !== d.store).map(s => ({ s, m: driveMin(d.store, s) })).sort((a, b) => (a.m ?? 999) - (b.m ?? 999));
+      const m = pm ? driveMin(d.store, pm) : null;
+      return `<tr><td class="nm">${esc(DAY_LONG[dow(d.date)])} ${esc(shortDate(d.date))}</td>
+        <td>${lock ? esc(d.store || '') : `<select data-wam="${i}">${opt(d.store, amList)}</select>`}</td>
+        <td>${lock ? esc((d.stops || []).map(x => x.store).join(', ') || '--') : `<select data-wpm="${i}">${opt(pm, pmList, 'None (full day)')}</select>`}</td>
+        <td class="small ${m > MAX_SPLIT_MIN ? 'warn' : 'muted'}" data-wdrive="${i}">${lock ? (d.status === 'done' ? 'Logged' : 'Past') : m != null ? `~${driveText(m)} drive` : ''}</td></tr>`;
+    }).join('')}
+    </tbody></table></div>
+    ${(d => d.length ? `<p class="small" style="margin:8px 0 0">Not on any day: ${d.map(esc).join(', ')}. Cover them with a remote call or add them to a day.</p>` : '')(stores.filter(s => !plan.days.some(d => dayStores(d).includes(s))))}
+    <div id="wkreason" style="margin-top:10px"></div>
+    <div class="row" style="margin-top:12px"><button class="btn primary" type="button" id="wksave">Save my week</button><button class="link" type="button" id="wkcancel">Cancel</button></div>
+  </div>`;
+}
+function wireWeekTools(plan, who, week, isCurrent) {
+  const ed = $('#wkedit'); if (!ed) return;
+  ed.onclick = () => { S.editWeek = !S.editWeek; viewWeek(); };
+  $('#wkrebuild').onclick = async () => {
+    // Back to the app's plan for the open days. Following the numbers needs no reason.
+    const fresh = isCurrent ? rebuildPlan(plan, who, plan.off, week) : { ...newPlan(who, week, plan.off, plan.anchorChoice), preview: plan.preview, pivots: plan.pivots || [], dismissed: plan.dismissed || [] };
+    fresh.pivots = [...(fresh.pivots || []), { date: today(), from: 'Week', to: 'Rebuilt from the numbers', reason: 'Rebuilt from the numbers', at: new Date().toISOString(), by: S.user.email }];
+    try { await S.be.savePlan(fresh); S.editWeek = false; toast('Open days rebuilt from the latest numbers.'); viewWeek(); } catch (e) { toast(friendly(e), true); }
+  };
+  if (!S.editWeek) return;
+  const v = $('#view');
+  // Live drive time as the afternoon changes; afternoon list re-sorts when the morning changes.
+  const redraw = i => {
+    const am = v.querySelector(`[data-wam="${i}"]`)?.value, pmSel = v.querySelector(`[data-wpm="${i}"]`), cell = v.querySelector(`[data-wdrive="${i}"]`);
+    if (!pmSel || !cell) return;
+    const m = pmSel.value ? driveMin(am, pmSel.value) : null;
+    cell.textContent = m != null ? `~${driveText(m)} drive` : ''; cell.className = `small ${m > MAX_SPLIT_MIN ? 'warn' : 'muted'}`;
+  };
+  v.querySelectorAll('[data-wam]').forEach(sel => sel.onchange = () => {
+    const i = sel.dataset.wam, pmSel = v.querySelector(`[data-wpm="${i}"]`), keep = pmSel.value;
+    const list = (who.stores || []).filter(s => s !== sel.value).map(s => ({ s, m: driveMin(sel.value, s) })).sort((a, b) => (a.m ?? 999) - (b.m ?? 999));
+    pmSel.innerHTML = `<option value="">None (full day)</option>` + list.map(o => `<option value="${esc(o.s)}" ${o.s === keep ? 'selected' : ''}>${esc(o.s)} (~${driveText(o.m)})${S.scores[o.s]?.score != null ? ` · ${S.scores[o.s].score}` : ''}</option>`).join('');
+    redraw(i);
+  });
+  v.querySelectorAll('[data-wpm]').forEach(sel => sel.onchange = () => redraw(sel.dataset.wpm));
+  $('#wkcancel').onclick = () => { S.editWeek = false; viewWeek(); };
+  $('#wksave').onclick = () => {
+    const days = plan.days.map((d, i) => {
+      const am = v.querySelector(`[data-wam="${i}"]`); if (!am) return d;
+      const pm = v.querySelector(`[data-wpm="${i}"]`).value;
+      const nd = { date: d.date, store: am.value, status: 'planned', score: S.scores[am.value]?.score ?? null, stops: [] };
+      if (pm && pm !== am.value) { nd.part = 'AM'; nd.stops.push({ store: pm, part: 'PM', status: 'planned', drive: driveMin(am.value, pm) }); }
+      if (plan.anchor && am.value === plan.anchor && nd.stops.length) nd.anchor = true;
+      return nd;
+    });
+    const seen = new Set();
+    days.forEach(d => { if (d.status === 'done' || d.date < today()) { dayStores(d).forEach(s => seen.add(s)); return; } d.kind = seen.has(d.store) ? 'second' : 'first'; seen.add(d.store); d.stops.forEach(x => { x.kind = seen.has(x.store) ? 'second' : 'first'; seen.add(x.store); }); });
+    const diff = scheduleDiff(plan.days, days);
+    if (!diff.length) { S.editWeek = false; toast('No changes.'); return viewWeek(); }
+    const far = days.filter(d => d.stops?.[0]?.drive > MAX_SPLIT_MIN);
+    const commit = async (reason, note) => {
+      const fresh = { ...plan, days, calls: (who.stores || []).filter(s => !days.some(d => dayStores(d).includes(s))) };
+      fresh.pivots = [...(plan.pivots || []), ...diff.map(c => ({ date: c.date, from: c.from, to: c.to, reason: reason ? `${reason}${note ? ': ' + note : ''}` : 'Edited by hand', at: new Date().toISOString(), by: S.user.email }))];
+      await S.be.savePlan(fresh);
+      if (reason) await sendScheduleAlert(who, week, reason, note, diff, 'edit');
+      S.editWeek = false;
+      toast(`Week saved.${far.length ? ` Heads up: ${far.length} day${far.length > 1 ? 's have' : ' has'} a long afternoon drive.` : ''}${reason ? ` ${vpNames()} was alerted.` : ''}`); viewWeek();
+    };
+    if (needsReason()) { $('#wksave').disabled = true; return askReason('#wkreason', 'Why are you changing your week?', commit, () => { S.editWeek = false; viewWeek(); }); }
+    commit(null, '').catch(e => toast(friendly(e), true));
+  };
 }
 // ---------------------------------------------------------------- anchor store
 function anchorPanel(plan, who, canEdit) {
@@ -967,7 +1048,7 @@ function anchorPlan(plan, who, anchor, n, source) {
 }
 const dayStores = d => d ? [d.store, ...(d.stops || []).map(x => x.store)].filter(Boolean) : [];
 const dayText = d => dayStores(d).join(' + ') || 'Open day';
-function wirePicker() { const lp = $('#lp'); if (lp) lp.onchange = () => { S.viewEmail = lp.value; viewWeek(); }; }
+function wirePicker() { const lp = $('#lp'); if (lp) lp.onchange = () => { S.viewEmail = lp.value; S.editWeek = false; viewWeek(); }; }
 function pivotCard(s) {
   return `<div class="pivot" role="region" aria-label="Suggested change">
     <p class="eyebrow">New numbers since Sunday</p>
