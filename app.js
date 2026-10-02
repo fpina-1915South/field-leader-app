@@ -1,16 +1,16 @@
-import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610021041';
-import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610021041';
+import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610021051';
+import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610021051';
 import {
   STORES, DISTRICTS, canonicalStore, isKnownStore, parseRsa, rangeFromFileName, parseTeamRoster, resolveReportNames,
   paceFactor, DEFAULT_GOALS, cidOf, status, fmt, goalsFor, TEAM_FOCUS, pickStoreFocus
-} from './base.js?v=202610021041';
+} from './base.js?v=202610021051';
 import {
   iso, fromIso, addDays, daysApart, weekStartOf, DAY_NAMES, DAY_LONG, dow, DEFAULT_OFF, validOff, safeOff, VISIT_DAYS, STORE_GOALS,
   parseDaily, needScore, band, pct, environment, buildPlan, pivotSuggestion, ELEMENTS, SEGMENTS, AORS, PRACTICE, VISIT_TYPES, kindToType, visitScore, visitSummary, consultantCoaching, drillFor, draggers, helpers, STORE_TO_RSA, hasCommitment, commitmentText, blackoutFor, offChoicesFor, storeFocus, rsaPicks, consultantWeeks, teamSignals,
   STORE_METRICS, slug, COACHING, METRICS, PLAIN, isOutlet, driveMin, driveText, MAX_SPLIT_MIN, LEVERS, leverStatus, suggestLever,
   consultantTrends, TREND_ROWS, trendFmt, trendRead, TREND_LABEL,
   OFFER_DEFAULT, PLAY, PLAY_CHECKS, PLAY_CHECKS_REMOTE, offerActive, offerMath, FLIQ_CHECKS, FLIQ_CHECKS_REMOTE, FLIQ_DAILY
-} from './ml.js?v=202610021041';
+} from './ml.js?v=202610021051';
 
 const DEMO = !firebaseConfig.apiKey || firebaseConfig.apiKey.startsWith('PASTE');
 const FB = 'https://www.gstatic.com/firebasejs/10.12.2/';
@@ -1349,7 +1349,16 @@ function storeTiles(snap, period = 'mtd') {
   tiles.push(tileFor('Protection attach', p1(m.k.protectionAttach), `goal ${STORE_GOALS.protectionAttach}%`, goalCls(m.k.protectionAttach, STORE_GOALS.protectionAttach)));
   tiles.push(tileFor('Delivery % of sales', p1(m.k.deliveryPct), `goal ${STORE_GOALS.deliveryPct}%`, goalCls(m.k.deliveryPct, STORE_GOALS.deliveryPct)));
   tiles.push(tileFor('Cancellations', p1(m.k.cancelPct), `of gross, goal ${STORE_GOALS.cancelPct}% or less`, goalCls(m.k.cancelPct, STORE_GOALS.cancelPct, true)));
-  return `<div class="tiles">${tiles.join('')}</div>`;
+  // Open carts are a snapshot (as of the cart file), so they read the same in every period.
+  const cx = S.carts?.stores?.[m.store];
+  const cartTiles = cx ? [
+    tileFor('Open carts', cx.n.toLocaleString('en-US'), `as of ${shortDate(S.carts.date)}`, ''),
+    tileFor('Cart value (est.)', money(cx.value), 'money already in the building', ''),
+    tileFor('Started this week', String(cx.wk), money(cx.wkValue) + ' est.', ''),
+    tileFor('Due a call today', String(cx.due), 'day 1, 3 or 7 follow-up', cx.due ? 'amber' : 'green'),
+    tileFor('Over 2 weeks old', String(cx.old), 'call or close out', cx.old ? 'amber' : '')
+  ] : [];
+  return `<div class="tiles">${tiles.join('')}</div>${cartTiles.length ? `<p class="eyebrow" style="margin:12px 0 6px">Open carts</p><div class="tiles">${cartTiles.join('')}</div>` : ''}`;
 }
 const Speech = window.SpeechRecognition || window.webkitSpeechRecognition;
 let rec = null, recBtn = null;
@@ -2351,6 +2360,7 @@ function viewStores() {
       ${cell(m?.vsLy.traffic != null ? pct(m.vsLy.traffic) : '--')}
       ${cell(m?.k.protectionAttach != null ? m.k.protectionAttach.toFixed(0) + '%' : '--', m?.k.protectionAttach == null ? '' : m.k.protectionAttach >= STORE_GOALS.protectionAttach ? 'good' : 'warn')}
       ${cell(m?.k.cancelPct != null ? m.k.cancelPct.toFixed(1) + '%' : '--', m?.k.cancelPct == null ? '' : m.k.cancelPct <= STORE_GOALS.cancelPct ? 'good' : 'warn')}
+      ${(() => { const cx = S.carts?.stores?.[s]; return cell(cx ? `${cx.n} · $${Math.round(cx.value / 1000)}k` : '--', cx?.due ? 'warn' : ''); })()}
       <td class="small">${(() => { const tm = S.teams?.[s]; if (!tm) return '<span class="muted">--</span>'; const bits = []; if (tm.below.length) bits.push(`<span class="bad">${tm.below.length} below</span>`); if (tm.slipping.length) bits.push(`<span class="warn">${tm.slipping.length} slipping</span>`); return bits.join(' · ') || '<span class="good">On track</span>'; })()}</td>
       <td>${lv ? `${daysApart(lv, today())}d ago` : '<span class="warn">None</span>'}</td>
       <td class="small" style="white-space:normal;min-width:200px">${esc(sc?.parts?.[0]?.text || '')}</td>
@@ -2362,8 +2372,8 @@ function viewStores() {
     ${seesAll() ? `<label for="sf" style="margin:0">Show<select id="sf"><option value="*">All stores</option>${ls.map(l => `<option value="${esc(l.email)}" ${S.storeFilter === l.email ? 'selected' : ''}>${esc(l.name || l.email)}</option>`).join('')}<option value="__none" ${S.storeFilter === '__none' ? 'selected' : ''}>No Market Leader</option>${(S.markets || []).length ? `<optgroup label="Markets">${S.markets.map(m => `<option value="mkt:${esc(m.id)}" ${S.storeFilter === 'mkt:' + m.id ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</optgroup>` : ''}</select></label>` : ''}
   </div>
   <div class="panel" style="padding:0;overflow:hidden"><div class="scroller"><table class="grid">
-    <thead><tr><th>Store</th><th>Need</th><th class="num">Sales WTD vs bud</th><th class="num">Sales MTD vs bud</th><th class="num">SPG w/ canc</th><th class="num">SPG vs LY</th><th class="num">Close rate bps</th><th class="num">Traffic vs LY</th><th class="num">Prot attach</th><th class="num">Cancel %</th><th>Consultants</th><th>Last visit</th><th>Top reason</th></tr></thead>
-    <tbody>${list.map(row).join('') || '<tr><td colspan="13">No stores.</td></tr>'}</tbody>
+    <thead><tr><th>Store</th><th>Need</th><th class="num">Sales WTD vs bud</th><th class="num">Sales MTD vs bud</th><th class="num">SPG w/ canc</th><th class="num">SPG vs LY</th><th class="num">Close rate bps</th><th class="num">Traffic vs LY</th><th class="num">Prot attach</th><th class="num">Cancel %</th><th class="num">Open carts</th><th>Consultants</th><th>Last visit</th><th>Top reason</th></tr></thead>
+    <tbody>${list.map(row).join('') || '<tr><td colspan="14">No stores.</td></tr>'}</tbody>
   </table></div></div>
   <p class="small">Tap a store for its coaching plan. SPG uses SPG with cancellations. Close rate is basis points against budget.</p>`;
   v.querySelectorAll('[data-store]').forEach(r => r.onclick = () => openVisit({ store: r.dataset.store, date: today(), email: seesAll() ? (leaderOf(r.dataset.store)?.email || S.user.email) : S.user.email, kind: 'drop-in' }));
