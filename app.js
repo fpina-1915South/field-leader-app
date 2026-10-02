@@ -1,16 +1,16 @@
-import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610021120';
-import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610021120';
+import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610021228';
+import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610021228';
 import {
   STORES, DISTRICTS, canonicalStore, isKnownStore, parseRsa, rangeFromFileName, parseTeamRoster, resolveReportNames,
   paceFactor, DEFAULT_GOALS, cidOf, status, fmt, goalsFor, TEAM_FOCUS, pickStoreFocus
-} from './base.js?v=202610021120';
+} from './base.js?v=202610021228';
 import {
   iso, fromIso, addDays, daysApart, weekStartOf, DAY_NAMES, DAY_LONG, dow, DEFAULT_OFF, validOff, safeOff, VISIT_DAYS, STORE_GOALS,
   parseDaily, needScore, band, pct, environment, buildPlan, pivotSuggestion, ELEMENTS, SEGMENTS, AORS, PRACTICE, VISIT_TYPES, kindToType, visitScore, visitSummary, consultantCoaching, drillFor, draggers, helpers, STORE_TO_RSA, hasCommitment, commitmentText, blackoutFor, offChoicesFor, storeFocus, rsaPicks, consultantWeeks, teamSignals,
   STORE_METRICS, slug, COACHING, METRICS, PLAIN, isOutlet, driveMin, driveText, MAX_SPLIT_MIN, LEVERS, leverStatus, suggestLever,
   consultantTrends, TREND_ROWS, trendFmt, trendRead, TREND_LABEL,
   OFFER_DEFAULT, PLAY, PLAY_CHECKS, PLAY_CHECKS_REMOTE, offerActive, offerMath, FLIQ_CHECKS, FLIQ_CHECKS_REMOTE, FLIQ_DAILY
-} from './ml.js?v=202610021120';
+} from './ml.js?v=202610021228';
 
 const DEMO = !firebaseConfig.apiKey || firebaseConfig.apiKey.startsWith('PASTE');
 const FB = 'https://www.gstatic.com/firebasejs/10.12.2/';
@@ -2273,19 +2273,33 @@ function wireVisit(V, canLog, snap) {
     const pv = $('#apv' + i); if (pv) { pv.hidden = !hasCommitment(a); pv.textContent = hasCommitment(a) ? commitmentText(a) : ''; }
   }));
   $('#vprint').onclick = () => { V_OPEN.clear(); ['why', 'win', 'follow', 'lever', 'people', 'action', 'reflect', 'el1', 'el2', 'el3', 'el4', 'el5', 'el6'].forEach(k => V_OPEN.add(k)); document.querySelectorAll('.vsec').forEach(s => s.classList.add('open')); setTimeout(() => window.print(), 200); };
+  // Take the leader straight to what needs fixing: open its section, scroll it to the middle of the
+  // screen, put the cursor in it and outline it until they change it.
+  const goFix = (secKey, target, msg) => {
+    V_OPEN.add(secKey); const sec0 = document.querySelector(`[data-sec="${secKey}"]`); if (sec0) { sec0.classList.add('open'); sec0.querySelector('.vsec-hd')?.setAttribute('aria-expanded', 'true'); }
+    const el = (typeof target === 'string' ? document.querySelector(target) : target) || sec0;
+    toast(msg, true);
+    requestAnimationFrame(() => setTimeout(() => {
+      el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      const box = el?.closest('.item, .acard, .aphoto, label, div') || el; box?.classList.add('needfix');
+      const clear = () => box?.classList.remove('needfix'); el?.addEventListener?.('input', clear, { once: true }); el?.addEventListener?.('click', clear, { once: true });
+      if (el?.matches?.('input, textarea, select')) setTimeout(() => el.focus({ preventScroll: true }), 400);
+    }, 30));
+  };
   $('#vsubmit').onclick = async () => {
     stopMic();
     const sm = visitSummary(V);
-    const partial = V.actions.find(a => hasCommitment(a) && (!String(a.from || '').trim() || !String(a.to || '').trim()));
-    if (partial) { V_OPEN.add('action'); document.querySelector('[data-sec="action"]').classList.add('open'); document.querySelector('[data-sec="action"]').scrollIntoView({ behavior: 'smooth' }); return toast('Each commitment needs a From and a To.', true); }
-    if (!sm.commitments.length) { V_OPEN.add('action'); document.querySelector('[data-sec="action"]').classList.add('open'); document.querySelector('[data-sec="action"]').scrollIntoView({ behavior: 'smooth' }); return toast('Add at least one commitment in the action plan before you submit.', true); }
+    const pi = V.actions.findIndex(a => hasCommitment(a) && (!String(a.from || '').trim() || !String(a.to || '').trim()));
+    if (pi >= 0) { const a = V.actions[pi]; return goFix('action', String(a.from || '').trim() ? `#apt${pi}` : `#apf${pi}`, `Commitment ${pi + 1} needs a ${String(a.from || '').trim() ? 'To' : 'From'}. Fill it in, then tap Submit again.`); }
+    if (!sm.commitments.length) return goFix('action', '#apw0', 'Add at least one commitment in the action plan, then tap Submit again.');
     if (!V.remote) {
       const missing = ELEMENTS.flatMap(e => photoAreas(e).filter(a => !(S.vPhotos || []).some(p => p.el === e.key && p.item === a)).map(a => ({ e, a })));
       V.photosMissing = missing.length;
       if (missing.length && S.photoNudged !== V.id) {
         S.photoNudged = V.id;
-        const first = missing[0]; V_OPEN.add('el' + first.e.n); const sec0 = document.querySelector(`[data-sec="el${first.e.n}"]`); if (sec0) { sec0.classList.add('open'); sec0.scrollIntoView({ behavior: 'smooth' }); }
-        return toast(`${missing.length} area${missing.length > 1 ? 's still need' : ' still needs'} a photo (first: ${first.a}). Take them, or tap Submit again to send without.`, true);
+        const first = missing[0];
+        return goFix('el' + first.e.n, [...document.querySelectorAll(`[data-sec="el${first.e.n}"] [data-photo="${first.e.key}"]`)].find(b => b.dataset.item === first.a)?.closest('.aphoto'),
+          `${missing.length} area${missing.length > 1 ? 's still need' : ' still needs'} a photo. First: ${first.a}. Take them, or tap Submit again to send without.`);
       }
     }
     const wasDone = V.status === 'done';
