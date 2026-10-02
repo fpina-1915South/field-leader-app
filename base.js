@@ -161,18 +161,26 @@ const SKIP_NAMES = /^(rsa goal|house sales.*|zzz|conv|total.*|employee discount.
 // Reads the date range out of names like rsa_report_2026-09-01_to_2026-09-28.csv
 export function rangeFromFileName(name) {
   const m = String(name || '').match(/(\d{4}-\d{2}-\d{2})\D+(\d{4}-\d{2}-\d{2})/);
-  return m ? { from: m[1], to: m[2] } : null;
+  if (m) return { from: m[1], to: m[2] };
+  // A single date (like rsa-report-2026-10-01-19-32-13.xlsx) is read as month to date through that day.
+  const one = String(name || '').match(/(\d{4}-\d{2}-\d{2})/);
+  return one ? { from: one[1].slice(0, 8) + '01', to: one[1], guessed: true } : null;
 }
+// Other names the same columns go by in different RSA exports.
+const RSA_ALIAS = { sales_hour: 'sph', sales_per_hour: 'sph', cancellation_of_sales: 'cancellation', cancel: 'cancellation' };
+// Columns some exports leave out. The app works without them; those numbers just show as blank.
+const RSA_OPTIONAL = new Set(['cancellation', 'discount']);
 export function parseRsa(rawRows) {
-  const rows = rawRows.map(r => { const o = {}; for (const [k, v] of Object.entries(r)) o[normalizeHeader(k)] = v; return o; });
+  const rows = rawRows.map(r => { const o = {}; for (const [k, v] of Object.entries(r)) { const h = normalizeHeader(k); o[RSA_ALIAS[h] || h] = v; } return o; });
   const present = new Set(rows.flatMap(r => Object.keys(r)));
-  const need = ['sales_associate', ...METRICS.filter(m => m.col).map(m => m.col)];
+  const need = ['sales_associate', ...METRICS.filter(m => m.col && !RSA_OPTIONAL.has(m.col)).map(m => m.col)];
   const missing = need.filter(c => !present.has(c));
   if (missing.length) return { missing, people: [], skipped: [], nonSellers: [] };
   const people = [], skipped = [], nonSellers = [];
   let goalRow = null;
   for (const r of rows) {
-    const name = String(r.sales_associate ?? '').trim();
+    // Some exports add the consultant code after the name: "AARON ADSHEAD (AA01)".
+    const name = String(r.sales_associate ?? '').replace(/\s*\([A-Za-z0-9]{2,6}\)\s*$/, '').trim();
     if (!name) continue;
     if (/^rsa goal$/i.test(name)) { goalRow = r; continue; }
     if (SKIP_NAMES.test(name)) { skipped.push(name); continue; }
