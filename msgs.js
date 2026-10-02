@@ -1,6 +1,6 @@
 // Team messages: plain text the Market Leader copies into Teams, text or email.
 // Pure functions. Written plain and direct, no em dashes, SPG always with cancellations, close with "Let's go."
-import { DAY_LONG, DAY_NAMES, dow, fromIso, weekStartOf, STORE_GOALS, storeFocus, rsaPicks, visitSummary, draggers, helpers } from './ml.js?v=202610021016';
+import { DAY_LONG, DAY_NAMES, dow, fromIso, weekStartOf, STORE_GOALS, storeFocus, rsaPicks, visitSummary, draggers, helpers } from './ml.js?v=202610021026';
 
 const money = v => (v < 0 ? '-$' : '$') + Math.abs(Math.round(v)).toLocaleString('en-US');
 const p1 = v => (Math.round(v * 10) / 10).toString();

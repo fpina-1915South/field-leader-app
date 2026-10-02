@@ -1,16 +1,16 @@
-import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610021016';
-import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610021016';
+import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610021026';
+import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610021026';
 import {
   STORES, DISTRICTS, canonicalStore, isKnownStore, parseRsa, rangeFromFileName, parseTeamRoster, resolveReportNames,
   paceFactor, DEFAULT_GOALS, cidOf, status, fmt, goalsFor, TEAM_FOCUS, pickStoreFocus
-} from './base.js?v=202610021016';
+} from './base.js?v=202610021026';
 import {
   iso, fromIso, addDays, daysApart, weekStartOf, DAY_NAMES, DAY_LONG, dow, DEFAULT_OFF, validOff, safeOff, VISIT_DAYS, STORE_GOALS,
   parseDaily, needScore, band, pct, environment, buildPlan, pivotSuggestion, ELEMENTS, SEGMENTS, AORS, PRACTICE, VISIT_TYPES, kindToType, visitScore, visitSummary, consultantCoaching, drillFor, draggers, helpers, STORE_TO_RSA, hasCommitment, commitmentText, blackoutFor, offChoicesFor, storeFocus, rsaPicks, consultantWeeks, teamSignals,
   STORE_METRICS, slug, COACHING, METRICS, PLAIN, isOutlet, driveMin, driveText, MAX_SPLIT_MIN, LEVERS, leverStatus, suggestLever,
   consultantTrends, TREND_ROWS, trendFmt, trendRead, TREND_LABEL,
   OFFER_DEFAULT, PLAY, PLAY_CHECKS, PLAY_CHECKS_REMOTE, offerActive, offerMath, FLIQ_CHECKS, FLIQ_CHECKS_REMOTE, FLIQ_DAILY
-} from './ml.js?v=202610021016';
+} from './ml.js?v=202610021026';
 
 const DEMO = !firebaseConfig.apiKey || firebaseConfig.apiKey.startsWith('PASTE');
 const FB = 'https://www.gstatic.com/firebasejs/10.12.2/';
@@ -1475,6 +1475,8 @@ async function viewVisit() {
   const V = S.V && S.V.id === id ? S.V : structuredClone((local && (!saved || (local.at || '') > (saved.at || ''))) ? local : saved || blankVisit(x, who));
   S.V = V;
   if (!V.actions?.length) V.actions = [{}, {}, {}];
+  for (const k of ['consultants']) if (!Array.isArray(V[k])) V[k] = [];
+  for (const k of ['checks', 'segs', 'aor', 'elNotes', 'follow']) if (!V[k] || typeof V[k] !== 'object') V[k] = {};
   const canLog = (x.email === S.user.email || isAdmin()) && x.date <= today();
   const later = x.date > today();
   const snap = S.daily?.stores?.[x.store];
@@ -1614,6 +1616,7 @@ async function viewVisit() {
     </div>
   </div>
   ${later ? `<div class="warnbox">This visit is on ${esc(longDate(x.date))}. Use it to prep; you can fill it in that day.</div>` : ''}
+  ${V.edits?.length ? `<div class="editbox"><b>Edited after it was submitted</b> <span class="small">(submitted ${esc(dayLabel((V.submittedAt || V.date).slice(0, 10)))})</span><ul class="small">${editedText(V).map(t => `<li>${esc(t)}</li>`).join('')}</ul></div>` : ''}
   ${env ? `<div class="env ${env.kind}"><b>${env.kind === 'headwind' ? 'Headwind.' : env.kind === 'tailwind' ? 'Tailwind.' : 'Normal traffic.'}</b> ${esc(env.text)}</div>` : ''}
 
   ${sec('why', '1', 'Why you are here', 'The intent of the visit. We change the outcome through people and behaviors.', `
@@ -1791,7 +1794,7 @@ async function viewVisit() {
     ${fieldBox('vnotes', 'Other notes', V.notes, 2, '', 'notes', dis)}`, true)}
 
   <div class="vscore" id="vscore"></div>
-  ${canLog ? `<div class="vbar"><span class="small" id="vsaved">${V.status === 'done' ? 'Submitted ' + esc(dayLabel(V.date)) : 'Draft saves as you go'}</span>
+  ${canLog ? `<div class="vbar"><span class="small" id="vsaved">${V.status === 'done' ? 'Submitted ' + esc(dayLabel((V.submittedAt || V.date).slice(0, 10))) + (V.lastEdit ? ` · edited ${esc(dayLabel(V.lastEdit.at.slice(0, 10)))}` : '') + '. Changes now are stamped and sent to your VP.' : 'Draft saves as you go'}</span>
     <button class="btn" id="vprint" type="button">Print / PDF</button>
     <button class="btn primary" id="vsubmit" type="button">${V.status === 'done' ? 'Update visit' : 'Submit visit'}</button></div>` : ''}
   <input type="file" id="photoIn" accept="image/*" capture="environment" hidden>
@@ -1960,12 +1963,49 @@ function setPath(o, path, val) {
 }
 function getPath(o, path) { return path.split('.').reduce((c, k) => (c == null ? undefined : c[k]), o); }
 let vTimer = null;
+// ---------------------------------------------------------------- edits after submit
+// Once a visit is submitted, any later change is stamped on the visit (who, when, which parts) and
+// sent to the VP's review list, so nothing gets quietly rewritten after the fact.
+const EDIT_SKIP = new Set(['at', 'by', 'needScore', 'commitments', 'edits', 'lastEdit', 'submittedAt', 'status', 'follow', 'photosMissing', 'id', 'email', 'name', 'role', 'store', 'date']);
+const EDIT_LABEL = { leaderWin: 'Leader win', checks: '6 Elements walk', segs: 'Value segments', aor: 'AOR walk', elNotes: '6 Elements notes', segMeta: 'Value segments',
+  consultants: 'Consultants', actions: 'Action plan', leaderCommit: 'Store leader commitment', working: 'What is working', notes: 'Notes', teamNotes: 'Team notes',
+  reflection: 'Reflection', focus: 'Team focus', lever: 'Lever', play: 'Run the play', fliq: 'FrontLine IQ', floor: 'Leader knows the floor', intent: 'Why you are here', vtype: 'Visit type', kind: 'Visit type' };
+const editParts = V => { const o = {}; for (const k of Object.keys(V).sort()) if (!EDIT_SKIP.has(k)) o[k] = JSON.stringify(V[k] ?? null); return o; };
+const editLabel = k => EDIT_LABEL[k] || k.replace(/([A-Z])/g, ' $1').replace(/^./, c => c.toUpperCase());
+// Called after every save of a submitted visit: compares with the last known version.
+function noteEdit(V, extra) {
+  if (V.status !== 'done' || !S.vBase || S.vBaseFor !== V.id) return;
+  if (!V.submittedAt) V.submittedAt = V.date;
+  const now = editParts(V), before = S.vBase;
+  const changed = [...new Set([...Object.keys(now), ...Object.keys(before)])].filter(k => now[k] !== before[k]).map(editLabel);
+  if (extra) changed.push(extra);
+  if (!changed.length) return;
+  S.vBase = now;
+  V.edits = V.edits || [];
+  const at = new Date().toISOString(), last = V.edits[V.edits.length - 1];
+  // One entry per sitting: changes by the same person within 30 minutes merge.
+  if (last && last.by === S.user.email && Date.parse(at) - Date.parse(last.at) < 30 * 60000) { last.at = at; last.parts = [...new Set([...last.parts, ...changed])]; }
+  else V.edits.push({ at, by: S.user.email, name: S.user.name || S.user.email, parts: [...new Set(changed)] });
+  V.lastEdit = V.edits[V.edits.length - 1];
+  S.vEditPending = V.id;
+}
+// Tell the VP once per sitting, when the leader leaves the visit or taps Update.
+async function sendEditAlert(V) {
+  if (S.vEditPending !== V?.id || !V.lastEdit || isAdmin()) { S.vEditPending = null; return; }
+  S.vEditPending = null;
+  const e = V.lastEdit;
+  const a = { id: `${V.email}_edit_${Date.now()}`, type: 'visitEdit', email: S.user.email, name: S.user.name || S.user.email, forEmail: V.email, visitId: V.id, store: V.store, visitDate: V.date,
+    weekStart: weekStartOf(V.date), submittedAt: V.submittedAt, parts: e.parts, at: e.at, reason: 'Edited after submit', changes: [], seen: false };
+  try { await S.be.saveAlert(a); } catch (err) { console.warn('edit alert', err); }
+}
+const editedText = V => V?.edits?.length ? V.edits.map(e => `${dayLabel(e.at.slice(0, 10))} ${new Date(e.at).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })} by ${e.name}: ${e.parts.join(', ')}`) : [];
 function saveDraft(now) {
   S.vEdits = (S.vEdits || 0) + 1;
   const V = S.V; if (!V) return;
   V.at = new Date().toISOString(); V.by = S.user.email;
   V.needScore = S.scores[V.store]?.score ?? null;
   V.commitments = visitSummary(V).commitments.join('\n');
+  noteEdit(V);
   localSet(V);
   const s = $('#vsaved'); if (s && V.status !== 'done') s.textContent = 'Saving…';
   clearTimeout(vTimer);
@@ -1979,7 +2019,8 @@ function saveDraft(now) {
 }
 function wireVisit(V, canLog, snap) {
   const v = $('#view');
-  $('#back').onclick = () => { stopMic(); if (canLog) saveDraft(true); S.visit = null; S.V = null; renderShell(); };
+  if (S.vBaseFor !== V.id) { S.vBaseFor = V.id; S.vBase = editParts(V); }
+  $('#back').onclick = () => { stopMic(); if (canLog) { saveDraft(true); sendEditAlert(V); } S.vBaseFor = null; S.visit = null; S.V = null; renderShell(); };
   v.querySelectorAll('.vsec-hd').forEach(h => h.onclick = () => {
     const secEl = h.parentElement, k = secEl.dataset.sec;
     secEl.classList.toggle('open'); h.setAttribute('aria-expanded', secEl.classList.contains('open'));
@@ -2087,7 +2128,7 @@ function wireVisit(V, canLog, snap) {
       for (const f of list) {
         const data = await shrinkImage(f, 900, 0.6);
         const ph = { id: `${V.id}_${Date.now()}_${Math.round(Math.random() * 1e4)}`, visitId: V.id, email: V.email, store: V.store, date: V.date, el: pel, item: pitem, caption: '', data };
-        await S.be.savePhoto(ph); S.vPhotos = [...(S.vPhotos || []), ph];
+        await S.be.savePhoto(ph); S.vPhotos = [...(S.vPhotos || []), ph]; if (V.status === 'done') { noteEdit(V, 'Photos'); saveDraft(); }
       }
       if (pel === 'general') V_OPEN.add('photos'); viewVisit(); toast(list.length > 1 ? `${list.length} photos added. Add a caption to each.` : 'Photo added. Add a caption.');
     } catch (e) { toast('Could not add that photo. Try again.', true); }
@@ -2101,7 +2142,7 @@ function wireVisit(V, canLog, snap) {
     capTimers[ph.id] = setTimeout(() => S.be.savePhoto(ph).catch(() => {}), 800);
   });
   v.querySelectorAll('[data-delphoto]').forEach(b => b.onclick = async () => {
-    await S.be.deletePhoto(b.dataset.delphoto); S.vPhotos = S.vPhotos.filter(p => p.id !== b.dataset.delphoto); viewVisit();
+    await S.be.deletePhoto(b.dataset.delphoto); S.vPhotos = S.vPhotos.filter(p => p.id !== b.dataset.delphoto); if (V.status === 'done') { noteEdit(V, 'Photos'); saveDraft(); } viewVisit();
   });
   const sg = $('#apsugg'); if (sg) sg.onclick = () => {
     const n = fillCommitments(V, storeFocus(snap, 4));
@@ -2130,8 +2171,10 @@ function wireVisit(V, canLog, snap) {
         return toast(`${missing.length} area${missing.length > 1 ? 's still need' : ' still needs'} a photo (first: ${first.a}). Take them, or tap Submit again to send without.`, true);
       }
     }
+    const wasDone = V.status === 'done';
     V.status = 'done'; V.submittedAt = V.submittedAt || new Date().toISOString();
     saveDraft(true);
+    if (wasDone) sendEditAlert(V); else { S.vBaseFor = V.id; S.vBase = editParts(V); }
     try {
       const plan = await S.be.plan(V.email, weekStartOf(V.date));
       if (V.remote) {
@@ -2223,15 +2266,20 @@ async function viewBrief() {
   if (!list.length) return;
   const el = document.createElement('section');
   el.className = 'panel'; el.id = 'alerts'; el.style.borderLeft = '6px solid #F68C2C';
-  el.innerHTML = `<h3>Schedule changes</h3>
-    <p class="small">When a Market Leader or director changes a schedule that was already set, they give a reason and it lands here.</p>
-    ${list.map(a => `<div class="ap" style="${a.seen ? 'opacity:.7' : ''}">
+  el.innerHTML = `<h3>Changes to review</h3>
+    <p class="small">Schedule changes (with the reason) and visits edited after they were submitted land here.</p>
+    ${list.map(a => a.type === 'visitEdit' ? `<div class="ap" style="${a.seen ? 'opacity:.7' : ''}">
+      <div class="row" style="justify-content:space-between"><b>${esc(a.name)}</b><span class="small muted">${esc(dayLabel(a.at.slice(0, 10)))} ${esc(new Date(a.at).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }))}</span></div>
+      <p style="margin:4px 0"><span class="pill edited">Edited after submit</span> ${esc(a.store)} visit from ${esc(dayLabel(a.visitDate))}, submitted ${esc(dayLabel((a.submittedAt || a.visitDate).slice(0, 10)))}. Changed: ${esc((a.parts || []).join(', '))}.</p>
+      <div class="row" style="gap:8px">${a.seen ? `<span class="small muted">Reviewed${a.seenByName ? ' by ' + esc(a.seenByName) : ''}</span>` : isAdmin() ? `<button class="btn tiny" data-seen="${esc(a.id)}" type="button">Mark reviewed</button>` : ''}<button class="btn tiny" type="button" data-aov='${esc(JSON.stringify({ store: a.store, date: a.visitDate, email: a.forEmail, remote: /_remote$/.test(a.visitId || '') }))}'>Open visit</button></div>
+    </div>` : `<div class="ap" style="${a.seen ? 'opacity:.7' : ''}">
       <div class="row" style="justify-content:space-between"><b>${esc(a.name)}</b><span class="small muted">${esc(dayLabel(a.at.slice(0, 10)))} · week of ${esc(shortDate(a.weekStart))}</span></div>
       <p style="margin:4px 0"><span class="pill check">${esc(a.reason)}</span>${a.note ? ` ${esc(a.note)}` : ''}</p>
       ${(a.changes || []).length ? `<ul class="blist small" style="margin:4px 0">${changeLines(a).map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}
       ${a.seen ? `<span class="small muted">Reviewed${a.seenByName ? ' by ' + esc(a.seenByName) : ''}</span>` : isAdmin() ? `<button class="btn tiny" data-seen="${esc(a.id)}" type="button">Mark reviewed</button>` : ''}
     </div>`).join('')}`;
   const v = $('#view'); v.insertBefore(el, v.firstChild);
+  el.querySelectorAll('[data-aov]').forEach(b => b.onclick = () => openVisit(JSON.parse(b.dataset.aov)));
   el.querySelectorAll('[data-seen]').forEach(b => b.onclick = async () => {
     const a = S.alerts.find(x => x.id === b.dataset.seen); if (!a) return;
     Object.assign(a, { seen: true, seenBy: S.user.email, seenByName: S.user.name || S.user.email, seenAt: new Date().toISOString() });
@@ -2523,7 +2571,7 @@ async function viewOne() {
     .filter(({ a }) => a.due && a.due >= ws && a.due <= we).map(o => ({ ...o, au: autoFollow(o.a, S.daily?.stores?.[o.x.store], {}) }));
   const dueNot = dueWk.filter(o => o.au?.v === 'no').length, dueDone = dueWk.filter(o => o.au?.v === 'yes').length;
   const missed = Math.max(0, planned - inPerson.length);
-  const schedChanges = (S.alerts || []).filter(a => (a.forEmail || a.email) === email && a.weekStart === ws);
+  const schedChanges = (S.alerts || []).filter(a => a.type !== 'visitEdit' && (a.forEmail || a.email) === email && a.weekStart === ws);
 
   // The lever and where the week goes.
   // The lever first (close rate, average ticket or effective margin), then the input to coach under it.
@@ -2895,8 +2943,8 @@ function viewVisits() {
   <div class="panel">${list.map(x => {
     const sm = visitSummary(x), fixes = sm.fixes;
     const vid = `${x.email}_${x.date}_${slug(x.store)}${x.remote ? '_remote' : ''}`;
-    return `<details class="vis" data-vid="${esc(vid)}"><summary><b>${esc(x.store)}</b><span class="small">${esc(longDate(x.date))}</span><span class="small muted">${esc(x.name)}</span>${x.remote ? '<span class="pill">Remote</span>' : `<span class="pill" data-pcount="${esc(vid)}" hidden></span>`}<span class="pill ${x.vtype === 'Follow-Up' ? 'check' : x.vtype === 'Priority' ? 'set' : ''}">${esc(x.vtype || kindToType(x.kind))}</span>${x.status === 'draft' ? '<span class="pill off">Draft</span>' : ''}${sm.score ? `<span class="pill">${sm.score.pct}%</span>` : ''}${fixes.length ? `<span class="pill off">${fixes.length} to fix</span>` : ''}</summary>
-      <div class="vbody">${sm.win ? `<b>Leader win:</b> ${esc(sm.winName ? titleName(sm.winName) + ': ' : '')}${esc(sm.win)}\n` : ''}<b>Working:</b> ${esc(x.working || '--')}
+    return `<details class="vis" data-vid="${esc(vid)}"><summary><b>${esc(x.store)}</b><span class="small">${esc(longDate(x.date))}</span><span class="small muted">${esc(x.name)}</span>${x.remote ? '<span class="pill">Remote</span>' : `<span class="pill" data-pcount="${esc(vid)}" hidden></span>`}${x.edits?.length ? `<span class="pill edited" title="${esc(editedText(x).join(' | '))}">Edited after submit</span>` : ''}<span class="pill ${x.vtype === 'Follow-Up' ? 'check' : x.vtype === 'Priority' ? 'set' : ''}">${esc(x.vtype || kindToType(x.kind))}</span>${x.status === 'draft' ? '<span class="pill off">Draft</span>' : ''}${sm.score ? `<span class="pill">${sm.score.pct}%</span>` : ''}${fixes.length ? `<span class="pill off">${fixes.length} to fix</span>` : ''}</summary>
+      <div class="vbody">${x.edits?.length ? `<b class="warn">Edited after submit:</b>\n${editedText(x).map(t => '  ' + esc(t)).join('\n')}\n` : ''}${sm.win ? `<b>Leader win:</b> ${esc(sm.winName ? titleName(sm.winName) + ': ' : '')}${esc(sm.win)}\n` : ''}<b>Working:</b> ${esc(x.working || '--')}
 <b>Commitments:</b>
 ${sm.commitments.length ? sm.commitments.map((c, i) => `${i + 1}. ${esc(c)}`).join('\n') : '--'}
 ${sm.leaderCommit ? `<b>Leader commits to:</b> ${esc(sm.leaderCommit)}\n` : ''}${sm.support ? `<b>Support needed:</b> ${esc(sm.support)}\n` : ''}${x.leaderCommit?.notes ? `<b>Leader notes:</b> ${esc(x.leaderCommit.notes)}\n` : ''}${Object.entries(x.segMeta || {}).filter(([, m]) => m?.how || m?.name).map(([gi, m]) => { const vals = Object.values(x.segs?.[gi] || {}); const pts = vals.reduce((t, v) => t + (v === 'yes' ? 1 : v === 'partial' ? 0.5 : 0), 0); return `<b>${esc(SEGMENTS[gi]?.name || '')}:</b> ${m.how === 'practice' ? 'practiced with' : 'watched'} ${esc(titleName(m.name || 'a team member'))}${m.how === 'observed' ? ' on a live guest' : ''}${vals.length ? `, ${pts} of ${SEGMENTS[gi].items.length}` : ''}${m.notes ? `. ${esc(m.notes)}` : ''}\n`; }).join('')}${sm.coached.length ? `<b>Consultants coached:</b>\n${sm.coached.map(c => `- ${esc(titleName(c.name))}${c.via ? `: coached through the store leader${c.score ? `, ${c.score}` : ''}` : ''}${c.drill ? `: ${esc(c.drill)}${c.ran ? ` practice, ${c.score}` : ', practice not run'}${c.rerun === 'better' ? ', second rep better' : c.rerun === 'same' ? ', second rep same' : ''}` : ''}${c.adjust ? `. Adjustment: ${esc(c.adjust)}` : ''}${c.notes ? `\n  Notes: ${esc(c.notes)}` : ''}`).join('\n')}\n` : ''}${x.teamNotes ? `<b>Team notes:</b> ${esc(x.teamNotes)}\n` : ''}${x.reflection ? `<b>Coach next visit:</b> ${esc(x.reflection)}\n` : ''}<b>Notes:</b> ${esc(x.notes || '--')}${fixes.length ? `\n<b>6 Elements to fix:</b> ${esc(fixes.join(', '))}` : ''}</div>
