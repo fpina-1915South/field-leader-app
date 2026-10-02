@@ -1,16 +1,16 @@
-import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610021035';
-import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610021035';
+import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610021041';
+import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610021041';
 import {
   STORES, DISTRICTS, canonicalStore, isKnownStore, parseRsa, rangeFromFileName, parseTeamRoster, resolveReportNames,
   paceFactor, DEFAULT_GOALS, cidOf, status, fmt, goalsFor, TEAM_FOCUS, pickStoreFocus
-} from './base.js?v=202610021035';
+} from './base.js?v=202610021041';
 import {
   iso, fromIso, addDays, daysApart, weekStartOf, DAY_NAMES, DAY_LONG, dow, DEFAULT_OFF, validOff, safeOff, VISIT_DAYS, STORE_GOALS,
   parseDaily, needScore, band, pct, environment, buildPlan, pivotSuggestion, ELEMENTS, SEGMENTS, AORS, PRACTICE, VISIT_TYPES, kindToType, visitScore, visitSummary, consultantCoaching, drillFor, draggers, helpers, STORE_TO_RSA, hasCommitment, commitmentText, blackoutFor, offChoicesFor, storeFocus, rsaPicks, consultantWeeks, teamSignals,
   STORE_METRICS, slug, COACHING, METRICS, PLAIN, isOutlet, driveMin, driveText, MAX_SPLIT_MIN, LEVERS, leverStatus, suggestLever,
   consultantTrends, TREND_ROWS, trendFmt, trendRead, TREND_LABEL,
   OFFER_DEFAULT, PLAY, PLAY_CHECKS, PLAY_CHECKS_REMOTE, offerActive, offerMath, FLIQ_CHECKS, FLIQ_CHECKS_REMOTE, FLIQ_DAILY
-} from './ml.js?v=202610021035';
+} from './ml.js?v=202610021041';
 
 const DEMO = !firebaseConfig.apiKey || firebaseConfig.apiKey.startsWith('PASTE');
 const FB = 'https://www.gstatic.com/firebasejs/10.12.2/';
@@ -77,6 +77,43 @@ function budgetToDate(store, date) {
   let traffic = 0, sales = 0; Object.entries(b.d).forEach(([k, v]) => { if (k <= date) { traffic += v[0]; sales += v[1]; } });
   return { traffic, sales, spg: traffic ? sales / traffic : null, month: b.m };
 }
+// ---------------------------------------------------------------- open carts (Storis open cart detail)
+// Rolled up by consultant and store. Guest phone and email are dropped on the way in and never stored;
+// the top carts keep only the guest's first name and last initial so the leader knows who to call.
+const CART_DUE = [1, 3, 7]; // follow-up days: 1, 3 and 7 days after the cart was started
+function parseCarts(rows, file) {
+  const num = v => { const n = parseFloat(String(v ?? '').replace(/[$,]/g, '')); return isFinite(n) ? n : 0; };
+  const get = (r, re) => { const k = Object.keys(r).find(k => re.test(k)); return k ? r[k] : ''; };
+  const people = {}, stores = {}, bad = new Set(); let total = 0, n = 0;
+  const short = g => { const t = String(g || '').trim().split(/\s+/).filter(Boolean); return !t.length ? 'Guest' : t.length === 1 ? t[0] : `${t[0]} ${t[t.length - 1][0]}.`; };
+  for (const r of rows) {
+    const st0 = String(get(r, /^store$/i)).trim(), who = String(get(r, /^associate$/i)).trim();
+    if (!st0 || !who) continue;
+    const store = canonicalStore(st0); if (!isKnownStore(store)) { bad.add(st0); continue; }
+    const value = num(get(r, /cart value/i)), age = Math.round(num(get(r, /age/i))), lines = num(get(r, /^lines$/i));
+    const cid = cidOf(who);
+    const p = people[cid] ||= { name: who, store, n: 0, value: 0, wk: 0, wkValue: 0, due: 0, old: 0, top: [] };
+    p.n++; p.value += value; if (age <= 7) { p.wk++; p.wkValue += value; } if (CART_DUE.includes(age)) p.due++; if (age > 14) p.old++;
+    p.top.push({ g: short(get(r, /^guest$/i)), v: Math.round(value), a: age, l: lines });
+    const sx = stores[store] ||= { n: 0, value: 0, wk: 0, wkValue: 0, due: 0, old: 0 };
+    sx.n++; sx.value += value; if (age <= 7) { sx.wk++; sx.wkValue += value; } if (CART_DUE.includes(age)) sx.due++; if (age > 14) sx.old++;
+    total += value; n++;
+  }
+  Object.values(people).forEach(p => { p.top = p.top.sort((a, b) => (b.a <= 14) - (a.a <= 14) || b.v - a.v).slice(0, 5); p.value = Math.round(p.value); p.wkValue = Math.round(p.wkValue); });
+  Object.values(stores).forEach(x => { x.value = Math.round(x.value); x.wkValue = Math.round(x.wkValue); });
+  const m = String(file).match(/(\d{4}-\d{2}-\d{2})/);
+  return { date: m ? m[1] : today(), people, stores, total: Math.round(total), n, bad: [...bad] };
+}
+function prepCarts(file, rows) {
+  const c = parseCarts(rows, file);
+  if (!c.n) return { file, error: 'No open carts found. Check the file has Store, Associate and the cart value columns.' };
+  return { file, kind: 'carts', label: 'open carts',
+    summary: `Open carts as of <b>${esc(shortDate(c.date))}</b> · <b>${c.n.toLocaleString('en-US')}</b> carts · about <b>${$k(c.total)}</b> estimated value · ${Object.keys(c.people).length} consultants in ${Object.keys(c.stores).length} stores. Guest phone numbers and emails are left out.`,
+    extra: c.bad.length ? `<p class="small warn">Rows skipped (store not recognized): ${c.bad.map(esc).join(', ')}</p>` : '',
+    publish: () => S.be.saveCarts(c) };
+}
+const cartsFor = cid => S.carts?.people?.[cid] || null;
+const cartLine = c => `${c.n} open cart${c.n === 1 ? '' : 's'} · about ${$k(c.value)}${c.wk ? ` · ${c.wk} started this week (${$k(c.wkValue)})` : ''}${c.due ? ` · ${c.due} due a follow-up today` : ''}`;
 function prepBudget(file, b) {
   const n = Object.keys(b.stores).length, tot = Object.values(b.stores).reduce((a, x) => a + Object.values(x.d).reduce((y, v) => y + v[1], 0), 0);
   const missing = STORES.filter(st => !b.stores[st.name]).map(st => st.name);
@@ -169,6 +206,8 @@ async function firebaseBackend() {
     saveMarkets: markets => F.setDoc(F.doc(db, 'config', 'markets'), { markets, at: new Date().toISOString() }),
     saveRoster: people => F.setDoc(F.doc(db, 'config', 'roster'), { people, at: new Date().toISOString() }),
     budget: month => get('config', 'budget_' + month),
+    carts: () => get('config', 'carts'),
+    saveCarts: c => F.setDoc(F.doc(db, 'config', 'carts'), { ...c, by: email(), at: new Date().toISOString() }),
     saveBudget: b => F.setDoc(F.doc(db, 'config', 'budget_' + b.month), { month: b.month, stores: b.stores, by: email(), at: new Date().toISOString() }),
     users: () => all('users'),
     saveUser: u => F.setDoc(F.doc(db, 'users', u.email), u),
@@ -332,6 +371,11 @@ function demoBackend() {
   }
   meta.rsaDates = Object.keys(rsaHist).sort().reverse();
   let storeLeaders = [];
+  // Demo open carts: a few per consultant.
+  let carts = { date: yest, people: {}, stores: {}, total: 0, n: 0 };
+  rsa.people.forEach((p, i) => { const k = 2 + (i % 6) * 2, top = Array.from({ length: Math.min(k, 5) }, (_, j) => ({ g: ['Maria L.', 'James P.', 'Tasha W.', 'Kevin R.', 'Ana S.'][j], v: 1200 + ((i + j) % 5) * 900, a: [1, 3, 6, 9, 20][j], l: 2 + j })); const value = top.reduce((a, x) => a + x.v, 0) * k / top.length;
+    carts.people[p.cid] = { name: p.name, store: p.store, n: k, value: Math.round(value), wk: Math.ceil(k / 2), wkValue: Math.round(value / 2), due: 2, old: i % 3, top };
+    const sx = carts.stores[p.store] ||= { n: 0, value: 0, wk: 0, wkValue: 0, due: 0, old: 0 }; sx.n += k; sx.value += Math.round(value); sx.wk += Math.ceil(k / 2); sx.wkValue += Math.round(value / 2); sx.due += 2; sx.old += i % 3; carts.n += k; carts.total += Math.round(value); });
   // Demo daily budget for this month and last: a flat monthly number spread by weekday.
   const budgets = {};
   [yest.slice(0, 7), t.slice(0, 7)].forEach(mo => {
@@ -416,6 +460,8 @@ function demoBackend() {
     async saveMarkets(m) { markets = clone(m); },
     async saveRoster(p) { roster.splice(0, roster.length, ...clone(p)); },
     budget: async m => clone(budgets[m] || null),
+    carts: async () => clone(carts),
+    async saveCarts(c) { carts = clone(c); },
     async saveBudget(b) { budgets[b.month] = clone(b); },
     users: async () => clone(Object.values(users)),
     async saveUser(u) { users[u.email] = clone(u); },
@@ -552,6 +598,7 @@ async function loadShared() {
   { const t0 = today(), months = [...new Set([t0.slice(0, 7), addDays(t0, -1).slice(0, 7), (S.meta.latestDaily || t0).slice(0, 7)])];
     const got = await Promise.all(months.map(m => S.be.budget ? S.be.budget(m).catch(() => null) : null));
     S.budgets = Object.fromEntries(months.map((m, i) => [m, got[i]]).filter(x => x[1])); }
+  S.carts = await (S.be.carts ? S.be.carts().catch(() => null) : null);
   S.trends = await loadTrends(rsa).catch(e => { console.warn('trends', e); return {}; });
   S.teams = {};
   for (const st of STORES) if ((rsa?.people || []).some(p => p.store === st.name)) S.teams[st.name] = teamSignals(rsa.people, S.weeks, st.name, DEFAULT_GOALS);
@@ -1676,6 +1723,8 @@ async function viewVisit() {
   ${later ? `<div class="warnbox">This visit is on ${esc(longDate(x.date))}. Use it to prep; you can fill it in that day.</div>` : ''}
   ${(() => { const b = budgetFor(x.store, x.date), y = S.meta.latestDaily, mb = y ? budgetToDate(x.store, y) : null, m = S.daily?.stores?.[x.store]?.mtd?.k;
     return b ? `<div class="budgetline"><b>Today's budget at ${esc(x.store)}:</b> ${$k(b.sales)} revenue · SPG $${Math.round(b.spg)} · about ${Math.round(b.traffic)} guests.${mb && m?.netSales != null ? ` Month to date ${$k(m.netSales)} vs ${$k(mb.sales)} budget (${vsTag(vsPct(m.netSales, mb.sales))}).` : ''} <span class="small muted">Make sure the leader knows both numbers.</span></div>` : ''; })()}
+  ${(() => { const sc = S.carts?.stores?.[x.store]; if (!sc) return ''; const tops = Object.entries(S.carts.people || {}).filter(([, p]) => p.store === x.store).sort((a, b) => b[1].value - a[1].value).slice(0, 3);
+    return `<div class="budgetline cartsline"><b>Open carts at ${esc(x.store)}:</b> ${sc.n} carts · about ${$k(sc.value)} estimated${sc.due ? ` · <b>${sc.due} due a follow-up today</b>` : ''}${sc.old ? ` · ${sc.old} older than 2 weeks` : ''}. Most to follow up: ${tops.map(([, p]) => `${esc(titleName(p.name))} (${p.n}, ${$k(p.value)})`).join(', ')}. <span class="small muted">This is money already in the building: inspect the follow-up plan with the leader.</span></div>`; })()}
   ${V.edits?.length ? `<div class="editbox"><b>Edited after it was submitted</b> <span class="small">(submitted ${esc(dayLabel((V.submittedAt || V.date).slice(0, 10)))})</span><ul class="small">${editedText(V).map(t => `<li>${esc(t)}</li>`).join('')}</ul></div>` : ''}
   ${env ? `<div class="env ${env.kind}"><b>${env.kind === 'headwind' ? 'Headwind.' : env.kind === 'tailwind' ? 'Tailwind.' : 'Normal traffic.'}</b> ${esc(env.text)}</div>` : ''}
 
@@ -1736,6 +1785,12 @@ async function viewVisit() {
           ${kpiCell(p, 'sph', 'SPH', money)}${wk?.hours >= 1 && wk.sph != null ? `<div class="kc ${wk.priorSph && wk.sph < wk.priorSph * 0.75 ? 'red' : wk.priorSph && wk.sph > wk.priorSph * 1.25 ? 'green' : ''}"><span>This week</span><b>${money(wk.sph)}</b></div>` : ''}
           ${kpiCell(p, 'financePct', 'Finance', p1)}${kpiCell(p, 'beddingPct', 'Bedding', p1)}${kpiCell(p, 'protectionPct', 'Protection', p1)}${kpiCell(p, 'creditApps', 'Apps', n => String(Math.round(n)))}${kpiCell(p, 'cancelPct', 'Cancel', p1, true)}
         </div>` : '')}
+        ${(() => { const cr = cartsFor(c.cid); if (!cr) return ''; const fn = titleName(c.name).split(' ')[0], via = (c.mode || (x.remote ? 'leader' : 'direct')) === 'leader';
+          const L = V.leaderWin?.name ? titleName(V.leaderWin.name).split(' ')[0] : 'the leader';
+          const tip = cr.due ? `${via ? `Have ${esc(L)} sit with ${esc(fn)}` : `Sit with ${esc(fn)}`} for 10 minutes and make the ${cr.due} follow-up call${cr.due > 1 ? 's' : ''} due today together.` : `Ask ${esc(fn)} to walk ${via ? esc(L) : 'you'} through their biggest carts and when each one gets its next call (day 1, 3 and 7).`;
+          return `<div class="cartbox"><p style="margin:0"><b>Open carts:</b> ${esc(cartLine(cr))}${cr.old ? ` · <span class="warn">${cr.old} older than 2 weeks</span>` : ''}</p>
+            ${cr.top?.length ? `<ul class="small">${cr.top.map(t => `<li>${esc(t.g)} · ${$k(t.v)} · ${t.a} day${t.a === 1 ? '' : 's'} old${CART_DUE.includes(t.a) ? ' <b class="warn">call today</b>' : ''}</li>`).join('')}</ul>` : ''}
+            <p class="small" style="margin:4px 0 0"><b>Follow-up:</b> ${tip}</p></div>`; })()}
         <div class="segwho"><p class="small" style="margin:0 0 6px"><b>How are you coaching ${esc(titleName(c.name).split(' ')[0])}?</b> <span class="muted">Through the leader: you give the leader the plan, role-play it with them, and they coach ${esc(titleName(c.name).split(' ')[0])}.</span></p>${tri(`consultants.${ci}.mode`, c.mode || (x.remote ? 'leader' : 'direct'), [['direct', 'Directly with them'], ['leader', 'Through the store leader']])}</div>
         ${(() => { const cc = consultantCoaching({ p, store: p.store || x.store, why: c.why, wk, goals: DEFAULT_GOALS, pace: paceFactor(S.rsa?.to), teamFocus: focusAll.find(f => V.focus.includes(f.key))?.label, lever: c.lever });
           const viaLeader = (c.mode || (x.remote ? 'leader' : 'direct')) === 'leader';
@@ -1796,8 +1851,8 @@ async function viewVisit() {
       <p class="small muted" style="margin:4px 0 0">This store's whole team shows first, including anyone without RSA numbers yet. Anyone in the RSA report works, and a name not on either list can be coached too.${rosterOnly.length ? ` ${storePeople.length} of ${storePeople.length + rosterOnly.length} on the ${esc(x.store)} team have RSA numbers${S.rsa?.to ? ' through ' + esc(shortDate(S.rsa.to)) : ''}.` : ''}</p>` : ''}
     <div class="cnotes" style="margin-top:12px">${fieldBox('teamnotes', 'Notes on the team', V.teamNotes, 3, 'Anything about the sales team as a whole: energy, staffing, who is ready for more.', 'teamNotes', dis)}</div>
     ${team?.rows.length ? `<details style="margin-top:10px"><summary class="small" style="cursor:pointer;font-weight:600;color:var(--navy)">Whole team: year, month and this week (${team.rows.length})</summary>
-      <div class="scroller" style="margin-top:8px"><table class="grid"><thead><tr><th>Consultant</th><th class="num">Revenue MTD</th><th class="num">YTD SPH</th><th class="num">Month SPH</th><th class="num">Before this week</th><th class="num">This week</th><th class="num">Hrs</th><th>Flag</th></tr></thead><tbody>
-      ${team.rows.map(r => `<tr><td class="nm">${esc(titleName(r.name))}</td><td class="num">${(() => { const v = people.find(q => q.cid === r.cid)?.k?.netSales; return v != null ? '$' + Math.round(v).toLocaleString('en-US') : '--'; })()}</td><td class="num">${S.trends?.[r.cid]?.ytd ? '$' + Math.round(S.trends[r.cid].ytd.k.sph) : '--'}</td><td class="num ${r.below ? 'bad' : ''}">$${Math.round(r.sph)}</td><td class="num">${r.wk.priorSph ? '$' + Math.round(r.wk.priorSph) : '--'}</td><td class="num ${r.slipping ? 'bad' : r.rising ? 'good' : ''}">${r.wk.sph != null && r.wk.hours >= 1 ? '$' + Math.round(r.wk.sph) : '--'}</td><td class="num">${r.wk.hours >= 1 ? Math.round(r.wk.hours) : '--'}</td><td>${r.below ? '<span class="tag below">Below min</span>' : r.slipping ? '<span class="tag slipping">Slipping</span>' : r.rising ? '<span class="tag model">Rising</span>' : ''}</td></tr>`).join('')}
+      <div class="scroller" style="margin-top:8px"><table class="grid"><thead><tr><th>Consultant</th><th class="num">Revenue MTD</th><th class="num">Open carts</th><th class="num">YTD SPH</th><th class="num">Month SPH</th><th class="num">Before this week</th><th class="num">This week</th><th class="num">Hrs</th><th>Flag</th></tr></thead><tbody>
+      ${team.rows.map(r => `<tr><td class="nm">${esc(titleName(r.name))}</td><td class="num">${(() => { const v = people.find(q => q.cid === r.cid)?.k?.netSales; return v != null ? '$' + Math.round(v).toLocaleString('en-US') : '--'; })()}</td><td class="num">${(() => { const cr = cartsFor(r.cid); return cr ? `${cr.n} · ${$k(cr.value)}` : '--'; })()}</td><td class="num">${S.trends?.[r.cid]?.ytd ? '$' + Math.round(S.trends[r.cid].ytd.k.sph) : '--'}</td><td class="num ${r.below ? 'bad' : ''}">$${Math.round(r.sph)}</td><td class="num">${r.wk.priorSph ? '$' + Math.round(r.wk.priorSph) : '--'}</td><td class="num ${r.slipping ? 'bad' : r.rising ? 'good' : ''}">${r.wk.sph != null && r.wk.hours >= 1 ? '$' + Math.round(r.wk.sph) : '--'}</td><td class="num">${r.wk.hours >= 1 ? Math.round(r.wk.hours) : '--'}</td><td>${r.below ? '<span class="tag below">Below min</span>' : r.slipping ? '<span class="tag slipping">Slipping</span>' : r.rising ? '<span class="tag model">Rising</span>' : ''}</td></tr>`).join('')}
       </tbody></table></div></details>` : ''}`)}
 
   ${x.remote ? '' : ELEMENTS.map(e => sec('el' + e.n, e.n, e.t, PHOTO_ELS.includes(e.key) ? `${e.q} Photos: ${photoAreas(e).filter(a => (S.vPhotos || []).some(p => p.el === e.key && p.item === a)).length} of ${photoAreas(e).length}` : e.q, `
@@ -2367,6 +2422,20 @@ function budgetPanel(stores, t) {
     <p class="small muted" style="margin:6px 0 0">SPG budget is the day's sales budget divided by its traffic budget. Month to date compares the daily report through ${esc(dayLabel(y || t))} with the budget through that day.</p>
   </section>`;
 }
+function cartsPanel(stores) {
+  const c = S.carts; if (!c?.stores) return '';
+  const rows = stores.map(s => ({ s, x: c.stores[s], top: Object.values(c.people || {}).filter(p => p.store === s).sort((a, b) => b.value - a.value)[0] })).filter(r => r.x);
+  if (!rows.length) return '';
+  const tot = rows.reduce((a, r) => (a.n += r.x.n, a.v += r.x.value, a.d += r.x.due, a), { n: 0, v: 0, d: 0 });
+  return `<section class="panel carts">
+    <h3 style="margin:0 0 4px">Open carts: the money already in the building</h3>
+    <p class="small" style="margin:0 0 8px">${tot.n.toLocaleString('en-US')} open carts across your stores, about <b>${$k(tot.v)}</b> estimated. <b>${tot.d}</b> are due a follow-up today (day 1, 3 or 7). Make sure every leader has a follow-up plan and is working it with their consultants.</p>
+    <div class="scroller"><table class="grid"><thead><tr><th>Store</th><th class="num">Open carts</th><th class="num">Est. value</th><th class="num">Started this week</th><th class="num">Due today</th><th class="num">Over 2 weeks</th><th>Most to follow up</th></tr></thead><tbody>
+      ${rows.sort((a, b) => b.x.value - a.x.value).map(r => `<tr><td class="nm">${esc(r.s)}</td><td class="num">${r.x.n}</td><td class="num"><b>${$k(r.x.value)}</b></td><td class="num">${r.x.wk} · ${$k(r.x.wkValue)}</td><td class="num ${r.x.due ? 'warn' : ''}">${r.x.due}</td><td class="num">${r.x.old}</td><td>${r.top ? `${esc(titleName(r.top.name))} <span class="small muted">(${r.top.n}, ${$k(r.top.value)})</span>` : ''}</td></tr>`).join('')}
+    </tbody></table></div>
+    <p class="small muted" style="margin:6px 0 0">Open carts as of ${esc(shortDate(c.date))}. Cart value is estimated from the cart lines at today's price. It isn't booked and isn't used for pay.</p>
+  </section>`;
+}
 async function viewBriefInner() {
   const v = $('#view');
   if (seesAll() && !S.viewEmail) S.viewEmail = leaders()[0]?.email || null;
@@ -2468,6 +2537,7 @@ async function viewBriefInner() {
     ${remoteNext.length ? `<p class="small" style="margin:10px 0 0"><b>Remote coaching today</b> (opportunities at stores you're not in): ${remoteNext.map(s => remoteToday.has(s) ? `${esc(s)} <span class="good">✓</span>` : `<button class="link" data-bremote="${esc(s)}">${esc(s)}</button>`).join(' · ')}</p>` : ''}
   </section>
   ${budgetPanel(stores, t)}
+  ${cartsPanel(stores)}
   <div class="bgrid">
     <section class="panel bwin">
       <h3>Wins to celebrate</h3>
@@ -3073,6 +3143,7 @@ function viewUpload() {
       <li><b>RSA report</b> (every morning with the daily report, <code>rsa_report_…_to_….csv</code>): drives the consultant conversations and the consultant side of the need score. Each day's copy is kept, so the app compares this week against the month before it and flags who is slipping. Last upload: ${when(m.lastRsa)}</li>
       <li><b>RSA report, year to date</b> (once a month is enough, run it from January 1: <code>rsa_report_YYYY-01-01_to_….csv</code>): fills the YTD column on every consultant card so leaders can see the trend. The app adds this month on top of it. Last upload: ${when(m.lastRsaYtd)}</li>
       <li><b>Daily budget</b> (once a month, the "Month YYYY Daily Budgets" workbook with a sheet per store): shows each store's revenue and SPG budget for the day on the daily brief and every visit. Months on file: ${Object.keys(S.budgets || {}).map(esc).join(', ') || 'none'}.</li>
+      <li><b>Open carts</b> (daily if you can, the Storis open cart detail <code>open_carts_detail_YYYY-MM-DD.csv</code>): number of open carts and estimated value per consultant and store, with who is due a follow-up. Guest phone numbers and emails are dropped and never saved. Last upload: ${S.carts?.date ? esc(shortDate(S.carts.date)) + ' · ' + (S.carts.n || 0).toLocaleString('en-US') + ' carts' : 'Never'}.</li>
       <li><b>Store leader list</b> (when leaders change, the store-leader-logins file): names the store leader on every visit. ${(S.storeLeaders || []).length} on file.</li>
       <li><b>Sales team roster</b> (when people change, the Paylocity "Sales Team" export): tells the app which store each consultant works in. ${S.roster.length} people on file.</li>
     </ul>
@@ -3102,6 +3173,7 @@ async function handleFiles(files) {
   for (const { f, rows, heads } of read) {
     try {
       if (rows.budget) out.push(prepBudget(f.name, rows.budget));
+      else if (heads.has('associate') && [...heads].some(h => /cart_value/.test(h))) out.push(prepCarts(f.name, rows));
       else if (heads.has('segment') && heads.has('metric')) out.push(prepDaily(f.name, rows));
       else if (heads.has('sales_associate')) out.push(prepRsa(f.name, rows, batchRoster?.people));
       else if (read.find(x => x.f === f)?.leaders) out.push(prepStoreLeaders(f.name, rows));
