@@ -1,16 +1,16 @@
-import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610021026';
-import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610021026';
+import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610021035';
+import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610021035';
 import {
   STORES, DISTRICTS, canonicalStore, isKnownStore, parseRsa, rangeFromFileName, parseTeamRoster, resolveReportNames,
   paceFactor, DEFAULT_GOALS, cidOf, status, fmt, goalsFor, TEAM_FOCUS, pickStoreFocus
-} from './base.js?v=202610021026';
+} from './base.js?v=202610021035';
 import {
   iso, fromIso, addDays, daysApart, weekStartOf, DAY_NAMES, DAY_LONG, dow, DEFAULT_OFF, validOff, safeOff, VISIT_DAYS, STORE_GOALS,
   parseDaily, needScore, band, pct, environment, buildPlan, pivotSuggestion, ELEMENTS, SEGMENTS, AORS, PRACTICE, VISIT_TYPES, kindToType, visitScore, visitSummary, consultantCoaching, drillFor, draggers, helpers, STORE_TO_RSA, hasCommitment, commitmentText, blackoutFor, offChoicesFor, storeFocus, rsaPicks, consultantWeeks, teamSignals,
   STORE_METRICS, slug, COACHING, METRICS, PLAIN, isOutlet, driveMin, driveText, MAX_SPLIT_MIN, LEVERS, leverStatus, suggestLever,
   consultantTrends, TREND_ROWS, trendFmt, trendRead, TREND_LABEL,
   OFFER_DEFAULT, PLAY, PLAY_CHECKS, PLAY_CHECKS_REMOTE, offerActive, offerMath, FLIQ_CHECKS, FLIQ_CHECKS_REMOTE, FLIQ_DAILY
-} from './ml.js?v=202610021026';
+} from './ml.js?v=202610021035';
 
 const DEMO = !firebaseConfig.apiKey || firebaseConfig.apiKey.startsWith('PASTE');
 const FB = 'https://www.gstatic.com/firebasejs/10.12.2/';
@@ -47,10 +47,51 @@ function parseCsvText(text) {
   const head = clean[0].map(h => h.trim());
   return clean.slice(1).map(r => Object.fromEntries(head.map((h, i) => [h, r[i] ?? ''])));
 }
+// ---------------------------------------------------------------- daily budget (monthly workbook)
+// Each store sheet: MONTHLY TARGETS (label in A, value in D), then Date | Day | Traffic | Sales rows.
+// Stored as config/budget_YYYY-MM: { month, stores: { store: { m: {...}, d: { 'YYYY-MM-DD': [traffic, sales] } } } }.
+function parseBudgetBook(wb, XLSX) {
+  const stores = {}, skipped = []; let month = null;
+  const isoOf = v => v instanceof Date ? iso(new Date(v.getFullYear(), v.getMonth(), v.getDate())) : /^\d{4}-\d{2}-\d{2}/.test(String(v)) ? String(v).slice(0, 10) : null;
+  for (const name of wb.SheetNames) {
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1, defval: null });
+    const bi = rows.findIndex(r => /daily budget breakdown/i.test(String(r?.[0] || '')));
+    if (bi < 0) continue;
+    const store = canonicalStore(String(rows[0]?.[0] || name).trim()) || canonicalStore(name);
+    if (!isKnownStore(store)) { skipped.push(name); continue; }
+    const m = {}, lab = { 'total traffic': 'traffic', 'total written sales': 'sales', 'close rate': 'closeRate', 'average ticket': 'avgTicket', 'sales per guest (spg)': 'spg', 'bedding spg (bspg)': 'bspg', 'effective gm %': 'egm' };
+    rows.slice(0, bi).forEach(r => { const k = lab[String(r?.[0] || '').trim().toLowerCase()]; if (k && typeof r[3] === 'number') m[k] = r[3]; });
+    const d = {};
+    rows.slice(bi + 2).forEach(r => { const dt = isoOf(r?.[0]); if (dt && typeof r[2] === 'number' && typeof r[3] === 'number') { d[dt] = [Math.round(r[2] * 10) / 10, Math.round(r[3])]; month ||= dt.slice(0, 7); } });
+    if (Object.keys(d).length) stores[store] = { m, d };
+  }
+  return Object.keys(stores).length ? { month, stores, skipped } : null;
+}
+// Budget for one store on one day: revenue, traffic and SPG (sales divided by traffic).
+function budgetFor(store, date) {
+  const b = S.budgets?.[date?.slice(0, 7)]?.stores?.[store]; const x = b?.d?.[date];
+  return x ? { traffic: x[0], sales: x[1], spg: x[0] ? x[1] / x[0] : null } : null;
+}
+function budgetToDate(store, date) {
+  const b = S.budgets?.[date?.slice(0, 7)]?.stores?.[store]; if (!b) return null;
+  let traffic = 0, sales = 0; Object.entries(b.d).forEach(([k, v]) => { if (k <= date) { traffic += v[0]; sales += v[1]; } });
+  return { traffic, sales, spg: traffic ? sales / traffic : null, month: b.m };
+}
+function prepBudget(file, b) {
+  const n = Object.keys(b.stores).length, tot = Object.values(b.stores).reduce((a, x) => a + Object.values(x.d).reduce((y, v) => y + v[1], 0), 0);
+  const missing = STORES.filter(st => !b.stores[st.name]).map(st => st.name);
+  return { file, kind: 'budget', label: 'daily budget',
+    summary: `Daily budget for <b>${esc(new Date(b.month + '-15T12:00').toLocaleString('en-US', { month: 'long', year: 'numeric' }))}</b> · ${n} stores · $${Math.round(tot).toLocaleString('en-US')} in sales for the month. Market Leaders see each store's revenue and SPG budget for the day.`,
+    extra: (missing.length ? `<p class="small warn">No budget in this file for: ${missing.map(esc).join(', ')}</p>` : '') + (b.skipped.length ? `<p class="small muted">Sheets skipped (market totals or not a store): ${b.skipped.map(esc).join(', ')}</p>` : ''),
+    publish: () => S.be.saveBudget(b) };
+}
 async function readSpreadsheet(file) {
   if (/\.csv$/i.test(file.name)) return parseCsvText(await file.text());
   const XLSX = await import('https://cdn.jsdelivr.net/npm/xlsx@0.18.5/+esm');
   const wb = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: true });
+  // The monthly daily budget workbook: one sheet per store with a DAILY BUDGET BREAKDOWN table.
+  const budget = parseBudgetBook(wb, XLSX);
+  if (budget) return Object.assign([], { budget });
   // Roster exports keep the team on a "Sales Team" sheet; everything else is the first sheet.
   const name = wb.SheetNames.find(n => /sales team|store leaders/i.test(n)) || wb.SheetNames[0];
   return XLSX.utils.sheet_to_json(wb.Sheets[name], { defval: '' });
@@ -127,6 +168,8 @@ async function firebaseBackend() {
     saveStoreLeaders: leaders => F.setDoc(F.doc(db, 'config', 'storeLeaders'), { leaders, at: new Date().toISOString() }),
     saveMarkets: markets => F.setDoc(F.doc(db, 'config', 'markets'), { markets, at: new Date().toISOString() }),
     saveRoster: people => F.setDoc(F.doc(db, 'config', 'roster'), { people, at: new Date().toISOString() }),
+    budget: month => get('config', 'budget_' + month),
+    saveBudget: b => F.setDoc(F.doc(db, 'config', 'budget_' + b.month), { month: b.month, stores: b.stores, by: email(), at: new Date().toISOString() }),
     users: () => all('users'),
     saveUser: u => F.setDoc(F.doc(db, 'users', u.email), u),
     deleteUser: e => F.deleteDoc(F.doc(db, 'users', e)),
@@ -289,6 +332,16 @@ function demoBackend() {
   }
   meta.rsaDates = Object.keys(rsaHist).sort().reverse();
   let storeLeaders = [];
+  // Demo daily budget for this month and last: a flat monthly number spread by weekday.
+  const budgets = {};
+  [yest.slice(0, 7), t.slice(0, 7)].forEach(mo => {
+    if (budgets[mo]) return;
+    const [yy, mm] = mo.split('-').map(Number), nd = new Date(yy, mm, 0).getDate(), w = [1.1, 0.75, 0.75, 0.8, 0.8, 1, 1.85];
+    const stores = {};
+    STORES.forEach((st, i) => { const monthly = 300000 + (i % 7) * 60000, traffic = Math.round(monthly / 560); const tw = Array.from({ length: nd }, (_, k) => w[new Date(yy, mm - 1, k + 1).getDay()]); const sw = tw.reduce((a, b) => a + b, 0);
+      stores[st.name] = { m: { traffic, sales: monthly, spg: monthly / traffic }, d: Object.fromEntries(tw.map((x, k) => [`${mo}-${String(k + 1).padStart(2, '0')}`, [Math.round(traffic * x / sw * 10) / 10, Math.round(monthly * x / sw)]])) }; });
+    budgets[mo] = { month: mo, stores };
+  });
   let markets = [
     { id: 'jax', name: 'Jacksonville', leader: 'east@demo', director: 'director@demo', stores: ['Town Center', 'Orange Park', 'Yulee', 'St. Augustine'] },
     { id: 'nc', name: 'Carolinas', leader: 'nc@demo', director: '', stores: ['Greensboro', 'Winston Salem', 'Burlington', 'Danville', 'Outlet Greensboro'] },
@@ -362,6 +415,8 @@ function demoBackend() {
     async saveStoreLeaders(l) { storeLeaders = clone(l); },
     async saveMarkets(m) { markets = clone(m); },
     async saveRoster(p) { roster.splice(0, roster.length, ...clone(p)); },
+    budget: async m => clone(budgets[m] || null),
+    async saveBudget(b) { budgets[b.month] = clone(b); },
     users: async () => clone(Object.values(users)),
     async saveUser(u) { users[u.email] = clone(u); },
     async deleteUser(e) { delete users[e]; },
@@ -494,6 +549,9 @@ async function loadShared() {
   const prevDate = (S.meta.rsaDates || []).filter(d => rsa?.to && d < rsa.to).sort().reverse()[0];
   S.rsaPrev = prevDate ? await S.be.rsaAt(prevDate).catch(() => null) : null;
   S.days = S.rsaPrev ? consultantWeeks(rsa, S.rsaPrev) : {};
+  { const t0 = today(), months = [...new Set([t0.slice(0, 7), addDays(t0, -1).slice(0, 7), (S.meta.latestDaily || t0).slice(0, 7)])];
+    const got = await Promise.all(months.map(m => S.be.budget ? S.be.budget(m).catch(() => null) : null));
+    S.budgets = Object.fromEntries(months.map((m, i) => [m, got[i]]).filter(x => x[1])); }
   S.trends = await loadTrends(rsa).catch(e => { console.warn('trends', e); return {}; });
   S.teams = {};
   for (const st of STORES) if ((rsa?.people || []).some(p => p.store === st.name)) S.teams[st.name] = teamSignals(rsa.people, S.weeks, st.name, DEFAULT_GOALS);
@@ -1616,6 +1674,8 @@ async function viewVisit() {
     </div>
   </div>
   ${later ? `<div class="warnbox">This visit is on ${esc(longDate(x.date))}. Use it to prep; you can fill it in that day.</div>` : ''}
+  ${(() => { const b = budgetFor(x.store, x.date), y = S.meta.latestDaily, mb = y ? budgetToDate(x.store, y) : null, m = S.daily?.stores?.[x.store]?.mtd?.k;
+    return b ? `<div class="budgetline"><b>Today's budget at ${esc(x.store)}:</b> ${$k(b.sales)} revenue · SPG $${Math.round(b.spg)} · about ${Math.round(b.traffic)} guests.${mb && m?.netSales != null ? ` Month to date ${$k(m.netSales)} vs ${$k(mb.sales)} budget (${vsTag(vsPct(m.netSales, mb.sales))}).` : ''} <span class="small muted">Make sure the leader knows both numbers.</span></div>` : ''; })()}
   ${V.edits?.length ? `<div class="editbox"><b>Edited after it was submitted</b> <span class="small">(submitted ${esc(dayLabel((V.submittedAt || V.date).slice(0, 10)))})</span><ul class="small">${editedText(V).map(t => `<li>${esc(t)}</li>`).join('')}</ul></div>` : ''}
   ${env ? `<div class="env ${env.kind}"><b>${env.kind === 'headwind' ? 'Headwind.' : env.kind === 'tailwind' ? 'Tailwind.' : 'Normal traffic.'}</b> ${esc(env.text)}</div>` : ''}
 
@@ -2286,6 +2346,27 @@ async function viewBrief() {
     try { await S.be.saveAlert(a); renderShell(); } catch (e) { toast(friendly(e), true); }
   });
 }
+// Each store's budget: today's revenue and SPG, yesterday against its budget, and the month to date.
+const $k = n => n == null ? '--' : '$' + Math.round(n).toLocaleString('en-US');
+const vsPct = (a, b) => a != null && b ? Math.round((a / b - 1) * 1000) / 10 : null;
+const vsTag = v => v == null ? '' : `<span class="${v >= 0 ? 'good' : v <= -10 ? 'bad' : 'warn'}">${v >= 0 ? '+' : ''}${v.toFixed(1)}%</span>`;
+function budgetPanel(stores, t) {
+  const y = S.meta.latestDaily, hasDay = (S.daily?.periods || []).includes('day');
+  const rows = stores.map(s => ({ s, td: budgetFor(s, t), yb: y ? budgetFor(s, y) : null, mb: y ? budgetToDate(s, y) : null, snap: S.daily?.stores?.[s] })).filter(r => r.td || r.mb);
+  if (!rows.length) return '';
+  const tot = rows.reduce((a, r) => (a.sales += r.td?.sales || 0, a.traffic += r.td?.traffic || 0, a), { sales: 0, traffic: 0 });
+  return `<section class="panel budget">
+    <h3 style="margin:0 0 4px">Today's budget</h3>
+    <p class="small" style="margin:0 0 8px">Every store leader should know these two numbers walking in: revenue and SPG for the day. Today across your stores: <b>${$k(tot.sales)}</b> on about ${Math.round(tot.traffic)} guests.</p>
+    <div class="scroller"><table class="grid"><thead><tr><th>Store</th><th class="num">Revenue today</th><th class="num">SPG today</th><th class="num">Guests</th>${hasDay ? `<th class="num">${esc(dayLabel(y))} actual</th><th class="num">vs budget</th>` : ''}<th class="num">MTD sales</th><th class="num">vs budget to date</th></tr></thead><tbody>
+      ${rows.map(r => { const d = hasDay ? r.snap?.day?.k : null, m = r.snap?.mtd?.k;
+        return `<tr><td class="nm">${esc(r.s)}</td><td class="num"><b>${$k(r.td?.sales)}</b></td><td class="num"><b>${r.td?.spg ? '$' + Math.round(r.td.spg) : '--'}</b></td><td class="num">${r.td ? Math.round(r.td.traffic) : '--'}</td>
+        ${hasDay ? `<td class="num">${$k(d?.netSales)}${d?.spg != null ? ` <span class="small muted">SPG $${Math.round(d.spg)}</span>` : ''}</td><td class="num">${vsTag(vsPct(d?.netSales, r.yb?.sales))}</td>` : ''}
+        <td class="num">${$k(m?.netSales)}</td><td class="num">${vsTag(vsPct(m?.netSales, r.mb?.sales))}</td></tr>`; }).join('')}
+    </tbody></table></div>
+    <p class="small muted" style="margin:6px 0 0">SPG budget is the day's sales budget divided by its traffic budget. Month to date compares the daily report through ${esc(dayLabel(y || t))} with the budget through that day.</p>
+  </section>`;
+}
 async function viewBriefInner() {
   const v = $('#view');
   if (seesAll() && !S.viewEmail) S.viewEmail = leaders()[0]?.email || null;
@@ -2386,6 +2467,7 @@ async function viewBriefInner() {
     ${sugg ? `<div class="warnbox" style="margin-top:10px"><b>Suggested swap:</b> add ${esc(sugg.to)}, drop ${esc(sugg.from)}. ${esc(sugg.reasonTo || '')} <button class="link" id="bweek">Review it on My week</button></div>` : ''}
     ${remoteNext.length ? `<p class="small" style="margin:10px 0 0"><b>Remote coaching today</b> (opportunities at stores you're not in): ${remoteNext.map(s => remoteToday.has(s) ? `${esc(s)} <span class="good">✓</span>` : `<button class="link" data-bremote="${esc(s)}">${esc(s)}</button>`).join(' · ')}</p>` : ''}
   </section>
+  ${budgetPanel(stores, t)}
   <div class="bgrid">
     <section class="panel bwin">
       <h3>Wins to celebrate</h3>
@@ -2990,6 +3072,7 @@ function viewUpload() {
       <li><b>Daily report</b> (every morning, <code>daily-report-YYYY-MM-DD.csv</code>): drives the need scores, the Sunday plan and the mid-week pivots. Keep the WTD and MTD columns in the export. Last upload: ${when(m.lastDaily)}</li>
       <li><b>RSA report</b> (every morning with the daily report, <code>rsa_report_…_to_….csv</code>): drives the consultant conversations and the consultant side of the need score. Each day's copy is kept, so the app compares this week against the month before it and flags who is slipping. Last upload: ${when(m.lastRsa)}</li>
       <li><b>RSA report, year to date</b> (once a month is enough, run it from January 1: <code>rsa_report_YYYY-01-01_to_….csv</code>): fills the YTD column on every consultant card so leaders can see the trend. The app adds this month on top of it. Last upload: ${when(m.lastRsaYtd)}</li>
+      <li><b>Daily budget</b> (once a month, the "Month YYYY Daily Budgets" workbook with a sheet per store): shows each store's revenue and SPG budget for the day on the daily brief and every visit. Months on file: ${Object.keys(S.budgets || {}).map(esc).join(', ') || 'none'}.</li>
       <li><b>Store leader list</b> (when leaders change, the store-leader-logins file): names the store leader on every visit. ${(S.storeLeaders || []).length} on file.</li>
       <li><b>Sales team roster</b> (when people change, the Paylocity "Sales Team" export): tells the app which store each consultant works in. ${S.roster.length} people on file.</li>
     </ul>
@@ -3018,7 +3101,8 @@ async function handleFiles(files) {
   const batchRoster = read.filter(x => isRoster(x.heads, x)).map(x => prepRoster(x.f.name, x.rows)).find(x => x.people);
   for (const { f, rows, heads } of read) {
     try {
-      if (heads.has('segment') && heads.has('metric')) out.push(prepDaily(f.name, rows));
+      if (rows.budget) out.push(prepBudget(f.name, rows.budget));
+      else if (heads.has('segment') && heads.has('metric')) out.push(prepDaily(f.name, rows));
       else if (heads.has('sales_associate')) out.push(prepRsa(f.name, rows, batchRoster?.people));
       else if (read.find(x => x.f === f)?.leaders) out.push(prepStoreLeaders(f.name, rows));
       else if (heads.has('location') && heads.has('name')) out.push(prepRoster(f.name, rows));
