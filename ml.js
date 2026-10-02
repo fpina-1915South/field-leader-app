@@ -4,7 +4,7 @@
 import {
   normalizeHeader, toNumber, parseDate, slug, canonicalStore, isKnownStore, REGIONS, STORE_METRICS,
   COACHING, METRICS, pickFocus, pickStoreFocus, goalsFor, DEFAULT_GOALS, isOutlet, minSphFor, fmt, weeklyTarget
-} from './base.js?v=202610021228';
+} from './base.js?v=202610021335';
 
 const numOrNull = v => (v === '' || v === null || v === undefined ? null : toNumber(v));
 
@@ -15,7 +15,8 @@ export const fromIso = s => { const [y, m, d] = s.split('-').map(Number); return
 export const addDays = (s, n) => { const d = fromIso(s); d.setDate(d.getDate() + n); return iso(d); };
 export const daysApart = (a, b) => Math.round((fromIso(b) - fromIso(a)) / 86400000);
 // Weeks run Sunday to Saturday. The plan for a week is built on its Sunday.
-export const weekStartOf = s => { const d = fromIso(s); d.setDate(d.getDate() - d.getDay()); return iso(d); };
+// Weeks run Monday to Sunday (the same week as WTD in the daily report).
+export const weekStartOf = s => { const d = fromIso(s); d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return iso(d); };
 export const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 export const DAY_LONG = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 export const dow = s => fromIso(s).getDay();

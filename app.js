@@ -1,17 +1,28 @@
-import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610021228';
-import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610021228';
+import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610021335';
+import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610021335';
 import {
   STORES, DISTRICTS, canonicalStore, isKnownStore, parseRsa, rangeFromFileName, parseTeamRoster, resolveReportNames,
   paceFactor, DEFAULT_GOALS, cidOf, status, fmt, goalsFor, TEAM_FOCUS, pickStoreFocus
-} from './base.js?v=202610021228';
+} from './base.js?v=202610021335';
 import {
   iso, fromIso, addDays, daysApart, weekStartOf, DAY_NAMES, DAY_LONG, dow, DEFAULT_OFF, validOff, safeOff, VISIT_DAYS, STORE_GOALS,
   parseDaily, needScore, band, pct, environment, buildPlan, pivotSuggestion, ELEMENTS, SEGMENTS, AORS, PRACTICE, VISIT_TYPES, kindToType, visitScore, visitSummary, consultantCoaching, drillFor, draggers, helpers, STORE_TO_RSA, hasCommitment, commitmentText, blackoutFor, offChoicesFor, storeFocus, rsaPicks, consultantWeeks, teamSignals,
   STORE_METRICS, slug, COACHING, METRICS, PLAIN, isOutlet, driveMin, driveText, MAX_SPLIT_MIN, LEVERS, leverStatus, suggestLever,
   consultantTrends, TREND_ROWS, trendFmt, trendRead, TREND_LABEL,
   OFFER_DEFAULT, PLAY, PLAY_CHECKS, PLAY_CHECKS_REMOTE, offerActive, offerMath, FLIQ_CHECKS, FLIQ_CHECKS_REMOTE, FLIQ_DAILY
-} from './ml.js?v=202610021228';
+} from './ml.js?v=202610021335';
 
+// Legacy Sunday-start weeks, read as the Monday week that replaced them.
+function fromSundayPlan(p, week) {
+  if (!p) return null;
+  const end = addDays(week, 6);
+  const days = (p.days || []).filter(d => d.date >= week && d.date <= end);
+  if (!safeOff(p.off).includes(0) && !days.some(d => d.date === end) && days.length < VISIT_DAYS) days.push({ date: end, store: null, kind: 'open', status: 'planned', score: null });
+  return { ...p, weekStart: week, days, fromSunday: p.weekStart };
+}
+const sundayShift = (x, week) => x ? { ...x, weekStart: week, fromSunday: x.weekStart } : null;
+const sundayId = id => { const m = String(id).match(/^(.*)_(\d{4}-\d{2}-\d{2})$/); return m && dow(m[2]) === 1 ? `${m[1]}_${addDays(m[2], -1)}` : '__none'; };
+const sundayDoc = (d, id) => d ? { ...d, id, weekStart: id.slice(-10), fromSunday: d.weekStart } : null;
 const DEMO = !firebaseConfig.apiKey || firebaseConfig.apiKey.startsWith('PASTE');
 const FB = 'https://www.gstatic.com/firebasejs/10.12.2/';
 const ROLES = [['admin', 'Admin'], ['exec', 'Executive (view all)'], ['director', 'Director'], ['leader', 'Market Leader']];
@@ -212,20 +223,21 @@ async function firebaseBackend() {
     users: () => all('users'),
     saveUser: u => F.setDoc(F.doc(db, 'users', u.email), u),
     deleteUser: e => F.deleteDoc(F.doc(db, 'users', e)),
-    plan: (e, week) => get('plans', `${e}_${week}`),
-    plansForWeek: week => all('plans', ['weekStart', week]),
+    // Weeks used to start on Sunday. Anything saved under a Sunday start is read as that Monday's week.
+    plan: async (e, week) => (await get('plans', `${e}_${week}`)) || (dow(week) === 1 ? fromSundayPlan(await get('plans', `${e}_${addDays(week, -1)}`), week) : null),
+    plansForWeek: async week => { const a = await all('plans', ['weekStart', week]); if (dow(week) !== 1) return a; const old = await all('plans', ['weekStart', addDays(week, -1)]).catch(() => []); return [...a, ...old.filter(o => !a.some(x => x.email === o.email)).map(o => fromSundayPlan(o, week))]; },
     savePlan: p => F.setDoc(F.doc(db, 'plans', `${p.email}_${p.weekStart}`), p),
     visits: () => all('visits'),
     saveVisit: v => F.setDoc(F.doc(db, 'visits', v.id), v),
     photos: visitId => all('photos', ['visitId', visitId]),
     savePhoto: ph => F.setDoc(F.doc(db, 'photos', ph.id), ph),
     deletePhoto: id => F.deleteDoc(F.doc(db, 'photos', id)),
-    timeOff: (e, week) => get('timeoff', `${e}_${week}`),
-    timeOffForWeek: week => all('timeoff', ['weekStart', week]),
+    timeOff: async (e, week) => (await get('timeoff', `${e}_${week}`)) || (dow(week) === 1 ? sundayShift(await get('timeoff', `${e}_${addDays(week, -1)}`), week) : null),
+    timeOffForWeek: async week => { const a = await all('timeoff', ['weekStart', week]); if (dow(week) !== 1) return a; const old = await all('timeoff', ['weekStart', addDays(week, -1)]).catch(() => []); return [...a, ...old.filter(o => !a.some(x => x.email === o.email)).map(o => sundayShift(o, week))]; },
     saveTimeOff: t => F.setDoc(F.doc(db, 'timeoff', `${t.email}_${t.weekStart}`), t),
-    oneOnOne: id => get('oneonones', id),
+    oneOnOne: async id => (await get('oneonones', id)) || sundayDoc(await get('oneonones', sundayId(id)), id),
     saveOneOnOne: d => F.setDoc(F.doc(db, 'oneonones', d.id), d),
-    onePrivate: id => get('oneprivate', id),
+    onePrivate: async id => (await get('oneprivate', id)) || sundayDoc(await get('oneprivate', sundayId(id)), id),
     saveOnePrivate: d => F.setDoc(F.doc(db, 'oneprivate', d.id), d),
     alerts: () => all('alerts'),
     offer: async () => (await get('config', 'offer'))?.offer || null,
@@ -435,7 +447,7 @@ function demoBackend() {
     coaching: '', actions: [
       { key: 'closeRate', what: 'Close Rate across the market', from: '24%', to: '28%', how: 'No guest leaves without a TO. Leaders track TOs at every huddle.', owner: users['east@demo'].name, due: addDays(lw, 6) },
       { store: 'Yulee', key: 'financePct', what: 'Yulee: Finance %', from: '44%', to: '55%', how: 'Full-day visit Tuesday. Every guest gets their buying power.', owner: users['east@demo'].name, due: addDays(lw, 6) },
-      { what: 'Full-day visits', from: '3 of 5', to: '5 of 5', how: 'Days off locked by Sunday.', owner: users['east@demo'].name, due: addDays(lw, 6) }], support: 'Help backfill a closing leader at Yulee', supportBy: addDays(lw, 3) };
+      { what: 'Full-day visits', from: '3 of 5', to: '5 of 5', how: 'Days off locked by Monday.', owner: users['east@demo'].name, due: addDays(lw, 6) }], support: 'Help backfill a closing leader at Yulee', supportBy: addDays(lw, 3) };
   let current = 'east@demo';
   const clone = x => structuredClone(x);
   return {
@@ -826,7 +838,7 @@ async function viewWeek() {
   </div>
   ${!S.daily ? `<div class="warnbox"><b>No numbers yet.</b> Every store is on the plan in order for now. Once the first daily report is uploaded, the week re-ranks so the stores that need you most come first.</div>` : ''}
   ${!plan && week > thisWeek ? `<div class="panel"><h2>Pick your days off to build next week</h2><p>Tap your 2 days below and save. Your schedule builds right away from the latest numbers and refreshes on Sunday with Saturday's.</p></div>` : ''}
-  ${plan?.preview && week > thisWeek ? `<div class="warnbox">Preview built from numbers through ${esc(longDate(plan.basisDate))}. It refreshes Sunday with Saturday's numbers, keeping your days off.</div>` : ''}
+  ${plan?.preview && week > thisWeek ? `<div class="warnbox">Preview built from numbers through ${esc(longDate(plan.basisDate))}. It refreshes Monday with Sunday's numbers, keeping your days off.</div>` : ''}
   ${!plan && S.daily && week < thisWeek ? `<div class="panel"><h2>No plan for this week</h2><p>Nothing was planned or logged.</p></div>` : ''}
   ${S.lastAlert && S.lastAlert.weekStart === week ? `<div class="warnbox" style="border-left-color:var(--green)"><b>${esc(vpNames())} was alerted in the app.</b> <a href="${alertMailto(S.lastAlert)}">Email them too</a></div>` : ''}
   <div id="swapreason" class="panel" hidden></div>
@@ -1064,7 +1076,7 @@ function offPanel(week, off, to, who, canEdit, plan, isCurrent) {
     }).join('')}</div>
     <div id="offreason" hidden style="margin-top:12px"></div>
     ${canEdit ? `<div class="row" style="margin-top:12px"><button class="btn primary" id="offsave">${plan ? 'Save and rebuild my schedule' : 'Save and build my schedule'}</button>
-      <span class="small">${isCurrent && plan ? 'Visits already logged stay on their days.' : !isCurrent ? 'It refreshes with the newest numbers on Sunday.' : ''}</span></div>` : ''}
+      <span class="small">${isCurrent && plan ? 'Visits already logged stay on their days.' : !isCurrent ? 'It refreshes with the newest numbers on Monday.' : ''}</span></div>` : ''}
   </section>`;
 }
 // Which store each working day goes to: the saved plan's days, or what the plan would be with these days off.
@@ -1236,7 +1248,7 @@ const dayText = d => dayStores(d).join(' + ') || 'Open day';
 function wirePicker() { const lp = $('#lp'); if (lp) lp.onchange = () => { S.viewEmail = lp.value; S.editWeek = false; viewWeek(); }; }
 function pivotCard(s) {
   return `<div class="pivot" role="region" aria-label="Suggested change">
-    <p class="eyebrow">New numbers since Sunday</p>
+    <p class="eyebrow">New numbers since your week was built</p>
     <h3>Suggested: add ${esc(s.to)} and drop ${esc(s.from)}</h3>
     <p>${esc(s.reasonTo)}${s.why.length ? ' ' + s.why.map(esc).join('. ') + '.' : ''} ${esc(s.reasonFrom)}${s.loses ? ` ${esc(s.from)} moves to a phone check-in this week.` : ''}</p>
     <p class="small" style="margin:0 0 4px"><b>Rest of the week, highest priority first:</b></p>
@@ -1481,7 +1493,7 @@ function intentHtml(it, compact) {
     ${it.why.length && !compact ? `<ul class="whylist">${it.why.map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : it.why.length ? `<p class="small" style="margin:0">${esc(it.why[0])}</p>` : ''}
     ${it.L ? `<p class="small" style="margin:0"><b>Lever:</b> ${esc(it.L.label)} (${esc(fmtMetric(it.L.key, it.L.value))} vs ${esc(fmtMetric(it.L.key, it.L.goal))} goal).${compact ? '' : ' The number moves through people and behaviors, not by talking about the number.'}</p>` : ''}
     ${it.see.length ? `<p class="small" style="margin:0"><b>People:</b> ${it.see.map(p => `${esc(p.n)} <span class="muted">(${esc(p.why)})</span>`).join(', ')}</p>` : ''}
-    ${it.behaviors.length ? `<p class="small" style="margin:0"><b>Behaviors to coach:</b> ${it.behaviors.map(b => esc(b.b)).join('. ')}.</p>` : ''}
+    ${it.behaviors.length ? `<p class="small" style="margin:0"><b>Behaviors to coach:</b> ${it.behaviors.map(b => esc(String(b.b).replace(/[.\s]+$/, ''))).join('. ')}.</p>` : ''}
     ${it.model ? `<p class="small" style="margin:0"><b>Model:</b> ${esc(it.model)} shows the team how it's done.</p>` : ''}
     ${compact ? '' : '<p class="small" style="margin:4px 0 0"><b>Leave with:</b> a from X to Y commitment from the leader and from each person you coach.</p>'}
   </div>`;
@@ -2606,7 +2618,7 @@ async function viewBriefInner() {
 }
 
 // ---------------------------------------------------------------- VP 1 on 1 with a Market Leader
-// Weekly, VP to Market Leader. Recaps the week that just closed (Sunday to Saturday): which stores and
+// Weekly, VP to Market Leader. Recaps the week that just closed (Monday to Sunday): which stores and
 // people performed and which didn't, how the leader ran their week, the one lever the market needs
 // pulled, and where the focus goes this week. Ends with commitments from X to Y by a date, and how.
 const ONE_LEVERS = ['financePct', 'appsToTraffic', 'beddingPct', 'protectionAttach', 'deliveryPct'];   // core behaviors under the two levers
@@ -2740,7 +2752,7 @@ async function viewOne() {
     .filter(({ a }) => a.due && a.due >= ws && a.due <= we).map(o => ({ ...o, au: autoFollow(o.a, S.daily?.stores?.[o.x.store], {}) }));
   const dueNot = dueWk.filter(o => o.au?.v === 'no').length, dueDone = dueWk.filter(o => o.au?.v === 'yes').length;
   const missed = Math.max(0, planned - inPerson.length);
-  const schedChanges = (S.alerts || []).filter(a => a.type !== 'visitEdit' && (a.forEmail || a.email) === email && a.weekStart === ws);
+  const schedChanges = (S.alerts || []).filter(a => a.type !== 'visitEdit' && (a.forEmail || a.email) === email && (a.weekStart === ws || a.weekStart === addDays(ws, -1)));
 
   // The lever and where the week goes.
   // The lever first (close rate, average ticket or effective margin), then the input to coach under it.
@@ -2860,7 +2872,7 @@ async function viewOne() {
       <label for="owk" style="margin:0">Week<select id="owk">${weeks.map(w => `<option value="${w}" ${w === ws ? 'selected' : ''}>Week of ${esc(weekRange(w))}</option>`).join('')}</select></label>
     </div>
   </div>
-  ${sec('glance', '1', 'Last week at a glance', 'The market, Sunday to Saturday.', `${glance}${storeTable}`)}
+  ${sec('glance', '1', 'Last week at a glance', 'The market, Monday to Sunday.', `${glance}${storeTable}`)}
   ${sec('wins', '2', 'Wins to call out', 'Stores, people, and how the week was run. Start here.', `${li(wins.filter(w => !topPeople.slice(0, 3).some(p => w === peopleLine(p))))}
     ${pTable(topPeople, 'No consultant numbers for that week yet.').replace('<ul class="blist">', '<p class="eyebrow">Who performed (sales per hour for the week, 12+ hours)</p><ul class="blist">')}`)}
   ${sec('opps', '3', 'Opportunities', "Who didn't perform, and where the week slipped.", `${li(opps.filter(o => !lowPeople.some(p => o.startsWith(peopleLine(p)))))}
@@ -3028,8 +3040,8 @@ async function viewLeaders() {
 const MSG_TYPES = [
   ['dailyStore', 'Daily: store huddle', 'Every morning, to one store. Yesterday, the week, one thing for today, and the top performers this week.'],
   ['dailyMarket', 'Daily: market recap', 'Every morning, to all your store leaders. Yesterday ranked, and the top performers in the market this week.'],
-  ['kickoff', 'Weekly: store kickoff', 'Sunday, to one store. The month, what is working, 2 focus items, top performers and category leaders, your visit days.'],
-  ['marketUpdate', 'Weekly: market update', 'Sunday, to all your store leaders. The month ranked, the top 5 consultants and category leaders across the market, and your visit schedule.'],
+  ['kickoff', 'Weekly: store kickoff', 'Monday, to one store. The month, what is working, 2 focus items, top performers and category leaders, your visit days.'],
+  ['marketUpdate', 'Weekly: market update', 'Monday, to all your store leaders. The month ranked, the top 5 consultants and category leaders across the market, and your visit schedule.'],
   ['recap', 'Visit recap', 'After a visit, to that store. What is working and the commitments.']
 ];
 async function viewMessages() {
@@ -3156,7 +3168,7 @@ function viewUpload() {
     <h2>Upload the reports</h2>
     <p>Drop in any of the files. The app figures out which is which.</p>
     <ul class="small" style="color:var(--body);padding-left:18px">
-      <li><b>Daily report</b> (every morning, <code>daily-report-YYYY-MM-DD.csv</code>): drives the need scores, the Sunday plan and the mid-week pivots. Keep the WTD and MTD columns in the export. Last upload: ${when(m.lastDaily)}</li>
+      <li><b>Daily report</b> (every morning, <code>daily-report-YYYY-MM-DD.csv</code>): drives the need scores, the weekly plan (Monday to Sunday) and the mid-week pivots. Keep the WTD and MTD columns in the export. Last upload: ${when(m.lastDaily)}</li>
       <li><b>RSA report</b> (every morning with the daily report, <code>rsa_report_…_to_….csv</code>): drives the consultant conversations and the consultant side of the need score. Each day's copy is kept, so the app compares this week against the month before it and flags who is slipping. Last upload: ${when(m.lastRsa)}</li>
       <li><b>RSA report, year to date</b> (once a month is enough, run it from January 1: <code>rsa_report_YYYY-01-01_to_….csv</code>): fills the YTD column on every consultant card so leaders can see the trend. The app adds this month on top of it. Last upload: ${when(m.lastRsaYtd)}</li>
       <li><b>Daily budget</b> (once a month, the "Month YYYY Daily Budgets" workbook with a sheet per store): shows each store's revenue and SPG budget for the day on the daily brief and every visit. Months on file: ${Object.keys(S.budgets || {}).map(esc).join(', ') || 'none'}.</li>
@@ -3481,11 +3493,11 @@ function viewGuide() {
       <li>Open the app and start on <b>Daily brief</b>. It covers yesterday for your stores and your people: wins to celebrate, opportunities, commitments due, and where you're going today.</li>
       <li>Then open <b>Team messages</b>, copy the daily huddle for each store and the market recap, and send them to your team.</li>
     </ul>
-    <h3 style="margin-top:18px">Sunday: your week is built for you</h3>
+    <h3 style="margin-top:18px">Monday: your week is built for you</h3>
     <ul>
       <li>Pick your 2 days off for each week on <b>My week</b> (tap the › arrow for next week). Any 2 days work; Tuesday, Wednesday or Thursday works best. Your schedule builds as soon as you save.</li>
       <li>If you don't pick, the plan uses your default days off (Wednesday and Thursday unless Frank set others).</li>
-      <li>Open <b>My week</b> on Sunday. The plan is built from Saturday's numbers: 5 visit days around your 2 days off.</li>
+      <li>Weeks run Monday to Sunday, the same as WTD in the daily report. Open <b>My week</b> on Monday. The plan is built from Sunday's numbers: 5 visit days around your 2 days off.</li>
       <li>Every store gets a visit. Extra days go to the stores that need you most, as a second visit late in the week. Visit 1 sets the plan, visit 2 checks it.</li>
       <li>Visits are full days in one store. More stores than visit days? The lowest-need stores are marked Call.</li>
       <li>While you're on a full-day visit, coach your other stores remotely from <b>Remote coaching</b> on My week: phone, video or Teams. Log it the same way (numbers, focus items, consultants, from-to commitments), minus the 6 Elements walk.</li>
@@ -3493,13 +3505,13 @@ function viewGuide() {
     </ul>
     <h3 style="margin-top:18px">Monday: your 1 on 1</h3>
     <ul>
-      <li>Each week your VP holds a 1 on 1 with you on the week that just closed, Sunday to Saturday. It covers wins and opportunities for your stores and people, who performed and who didn't, how your visits went, and the one lever your market needs to pull.</li>
+      <li>Each week your VP holds a 1 on 1 with you on the week that just closed, Monday to Sunday. It covers wins and opportunities for your stores and people, who performed and who didn't, how your visits went, and the one lever your market needs to pull.</li>
       <li>You leave with up to 3 commitments, each from X to Y by a date, with how you'll get there. They show on your <b>Daily brief</b> all week with where each one stands, and on <b>My 1 on 1</b>.</li>
       <li>Next week's 1 on 1 starts by reviewing them.</li>
     </ul>
     <h3 style="margin-top:18px">During the week: pivot when the numbers move</h3>
     <ul>
-      <li>Frank uploads the daily report and RSA report each morning. If a store got worse since Sunday and now needs you more than a store still ahead on your plan, you get a suggested swap.</li>
+      <li>Frank uploads the daily report and RSA report each morning. If a store got worse since your week was built and now needs you more than a store still ahead on your plan, you get a suggested swap.</li>
       <li>The swap always drops the visit with the least opportunity left this week, and the remaining days re-rank so the highest-need store is next.</li>
       <li>You decide: <b>Make the swap</b> or <b>Keep my plan</b>. Either way it is recorded.</li>
     </ul>

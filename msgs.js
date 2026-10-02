@@ -1,6 +1,6 @@
 // Team messages: plain text the Market Leader copies into Teams, text or email.
 // Pure functions. Written plain and direct, no em dashes, SPG always with cancellations, close with "Let's go."
-import { DAY_LONG, DAY_NAMES, dow, fromIso, weekStartOf, STORE_GOALS, storeFocus, rsaPicks, visitSummary, draggers, helpers } from './ml.js?v=202610021228';
+import { DAY_LONG, DAY_NAMES, dow, fromIso, weekStartOf, STORE_GOALS, storeFocus, rsaPicks, visitSummary, draggers, helpers } from './ml.js?v=202610021335';
 
 const money = v => (v < 0 ? '-$' : '$') + Math.abs(Math.round(v)).toLocaleString('en-US');
 const p1 = v => (Math.round(v * 10) / 10).toString();
@@ -29,7 +29,7 @@ const fmtVal = (f, v) => /Pct|pct|Rate|Attach|Margin/.test(f.key) || f.key === '
 
 // ---------------------------------------------------------------- top performers
 // Consultant call-outs from the RSA report. Week = this week's sales and hours (today's upload
-// minus Saturday's). Month leaders need 40+ hours so a small sample doesn't win a category.
+// minus last Sunday's). Month leaders need 40+ hours so a small sample doesn't win a category.
 const CATS = [
   ['netSales', 'Sales', v => money(v)],
   ['financePct', 'Finance', v => `${p1(v)}% of sales`],
@@ -127,7 +127,7 @@ export function marketUpdate({ stores, daily, scores, plan, sender, asOf, people
   if (best.length) out.push('', ...best);
   if (plan?.days?.length) {
     const ws = plan.weekStart || weekStartOf(asOf);
-    out.push('', `My visits this week (${DAY_NAMES[0]} ${md(ws)})`);
+    out.push('', `My visits this week (Mon ${md(ws)})`);
     plan.days.filter(d => d.store).forEach(d => out.push(`- ${DAY_NAMES[dow(d.date)]} ${md(d.date)}: ${d.store}`));
     if (plan.calls?.length) out.push(`- Phone check-ins: ${plan.calls.join(', ')}`);
   }
