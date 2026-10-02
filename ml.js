@@ -4,7 +4,7 @@
 import {
   normalizeHeader, toNumber, parseDate, slug, canonicalStore, isKnownStore, REGIONS, STORE_METRICS,
   COACHING, METRICS, pickFocus, pickStoreFocus, goalsFor, DEFAULT_GOALS, isOutlet, minSphFor, fmt, weeklyTarget
-} from './base.js?v=202610021100';
+} from './base.js?v=202610021120';
 
 const numOrNull = v => (v === '' || v === null || v === undefined ? null : toNumber(v));
 
@@ -190,16 +190,38 @@ export function buildPlan({ weekStart, stores, scores, off = DEFAULT_OFF, role =
 // metric: the store number for that input, when the daily report has one. Inputs without a number
 // are counted on the floor during the visit.
 export const LEVERS = [
-  { key: 'closeRate', label: 'Close Rate', why: 'More guests say yes today.', inputs: [
+  { key: 'closeRate', label: 'Close Rate', why: 'More guests say yes today. Our job is to help the guest decide, and make it easy to say yes.', inputs: [
     { key: 'cart', label: 'Connection: cart creation', metric: null, count: 'Guests with a cart started', drill: 'cart',
       behavior: 'Start a cart with every guest. Connection shows up as a cart, and a guest with a cart is a guest who buys.',
       ask: 'How many of your last 10 guests left with a cart started?' },
+    { key: 'value', label: 'Build value: product, experience, brand', metric: null, count: 'Guests who heard value in all three before price', drill: 'value',
+      behavior: 'Build value before price comes up, in three places: the product, the experience and the brand.',
+      fact: 'A guest decides to buy when the value is bigger than the price. If price comes up before value, price wins.',
+      examples: [
+        { t: 'Value in the product', say: 'Sit here and feel the cushion. Look at how the frame and the fabric are made. This is built for how your family actually lives, so it still looks this good years from now.', why: 'A guest cannot see quality on a price tag. When they understand what they are paying for, the price makes sense.' },
+        { t: 'Value in the experience', say: 'We bring it in, set it up in your room and take the boxes with us. With protection, a spill or a tear gets taken care of. You are never on your own after the sale.', why: 'The guest is buying how it feels to own it, not just the piece. Delivery, setup and protection are worth more than a lower price somewhere else.' },
+        { t: 'Value in the brand', say: 'You know the Ashley name, and we are your local Ashley store. We are here after the sale for delivery, service and the next room.', why: 'Trust takes the risk out of the decision. A guest who trusts us says yes today instead of shopping around.' }
+      ],
+      ask: 'Before your last guest saw a price, what did you tell them about the product, the experience and our brand?' },
     { key: 'finance', label: 'Finance: buying power early', metric: 'financePct', alt: 'appsToTraffic', drill: 'finance',
       behavior: 'Get every guest their buying power so the yes is easy.',
       fact: '93% of guests who get approved buy today, and 97% buy within 7 days.',
-      ask: 'When in the conversation are you bringing up buying power?' }
+      ask: 'When in the conversation are you bringing up buying power?' },
+    { key: 'options', label: 'Options: every option protected and delivered', metric: null, count: 'Guests shown their options on the options calculator', drill: 'options',
+      behavior: 'Use the options calculator to show every option protected and delivered, with the monthly payment next to each one.',
+      fact: 'Options turn "should I buy?" into "which one do I want?". That is an easier yes. We are there to help the guest decide, not to push one price.',
+      ask: 'How many of your last 10 guests saw their options on the calculator?' }
   ] },
   { key: 'avgTicket', label: 'Average Ticket', why: 'More on every sale.', inputs: [
+    { key: 'value', label: 'Build value: worth more than the price', metric: null, count: 'Guests who heard value in all three before price', drill: 'value',
+      behavior: 'When the value is clear, guests choose the better piece and finish the room. Build value in the product, the experience and the brand before you show a price.',
+      fact: 'A guest decides to buy when the value is bigger than the price. The more value they see, the more they are comfortable investing.',
+      examples: [
+        { t: 'Value in the product', say: 'Sit here and feel the cushion. Look at how the frame and the fabric are made. This is built for how your family actually lives, so it still looks this good years from now.', why: 'A guest cannot see quality on a price tag. When they understand what they are paying for, the price makes sense.' },
+        { t: 'Value in the experience', say: 'We bring it in, set it up in your room and take the boxes with us. With protection, a spill or a tear gets taken care of. You are never on your own after the sale.', why: 'The guest is buying how it feels to own it, not just the piece. Delivery, setup and protection are worth more than a lower price somewhere else.' },
+        { t: 'Value in the brand', say: 'You know the Ashley name, and we are your local Ashley store. We are here after the sale for delivery, service and the next room.', why: 'Trust takes the risk out of the decision. A guest who trusts us says yes today instead of shopping around.' }
+      ],
+      ask: 'What did you show your last guest that made the better piece worth it?' },
     { key: 'finance', label: 'Finance: buying power makes it affordable', metric: 'financePct', alt: 'appsToTraffic', drill: 'finance',
       behavior: 'Get buying power early and show the monthly payment, so the whole room is affordable.',
       fact: '93% of guests who get approved buy today, and 97% buy within 7 days.',
@@ -563,6 +585,10 @@ export function teamSignals(people, weeks, store, goals = DEFAULT_GOALS) {
 // One drill per coaching lever. The leader plays the guest, the consultant runs the rep,
 // the leader scores what they see, gives one adjustment, and they run it again.
 const D = {
+  value: { title: 'Building value before price', guest: 'Ask "How much is this one?" in the first minute.',
+    watch: ['Acknowledged the question and came back to price after value', 'Built value in the product: what it is made of and why it lasts', 'Built value in the experience: delivery, setup, protection', 'Built value in the brand: Ashley, and us as the local store', 'Showed the price with the monthly payment, after value'] },
+  options: { title: 'Presenting options on the calculator', guest: 'Say "I need to think about it" when you see the first price.',
+    watch: ['Opened the options calculator instead of dropping the price', 'Showed every option protected and delivered', 'Put the monthly payment next to each option', 'Asked which option fits best, not whether they want to buy', 'Let the guest choose and confirmed the yes'] },
   bundle: { title: 'Running the play', guest: 'Ask "Is there any deal going on right now?" before the salesperson brings it up.',
     watch: ['Connected and started a cart before talking about the offer', 'Built value first: started at Best and showed the whole room', 'Got buying power with 6 or 12 month financing', 'Presented every option with Protection + Premium Delivery and showed the double savings'] },
   cart: { title: 'Building the cart', guest: 'Say "I\'m just looking at sofas today." Like two pieces, but don\'t ask for anything.',
@@ -591,7 +617,7 @@ const D = {
     watch: ['Recognized the pause as the moment to offer the app', 'Explained it takes a few minutes and has no cost to check', 'Made a clear ask instead of "if you want"', 'Walked you through it or handed it off to a leader'] }
 };
 export const DRILLS = {
-  bundle: D.bundle, cart: D.cart, quality: D.quality, finance: D.finance, room: D.room, bedding: D.bedding, protection: D.protection, delivery: D.delivery,
+  value: D.value, options: D.options, bundle: D.bundle, cart: D.cart, quality: D.quality, finance: D.finance, room: D.room, bedding: D.bedding, protection: D.protection, delivery: D.delivery,
   sph: D.connection, closeRate: D.close, cancelPct: D.cancel, avgTicket: D.room, effMargin: D.price, discountPct: D.price,
   financePct: D.finance, appsToTraffic: D.apps, creditApps: D.apps, beddingPct: D.bedding, beddingSph: D.bedding,
   protectionPct: D.protection, protectionSph: D.protection, protectionAttach: D.protection, deliveryPct: D.delivery

@@ -1,16 +1,16 @@
-import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610021100';
-import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610021100';
+import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610021120';
+import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610021120';
 import {
   STORES, DISTRICTS, canonicalStore, isKnownStore, parseRsa, rangeFromFileName, parseTeamRoster, resolveReportNames,
   paceFactor, DEFAULT_GOALS, cidOf, status, fmt, goalsFor, TEAM_FOCUS, pickStoreFocus
-} from './base.js?v=202610021100';
+} from './base.js?v=202610021120';
 import {
   iso, fromIso, addDays, daysApart, weekStartOf, DAY_NAMES, DAY_LONG, dow, DEFAULT_OFF, validOff, safeOff, VISIT_DAYS, STORE_GOALS,
   parseDaily, needScore, band, pct, environment, buildPlan, pivotSuggestion, ELEMENTS, SEGMENTS, AORS, PRACTICE, VISIT_TYPES, kindToType, visitScore, visitSummary, consultantCoaching, drillFor, draggers, helpers, STORE_TO_RSA, hasCommitment, commitmentText, blackoutFor, offChoicesFor, storeFocus, rsaPicks, consultantWeeks, teamSignals,
   STORE_METRICS, slug, COACHING, METRICS, PLAIN, isOutlet, driveMin, driveText, MAX_SPLIT_MIN, LEVERS, leverStatus, suggestLever,
   consultantTrends, TREND_ROWS, trendFmt, trendRead, TREND_LABEL,
   OFFER_DEFAULT, PLAY, PLAY_CHECKS, PLAY_CHECKS_REMOTE, offerActive, offerMath, FLIQ_CHECKS, FLIQ_CHECKS_REMOTE, FLIQ_DAILY
-} from './ml.js?v=202610021100';
+} from './ml.js?v=202610021120';
 
 const DEMO = !firebaseConfig.apiKey || firebaseConfig.apiKey.startsWith('PASTE');
 const FB = 'https://www.gstatic.com/firebasejs/10.12.2/';
@@ -1514,7 +1514,7 @@ function fliqBlock(V, canLog, dis, tri) {
 
 // ---------------------------------------------------------------- levers on a visit
 // Targets for inputs counted on the floor (no number in the daily report).
-const COUNT_TARGET = { bundle: 'Every sale', cart: '8 of 10 guests', pieces: 'One more piece per ticket', quality: 'Every guest', price: 'No discount without a leader' };
+const COUNT_TARGET = { value: 'Every guest, before price', options: 'Every guest', bundle: 'Every sale', cart: '8 of 10 guests', pieces: 'One more piece per ticket', quality: 'Every guest', price: 'No discount without a leader' };
 // The inputs to coach by default once a lever is picked: the ones below goal first, then a floor input.
 function defaultInputs(L) {
   const below = L.inputs.filter(i => i.ratio != null && i.ratio < 1).sort((a, b) => a.ratio - b.ratio).map(i => i.key);
@@ -1543,6 +1543,7 @@ function leverBlock(V, x, snap, people, canLog, dis) {
         <span class="small">${inp.metric ? `Now <b class="${below ? 'bad' : 'good'}">${esc(fv(inp.metric, inp.value))}</b>, goal ${esc(fv(inp.metric, inp.goal))}.` : `Not in the daily report. ${V.remote ? 'Ask the leader for it' : 'Count it today'}: <b>${esc(inp.count)}</b>, goal ${esc(COUNT_TARGET[inp.key] || '')}.`}${inp.also ? ` ${esc(inp.also)}` : ''}</span>
         <span class="do"><b>Do this:</b> ${esc(inp.behavior)}</span>
         ${inp.fact ? `<span class="small"><b>Why it works:</b> ${esc(inp.fact)}</span>` : ''}
+        ${inp.examples ? `<div class="vex">${inp.examples.map(e2 => `<p class="small" style="margin:6px 0 0"><b>${esc(e2.t)}.</b> Say it like: "${esc(e2.say)}" <span class="muted">Why: ${esc(e2.why)}</span></p>`).join('')}</div>` : ''}
         <span class="asks"><span>• ${esc(inp.ask)}</span></span>
         <span class="small"><b>Practice it standing up:</b> ${esc(d.title)}. ${esc(d.guest)}</span>
         ${dr.length ? `<div class="drag"><p class="eyebrow" style="margin:0 0 4px">Who's pulling this down</p>${dr.map(dd => { const added = V.consultants.some(c => c.cid === dd.cid);
