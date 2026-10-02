@@ -1,16 +1,16 @@
-import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610011659';
-import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610011659';
+import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610021016';
+import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610021016';
 import {
   STORES, DISTRICTS, canonicalStore, isKnownStore, parseRsa, rangeFromFileName, parseTeamRoster, resolveReportNames,
   paceFactor, DEFAULT_GOALS, cidOf, status, fmt, goalsFor, TEAM_FOCUS, pickStoreFocus
-} from './base.js?v=202610011659';
+} from './base.js?v=202610021016';
 import {
   iso, fromIso, addDays, daysApart, weekStartOf, DAY_NAMES, DAY_LONG, dow, DEFAULT_OFF, validOff, safeOff, VISIT_DAYS, STORE_GOALS,
   parseDaily, needScore, band, pct, environment, buildPlan, pivotSuggestion, ELEMENTS, SEGMENTS, AORS, PRACTICE, VISIT_TYPES, kindToType, visitScore, visitSummary, consultantCoaching, drillFor, draggers, helpers, STORE_TO_RSA, hasCommitment, commitmentText, blackoutFor, offChoicesFor, storeFocus, rsaPicks, consultantWeeks, teamSignals,
   STORE_METRICS, slug, COACHING, METRICS, PLAIN, isOutlet, driveMin, driveText, MAX_SPLIT_MIN, LEVERS, leverStatus, suggestLever,
   consultantTrends, TREND_ROWS, trendFmt, trendRead, TREND_LABEL,
   OFFER_DEFAULT, PLAY, PLAY_CHECKS, PLAY_CHECKS_REMOTE, offerActive, offerMath, FLIQ_CHECKS, FLIQ_CHECKS_REMOTE, FLIQ_DAILY
-} from './ml.js?v=202610011659';
+} from './ml.js?v=202610021016';
 
 const DEMO = !firebaseConfig.apiKey || firebaseConfig.apiKey.startsWith('PASTE');
 const FB = 'https://www.gstatic.com/firebasejs/10.12.2/';
@@ -244,6 +244,11 @@ function demoBackend() {
       actions: [{ behavior: 'Leader walks every guest over 20 minutes before they leave', owner: 'Store leader' }, { behavior: 'Protection check at close every night', owner: 'Closing leader' }, {}],
       checks: { facilities: { 0: 'yes', 1: 'partial' } }, aor: { 'Bedroom': 'needs' }, notes: '', at: date };
   });
+  { // A couple of sample photos on the Town Center visit so the visit log shows them.
+    const vid = `east@demo_${lastVisits['Town Center']}_${slug('Town Center')}`;
+    const svg = (c, t) => 'data:image/svg+xml;base64,' + btoa(`<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300"><rect width="400" height="300" fill="${c}"/><text x="200" y="160" font-size="28" text-anchor="middle" fill="#fff" font-family="sans-serif">${t}</text></svg>`);
+    [['#3F738D', 'Front entrance', 'Front Entrance and Windows'], ['#003B4A', 'Dining', 'Dining']].forEach(([c, t, item], i) => { const id = `${vid}_${i}`; photos[id] = { id, visitId: vid, email: 'east@demo', store: 'Town Center', date: lastVisits['Town Center'], el: 'visual', item, caption: i ? 'Two tables missing price tags.' : 'Windows clean, sign is current.', data: svg(c, t) }; });
+  }
   { const d = addDays(week, 1), id = `east@demo_${d}_${slug('Yulee')}_remote`;
     visits[id] = { id, remote: true, email: 'east@demo', name: users['east@demo'].name, role: 'leader', store: 'Yulee', date: d, kind: 'remote', vtype: 'Video call', status: 'done',
       leaderWin: { name: 'Store leader', text: 'Had the numbers ready before the call.' }, actions: [{ what: 'Finance % of sales', from: '48%', to: '55%', how: 'Get every guest their buying power', owner: 'Store leader' }, {}, {}], at: d }; }
@@ -2889,15 +2894,40 @@ function viewVisits() {
   </div>
   <div class="panel">${list.map(x => {
     const sm = visitSummary(x), fixes = sm.fixes;
-    return `<details class="vis"><summary><b>${esc(x.store)}</b><span class="small">${esc(longDate(x.date))}</span><span class="small muted">${esc(x.name)}</span>${x.remote ? '<span class="pill">Remote</span>' : ''}<span class="pill ${x.vtype === 'Follow-Up' ? 'check' : x.vtype === 'Priority' ? 'set' : ''}">${esc(x.vtype || kindToType(x.kind))}</span>${x.status === 'draft' ? '<span class="pill off">Draft</span>' : ''}${sm.score ? `<span class="pill">${sm.score.pct}%</span>` : ''}${fixes.length ? `<span class="pill off">${fixes.length} to fix</span>` : ''}</summary>
+    const vid = `${x.email}_${x.date}_${slug(x.store)}${x.remote ? '_remote' : ''}`;
+    return `<details class="vis" data-vid="${esc(vid)}"><summary><b>${esc(x.store)}</b><span class="small">${esc(longDate(x.date))}</span><span class="small muted">${esc(x.name)}</span>${x.remote ? '<span class="pill">Remote</span>' : `<span class="pill" data-pcount="${esc(vid)}" hidden></span>`}<span class="pill ${x.vtype === 'Follow-Up' ? 'check' : x.vtype === 'Priority' ? 'set' : ''}">${esc(x.vtype || kindToType(x.kind))}</span>${x.status === 'draft' ? '<span class="pill off">Draft</span>' : ''}${sm.score ? `<span class="pill">${sm.score.pct}%</span>` : ''}${fixes.length ? `<span class="pill off">${fixes.length} to fix</span>` : ''}</summary>
       <div class="vbody">${sm.win ? `<b>Leader win:</b> ${esc(sm.winName ? titleName(sm.winName) + ': ' : '')}${esc(sm.win)}\n` : ''}<b>Working:</b> ${esc(x.working || '--')}
 <b>Commitments:</b>
 ${sm.commitments.length ? sm.commitments.map((c, i) => `${i + 1}. ${esc(c)}`).join('\n') : '--'}
 ${sm.leaderCommit ? `<b>Leader commits to:</b> ${esc(sm.leaderCommit)}\n` : ''}${sm.support ? `<b>Support needed:</b> ${esc(sm.support)}\n` : ''}${x.leaderCommit?.notes ? `<b>Leader notes:</b> ${esc(x.leaderCommit.notes)}\n` : ''}${Object.entries(x.segMeta || {}).filter(([, m]) => m?.how || m?.name).map(([gi, m]) => { const vals = Object.values(x.segs?.[gi] || {}); const pts = vals.reduce((t, v) => t + (v === 'yes' ? 1 : v === 'partial' ? 0.5 : 0), 0); return `<b>${esc(SEGMENTS[gi]?.name || '')}:</b> ${m.how === 'practice' ? 'practiced with' : 'watched'} ${esc(titleName(m.name || 'a team member'))}${m.how === 'observed' ? ' on a live guest' : ''}${vals.length ? `, ${pts} of ${SEGMENTS[gi].items.length}` : ''}${m.notes ? `. ${esc(m.notes)}` : ''}\n`; }).join('')}${sm.coached.length ? `<b>Consultants coached:</b>\n${sm.coached.map(c => `- ${esc(titleName(c.name))}${c.via ? `: coached through the store leader${c.score ? `, ${c.score}` : ''}` : ''}${c.drill ? `: ${esc(c.drill)}${c.ran ? ` practice, ${c.score}` : ', practice not run'}${c.rerun === 'better' ? ', second rep better' : c.rerun === 'same' ? ', second rep same' : ''}` : ''}${c.adjust ? `. Adjustment: ${esc(c.adjust)}` : ''}${c.notes ? `\n  Notes: ${esc(c.notes)}` : ''}`).join('\n')}\n` : ''}${x.teamNotes ? `<b>Team notes:</b> ${esc(x.teamNotes)}\n` : ''}${x.reflection ? `<b>Coach next visit:</b> ${esc(x.reflection)}\n` : ''}<b>Notes:</b> ${esc(x.notes || '--')}${fixes.length ? `\n<b>6 Elements to fix:</b> ${esc(fixes.join(', '))}` : ''}</div>
+      ${x.remote ? '' : `<div class="logph" data-lp="${esc(vid)}"></div>`}
       <button class="btn tiny" data-ov='${esc(JSON.stringify({ store: x.store, date: x.date, email: x.email, kind: x.kind, remote: !!x.remote }))}' style="margin-top:8px">Open</button></details>`;
   }).join('') || '<p class="muted">No visits logged yet.</p>'}</div>`;
   $('#vf').onchange = e => { S.visitFilter = e.target.value; viewVisits(); };
   v.querySelectorAll('[data-ov]').forEach(b => b.onclick = () => openVisit(JSON.parse(b.dataset.ov)));
+  logPhotos(v);
+}
+// Photos in the visit log: a count on each visit, and thumbnails inside it. Tap one to see it full size.
+const LOG_PH = {};
+async function logPhotos(v) {
+  const fill = (vid, list) => {
+    const c = v.querySelector(`[data-pcount="${CSS.escape(vid)}"]`); if (c && list.length) { c.hidden = false; c.textContent = `${list.length} photo${list.length > 1 ? 's' : ''}`; }
+    const box = v.querySelector(`[data-lp="${CSS.escape(vid)}"]`);
+    if (box) box.innerHTML = list.length ? `<p class="small" style="margin:8px 0 4px"><b>Photos (${list.length})</b></p><div class="lpgrid">${list.map((ph, i) => `<button type="button" class="lpimg" data-lpv="${esc(vid)}" data-lpi="${i}"><img src="${ph.data}" alt="${esc(ph.caption || ph.item || 'Visit photo')}" loading="lazy"><span>${esc(ph.item || (ph.el === 'general' ? 'General' : ELEMENTS.find(e => e.key === ph.el)?.t || ''))}</span></button>`).join('')}</div>` : '<p class="small muted" style="margin:8px 0 0">No photos on this visit.</p>';
+    box?.querySelectorAll('[data-lpi]').forEach(b => b.onclick = () => photoZoom(LOG_PH[b.dataset.lpv][+b.dataset.lpi]));
+  };
+  const els = [...v.querySelectorAll('details.vis[data-vid]')];
+  // The first 25 load right away; the rest when they are opened.
+  const load = async vid => { if (!LOG_PH[vid]) { try { LOG_PH[vid] = await S.be.photos(vid); } catch (e) { LOG_PH[vid] = []; } } fill(vid, LOG_PH[vid]); };
+  els.forEach((d, i) => { if (!v.querySelector(`[data-lp="${CSS.escape(d.dataset.vid)}"]`)) return; if (i < 25) load(d.dataset.vid); else d.addEventListener('toggle', () => d.open && load(d.dataset.vid), { once: true }); });
+}
+function photoZoom(ph) {
+  if (!ph) return;
+  const o = document.createElement('div'); o.className = 'pzoom';
+  o.innerHTML = `<figure><img src="${ph.data}" alt="${esc(ph.caption || 'Visit photo')}"><figcaption>${esc([ph.store, ph.item || (ph.el === 'general' ? 'General' : ELEMENTS.find(e => e.key === ph.el)?.t), ph.caption].filter(Boolean).join(' · '))}</figcaption></figure><button type="button" class="btn tiny">Close</button>`;
+  const close = () => { o.remove(); document.removeEventListener('keydown', esc_); };
+  const esc_ = e => { if (e.key === 'Escape') close(); };
+  o.onclick = close; document.addEventListener('keydown', esc_); document.body.appendChild(o);
 }
 
 // ---------------------------------------------------------------- upload (Frank)
