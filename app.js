@@ -1,16 +1,16 @@
-import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610021535';
-import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610021535';
+import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610040933';
+import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610040933';
 import {
   STORES, DISTRICTS, canonicalStore, isKnownStore, parseRsa, rangeFromFileName, parseTeamRoster, resolveReportNames,
   paceFactor, DEFAULT_GOALS, cidOf, status, fmt, goalsFor, TEAM_FOCUS, pickStoreFocus
-} from './base.js?v=202610021535';
+} from './base.js?v=202610040933';
 import {
   iso, fromIso, addDays, daysApart, weekStartOf, DAY_NAMES, DAY_LONG, dow, DEFAULT_OFF, validOff, safeOff, VISIT_DAYS, STORE_GOALS,
   parseDaily, needScore, band, pct, environment, buildPlan, pivotSuggestion, ELEMENTS, SEGMENTS, AORS, PRACTICE, VISIT_TYPES, kindToType, visitScore, visitSummary, consultantCoaching, drillFor, draggers, helpers, STORE_TO_RSA, hasCommitment, commitmentText, blackoutFor, offChoicesFor, storeFocus, rsaPicks, consultantWeeks, teamSignals,
   STORE_METRICS, slug, COACHING, METRICS, PLAIN, isOutlet, driveMin, driveText, MAX_SPLIT_MIN, LEVERS, leverStatus, suggestLever,
   consultantTrends, TREND_ROWS, trendFmt, trendRead, TREND_LABEL,
   OFFER_DEFAULT, PLAY, PLAY_CHECKS, PLAY_CHECKS_REMOTE, offerActive, offerMath, FLIQ_CHECKS, FLIQ_CHECKS_REMOTE, FLIQ_DAILY
-} from './ml.js?v=202610021535';
+} from './ml.js?v=202610040933';
 
 // Legacy Sunday-start weeks, read as the Monday week that replaced them.
 function fromSundayPlan(p, week) {
@@ -23,6 +23,8 @@ function fromSundayPlan(p, week) {
 const sundayShift = (x, week) => x ? { ...x, weekStart: week, fromSunday: x.weekStart } : null;
 const sundayId = id => { const m = String(id).match(/^(.*)_(\d{4}-\d{2}-\d{2})$/); return m && dow(m[2]) === 1 ? `${m[1]}_${addDays(m[2], -1)}` : '__none'; };
 const sundayDoc = (d, id) => d ? { ...d, id, weekStart: id.slice(-10), fromSunday: d.weekStart } : null;
+// A plan has days set by hand when the leader changed a day in that week (swaps, stops, edits).
+const handSet = p => (p?.pivots || []).some(x => x.from !== 'Anchor' && x.date >= p.weekStart && x.date <= addDays(p.weekStart, 6));
 const DEMO = !firebaseConfig.apiKey || firebaseConfig.apiKey.startsWith('PASTE');
 const FB = 'https://www.gstatic.com/firebasejs/10.12.2/';
 const ROLES = [['admin', 'Admin'], ['exec', 'Executive (view all)'], ['director', 'Director'], ['leader', 'Market Leader']];
@@ -447,7 +449,7 @@ function demoBackend() {
     coaching: '', actions: [
       { key: 'closeRate', what: 'Close Rate across the market', from: '24%', to: '28%', how: 'No guest leaves without a TO. Leaders track TOs at every huddle.', owner: users['east@demo'].name, due: addDays(lw, 6) },
       { store: 'Yulee', key: 'financePct', what: 'Yulee: Finance %', from: '44%', to: '55%', how: 'Full-day visit Tuesday. Every guest gets their buying power.', owner: users['east@demo'].name, due: addDays(lw, 6) },
-      { what: 'Full-day visits', from: '3 of 5', to: '5 of 5', how: 'Days off locked by Monday.', owner: users['east@demo'].name, due: addDays(lw, 6) }], support: 'Help backfill a closing leader at Yulee', supportBy: addDays(lw, 3) };
+      { what: 'Full-day visits', from: '3 of 5', to: '5 of 5', how: 'Days off set by Sunday.', owner: users['east@demo'].name, due: addDays(lw, 6) }], support: 'Help backfill a closing leader at Yulee', supportBy: addDays(lw, 3) };
   let current = 'east@demo';
   const clone = x => structuredClone(x);
   return {
@@ -813,7 +815,14 @@ async function viewWeek() {
     await S.be.savePlan(plan);
   }
   // A plan built early (when days off were picked) refreshes with the newest numbers once its week starts.
-  if (plan && week === thisWeek && canEdit && S.daily && (plan.preview ? S.meta.latestDaily > plan.basisDate : !plan.basisDate) && !plan.days.some(d => d.status === 'done')) {
+  // Next week's plan keeps updating with each new daily report until the week starts, so the one the
+  // leader plans from on Sunday is built on Saturday's numbers. Days set by hand are never overwritten.
+  if (plan && week > thisWeek && canEdit && S.daily && plan.preview && S.meta.latestDaily > (plan.basisDate || '') && !handSet(plan) && !plan.days.some(d => d.status === 'done')) {
+    plan = { ...newPlan(who, week, plan.off, plan.anchorChoice), preview: true, pivots: plan.pivots || [], dismissed: plan.dismissed || [] };
+    await S.be.savePlan(plan);
+  }
+  // Monday: only rebuild if nobody refreshed it over the weekend (built before Saturday's numbers).
+  if (plan && week === thisWeek && canEdit && S.daily && (plan.preview ? S.meta.latestDaily > plan.basisDate && (plan.basisDate || '') < addDays(week, -2) && !handSet(plan) : !plan.basisDate) && !plan.days.some(d => d.status === 'done')) {
     plan = { ...newPlan(who, week, plan.off, plan.anchorChoice), pivots: plan.pivots || [], dismissed: plan.dismissed || [] };
     await S.be.savePlan(plan);
   }
@@ -838,7 +847,9 @@ async function viewWeek() {
   </div>
   ${!S.daily ? `<div class="warnbox"><b>No numbers yet.</b> Every store is on the plan in order for now. Once the first daily report is uploaded, the week re-ranks so the stores that need you most come first.</div>` : ''}
   ${!plan && week > thisWeek ? `<div class="panel"><h2>Pick your days off to build next week</h2><p>Tap your 2 days below and save. Your schedule builds right away from the latest numbers and refreshes on Sunday with Saturday's.</p></div>` : ''}
-  ${plan?.preview && week > thisWeek ? `<div class="warnbox">Preview built from numbers through ${esc(longDate(plan.basisDate))}. It refreshes Monday with Sunday's numbers, keeping your days off.</div>` : ''}
+  ${plan?.preview && week > thisWeek ? `<div class="warnbox">${handSet(plan) && S.meta.latestDaily > (plan.basisDate || '')
+    ? `Built from numbers through ${esc(longDate(plan.basisDate))}. Newer numbers are in (through ${esc(longDate(S.meta.latestDaily))}). You set some days by hand, so it won't change on its own. Tap <b>Rebuild from the numbers</b> to redo the week from the latest numbers.`
+    : `Built from numbers through ${esc(longDate(plan.basisDate))}. It updates on its own with each new daily report until the week starts Monday, keeping your days off. Plan from Sunday's version, built on Saturday's numbers.`}</div>` : ''}
   ${!plan && S.daily && week < thisWeek ? `<div class="panel"><h2>No plan for this week</h2><p>Nothing was planned or logged.</p></div>` : ''}
   ${S.lastAlert && S.lastAlert.weekStart === week ? `<div class="warnbox" style="border-left-color:var(--green)"><b>${esc(vpNames())} was alerted in the app.</b> <a href="${alertMailto(S.lastAlert)}">Email them too</a></div>` : ''}
   <div id="swapreason" class="panel" hidden></div>
@@ -1076,7 +1087,7 @@ function offPanel(week, off, to, who, canEdit, plan, isCurrent) {
     }).join('')}</div>
     <div id="offreason" hidden style="margin-top:12px"></div>
     ${canEdit ? `<div class="row" style="margin-top:12px"><button class="btn primary" id="offsave">${plan ? 'Save and rebuild my schedule' : 'Save and build my schedule'}</button>
-      <span class="small">${isCurrent && plan ? 'Visits already logged stay on their days.' : !isCurrent ? 'It refreshes with the newest numbers on Monday.' : ''}</span></div>` : ''}
+      <span class="small">${isCurrent && plan ? 'Visits already logged stay on their days.' : !isCurrent ? 'It updates with each new daily report until the week starts Monday.' : ''}</span></div>` : ''}
   </section>`;
 }
 // Which store each working day goes to: the saved plan's days, or what the plan would be with these days off.
@@ -1758,6 +1769,7 @@ async function viewVisit() {
     return b ? `<div class="budgetline"><b>Today's budget at ${esc(x.store)}:</b> ${$k(b.sales)} revenue · SPG $${Math.round(b.spg)} · about ${Math.round(b.traffic)} guests.${mb && m?.netSales != null ? ` Month to date ${$k(m.netSales)} vs ${$k(mb.sales)} budget (${vsTag(vsPct(m.netSales, mb.sales))}).` : ''} <span class="small muted">Make sure the leader knows both numbers.</span></div>` : ''; })()}
   ${(() => { const sc = S.carts?.stores?.[x.store]; if (!sc) return ''; const tops = Object.entries(S.carts.people || {}).filter(([, p]) => p.store === x.store).sort((a, b) => b[1].value - a[1].value).slice(0, 3);
     return `<div class="budgetline cartsline"><b>Open carts at ${esc(x.store)}:</b> ${sc.n} carts · about ${$k(sc.value)} estimated${sc.due ? ` · <b>${sc.due} due a follow-up today</b>` : ''}${sc.old ? ` · ${sc.old} older than 2 weeks` : ''}. Most to follow up: ${tops.map(([, p]) => `${esc(titleName(p.name))} (${p.n}, ${$k(p.value)})`).join(', ')}. <span class="small muted">This is money already in the building: inspect the follow-up plan with the leader.</span></div>`; })()}
+  ${V.status === 'done' && !x.remote && V.photosMissing ? `<div class="editbox"><b>Submitted with ${V.photosMissing} photo${V.photosMissing > 1 ? 's' : ''} missing.</b> <span class="small">${esc((V.photosMissingList || []).join(', '))}</span><br><span class="small"><b>Reason:</b> ${esc(V.photoReason || 'none given')}. Add them any time and this clears.</span></div>` : ''}
   ${V.edits?.length ? `<div class="editbox"><b>Edited after it was submitted</b> <span class="small">(submitted ${esc(dayLabel((V.submittedAt || V.date).slice(0, 10)))})</span><ul class="small">${editedText(V).map(t => `<li>${esc(t)}</li>`).join('')}</ul></div>` : ''}
   ${env ? `<div class="env ${env.kind}"><b>${env.kind === 'headwind' ? 'Headwind.' : env.kind === 'tailwind' ? 'Tailwind.' : 'Normal traffic.'}</b> ${esc(env.text)}</div>` : ''}
 
@@ -2095,10 +2107,10 @@ let vTimer = null;
 // ---------------------------------------------------------------- edits after submit
 // Once a visit is submitted, any later change is stamped on the visit (who, when, which parts) and
 // sent to the VP's review list, so nothing gets quietly rewritten after the fact.
-const EDIT_SKIP = new Set(['at', 'by', 'needScore', 'commitments', 'edits', 'lastEdit', 'submittedAt', 'status', 'follow', 'photosMissing', 'id', 'email', 'name', 'role', 'store', 'date']);
+const EDIT_SKIP = new Set(['at', 'by', 'needScore', 'commitments', 'edits', 'lastEdit', 'submittedAt', 'status', 'follow', 'photosMissing', 'photosMissingList', 'id', 'email', 'name', 'role', 'store', 'date']);
 const EDIT_LABEL = { leaderWin: 'Leader win', checks: '6 Elements walk', segs: 'Value segments', aor: 'AOR walk', elNotes: '6 Elements notes', segMeta: 'Value segments',
   consultants: 'Consultants', actions: 'Action plan', leaderCommit: 'Store leader commitment', working: 'What is working', notes: 'Notes', teamNotes: 'Team notes',
-  reflection: 'Reflection', focus: 'Team focus', lever: 'Lever', play: 'Run the play', fliq: 'FrontLine IQ', floor: 'Leader knows the floor', intent: 'Why you are here', vtype: 'Visit type', kind: 'Visit type' };
+  reflection: 'Reflection', photoReason: 'Reason for missing photos', focus: 'Team focus', lever: 'Lever', play: 'Run the play', fliq: 'FrontLine IQ', floor: 'Leader knows the floor', intent: 'Why you are here', vtype: 'Visit type', kind: 'Visit type' };
 const editParts = V => { const o = {}; for (const k of Object.keys(V).sort()) if (!EDIT_SKIP.has(k)) o[k] = JSON.stringify(V[k] ?? null); return o; };
 const editLabel = k => EDIT_LABEL[k] || k.replace(/([A-Z])/g, ' $1').replace(/^./, c => c.toUpperCase());
 // Called after every save of a submitted visit: compares with the last known version.
@@ -2126,6 +2138,12 @@ async function sendEditAlert(V) {
   const a = { id: `${V.email}_edit_${Date.now()}`, type: 'visitEdit', email: S.user.email, name: S.user.name || S.user.email, forEmail: V.email, visitId: V.id, store: V.store, visitDate: V.date,
     weekStart: weekStartOf(V.date), submittedAt: V.submittedAt, parts: e.parts, at: e.at, reason: 'Edited after submit', changes: [], seen: false };
   try { await S.be.saveAlert(a); } catch (err) { console.warn('edit alert', err); }
+}
+// Recount missing photos after the visit is submitted, so adding them later clears the flag.
+function refreshMissing(V) {
+  if (V.remote) return;
+  const missing = ELEMENTS.flatMap(e => photoAreas(e).filter(a => !(S.vPhotos || []).some(p => p.el === e.key && p.item === a)).map(a => `${e.t}: ${a}`));
+  V.photosMissing = missing.length; V.photosMissingList = missing; if (!missing.length) V.photoReason = '';
 }
 const editedText = V => V?.edits?.length ? V.edits.map(e => `${dayLabel(e.at.slice(0, 10))} ${new Date(e.at).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })} by ${e.name}: ${e.parts.join(', ')}`) : [];
 function saveDraft(now) {
@@ -2257,7 +2275,7 @@ function wireVisit(V, canLog, snap) {
       for (const f of list) {
         const data = await shrinkImage(f, 900, 0.6);
         const ph = { id: `${V.id}_${Date.now()}_${Math.round(Math.random() * 1e4)}`, visitId: V.id, email: V.email, store: V.store, date: V.date, el: pel, item: pitem, caption: '', data };
-        await S.be.savePhoto(ph); S.vPhotos = [...(S.vPhotos || []), ph]; if (V.status === 'done') { noteEdit(V, 'Photos'); saveDraft(); }
+        await S.be.savePhoto(ph); S.vPhotos = [...(S.vPhotos || []), ph]; if (V.status === 'done') { refreshMissing(V); noteEdit(V, 'Photos'); saveDraft(); }
       }
       if (pel === 'general') V_OPEN.add('photos'); viewVisit(); toast(list.length > 1 ? `${list.length} photos added. Add a caption to each.` : 'Photo added. Add a caption.');
     } catch (e) { toast('Could not add that photo. Try again.', true); }
@@ -2271,7 +2289,7 @@ function wireVisit(V, canLog, snap) {
     capTimers[ph.id] = setTimeout(() => S.be.savePhoto(ph).catch(() => {}), 800);
   });
   v.querySelectorAll('[data-delphoto]').forEach(b => b.onclick = async () => {
-    await S.be.deletePhoto(b.dataset.delphoto); S.vPhotos = S.vPhotos.filter(p => p.id !== b.dataset.delphoto); if (V.status === 'done') { noteEdit(V, 'Photos'); saveDraft(); } viewVisit();
+    await S.be.deletePhoto(b.dataset.delphoto); S.vPhotos = S.vPhotos.filter(p => p.id !== b.dataset.delphoto); if (V.status === 'done') { refreshMissing(V); noteEdit(V, 'Photos'); saveDraft(); } viewVisit();
   });
   const sg = $('#apsugg'); if (sg) sg.onclick = () => {
     const n = fillCommitments(V, storeFocus(snap, 4));
@@ -2298,6 +2316,29 @@ function wireVisit(V, canLog, snap) {
       if (el?.matches?.('input, textarea, select')) setTimeout(() => el.focus({ preventScroll: true }), 400);
     }, 30));
   };
+  const goPhoto = m => goFix('el' + m.e.n, [...document.querySelectorAll(`[data-sec="el${m.e.n}"] [data-photo="${m.e.key}"]`)].find(b => b.dataset.item === m.a)?.closest('.aphoto'), `Take the photo of ${m.a}, then tap Submit again.`);
+  const photoReasonBox = missing => {
+    document.querySelector('#photoreason')?.remove();
+    const box = document.createElement('section'); box.id = 'photoreason'; box.className = 'panel editbox';
+    const byEl = {}; missing.forEach(m => (byEl[m.e.t] ||= []).push(m));
+    box.innerHTML = `<h3 style="margin:0 0 4px">${missing.length} photo${missing.length > 1 ? 's' : ''} missing</h3>
+      <p class="small" style="margin:0 0 8px">You can submit without them. The visit will be flagged with what's missing and your reason, and your VP sees it.</p>
+      ${Object.entries(byEl).map(([t, ms]) => `<p class="small" style="margin:4px 0"><b>${esc(t)}:</b> ${ms.map(m => `<button type="button" class="link" data-gophoto="${esc(m.e.key)}|${esc(m.a)}">${esc(m.a)}</button>`).join(', ')}</p>`).join('')}
+      <label for="prsn" style="margin-top:10px">Why are they missing?<select id="prsn"><option value="">Pick a reason</option>${['Area was blocked or under repair', 'Ran out of time on the visit', 'Phone or camera problem', 'Photos taken but did not upload', 'Other'].map(r => `<option>${r}</option>`).join('')}</select></label>
+      ${fieldBox('prnote', 'Details', '', 2, 'What happened, and when the photos will be taken.', '', '')}
+      <div class="row" style="gap:8px;margin-top:8px"><button type="button" class="btn primary" id="prok">Submit without these photos</button><button type="button" class="btn" id="prgo">Take the photos first</button></div>`;
+    const bar = document.querySelector('.vbar'); bar.parentNode.insertBefore(box, bar);
+    box.scrollIntoView({ behavior: 'smooth', block: 'center' }); box.classList.add('needfix');
+    box.querySelectorAll('[data-gophoto]').forEach(b => b.onclick = () => { const [k, a] = b.dataset.gophoto.split('|'); goPhoto(missing.find(m => m.e.key === k && m.a === a)); });
+    $('#prgo').onclick = () => goPhoto(missing[0]);
+    wireMics?.(box);
+    $('#prok').onclick = () => {
+      const r = $('#prsn').value, n = ($('#prnote').value || '').trim();
+      if (!r) return toast('Pick a reason first.', true);
+      if (r === 'Other' && n.length < 5) return toast('Add a few words on why.', true);
+      V.photoReason = n ? `${r}: ${n}` : r; saveDraft(true); box.remove(); $('#vsubmit').click();
+    };
+  };
   $('#vsubmit').onclick = async () => {
     stopMic();
     const sm = visitSummary(V);
@@ -2307,14 +2348,13 @@ function wireVisit(V, canLog, snap) {
     if (!V.remote) {
       const missing = ELEMENTS.flatMap(e => photoAreas(e).filter(a => !(S.vPhotos || []).some(p => p.el === e.key && p.item === a)).map(a => ({ e, a })));
       V.photosMissing = missing.length;
-      if (missing.length && S.photoNudged !== V.id) {
-        S.photoNudged = V.id;
-        const first = missing[0];
-        return goFix('el' + first.e.n, [...document.querySelectorAll(`[data-sec="el${first.e.n}"] [data-photo="${first.e.key}"]`)].find(b => b.dataset.item === first.a)?.closest('.aphoto'),
-          `${missing.length} area${missing.length > 1 ? 's still need' : ' still needs'} a photo. First: ${first.a}. Take them, or tap Submit again to send without.`);
-      }
+      V.photosMissingList = missing.map(m => `${m.e.t}: ${m.a}`);
+      if (!missing.length) V.photoReason = '';
+      // Photos can be skipped, but the Market Leader says why, and the visit is flagged with what's missing.
+      else if (!String(V.photoReason || '').trim()) return photoReasonBox(missing);
     }
     const wasDone = V.status === 'done';
+    if (!wasDone) S.vBaseFor = null; // the first submit is not an edit
     V.status = 'done'; V.submittedAt = V.submittedAt || new Date().toISOString();
     saveDraft(true);
     if (wasDone) sendEditAlert(V); else { S.vBaseFor = V.id; S.vBase = editParts(V); }
@@ -3124,8 +3164,8 @@ function viewVisits() {
   <div class="panel">${list.map(x => {
     const sm = visitSummary(x), fixes = sm.fixes;
     const vid = `${x.email}_${x.date}_${slug(x.store)}${x.remote ? '_remote' : ''}`;
-    return `<details class="vis" data-vid="${esc(vid)}"><summary><b>${esc(x.store)}</b><span class="small">${esc(longDate(x.date))}</span><span class="small muted">${esc(x.name)}</span>${x.remote ? '<span class="pill">Remote</span>' : `<span class="pill" data-pcount="${esc(vid)}" hidden></span>`}${x.edits?.length ? `<span class="pill edited" title="${esc(editedText(x).join(' | '))}">Edited after submit</span>` : ''}<span class="pill ${x.vtype === 'Follow-Up' ? 'check' : x.vtype === 'Priority' ? 'set' : ''}">${esc(x.vtype || kindToType(x.kind))}</span>${x.status === 'draft' ? '<span class="pill off">Draft</span>' : ''}${sm.score ? `<span class="pill">${sm.score.pct}%</span>` : ''}${fixes.length ? `<span class="pill off">${fixes.length} to fix</span>` : ''}</summary>
-      <div class="vbody">${x.edits?.length ? `<b class="warn">Edited after submit:</b>\n${editedText(x).map(t => '  ' + esc(t)).join('\n')}\n` : ''}${sm.win ? `<b>Leader win:</b> ${esc(sm.winName ? titleName(sm.winName) + ': ' : '')}${esc(sm.win)}\n` : ''}<b>Working:</b> ${esc(x.working || '--')}
+    return `<details class="vis" data-vid="${esc(vid)}"><summary><b>${esc(x.store)}</b><span class="small">${esc(longDate(x.date))}</span><span class="small muted">${esc(x.name)}</span>${x.remote ? '<span class="pill">Remote</span>' : `<span class="pill" data-pcount="${esc(vid)}" hidden></span>`}${x.edits?.length ? `<span class="pill edited" title="${esc(editedText(x).join(' | '))}">Edited after submit</span>` : ''}${!x.remote && x.status === 'done' && x.photosMissing ? `<span class="pill edited">${x.photosMissing} photo${x.photosMissing > 1 ? 's' : ''} missing</span>` : ''}<span class="pill ${x.vtype === 'Follow-Up' ? 'check' : x.vtype === 'Priority' ? 'set' : ''}">${esc(x.vtype || kindToType(x.kind))}</span>${x.status === 'draft' ? '<span class="pill off">Draft</span>' : ''}${sm.score ? `<span class="pill">${sm.score.pct}%</span>` : ''}${fixes.length ? `<span class="pill off">${fixes.length} to fix</span>` : ''}</summary>
+      <div class="vbody">${!x.remote && x.status === 'done' && x.photosMissing ? `<b class="warn">Photos missing (${x.photosMissing}):</b> ${esc((x.photosMissingList || []).join(', ') || 'not listed')}\n<b>Reason:</b> ${esc(x.photoReason || 'none given')}\n` : ''}${x.edits?.length ? `<b class="warn">Edited after submit:</b>\n${editedText(x).map(t => '  ' + esc(t)).join('\n')}\n` : ''}${sm.win ? `<b>Leader win:</b> ${esc(sm.winName ? titleName(sm.winName) + ': ' : '')}${esc(sm.win)}\n` : ''}<b>Working:</b> ${esc(x.working || '--')}
 <b>Commitments:</b>
 ${sm.commitments.length ? sm.commitments.map((c, i) => `${i + 1}. ${esc(c)}`).join('\n') : '--'}
 ${sm.leaderCommit ? `<b>Leader commits to:</b> ${esc(sm.leaderCommit)}\n` : ''}${sm.support ? `<b>Support needed:</b> ${esc(sm.support)}\n` : ''}${x.leaderCommit?.notes ? `<b>Leader notes:</b> ${esc(x.leaderCommit.notes)}\n` : ''}${Object.entries(x.segMeta || {}).filter(([, m]) => m?.how || m?.name).map(([gi, m]) => { const vals = Object.values(x.segs?.[gi] || {}); const pts = vals.reduce((t, v) => t + (v === 'yes' ? 1 : v === 'partial' ? 0.5 : 0), 0); return `<b>${esc(SEGMENTS[gi]?.name || '')}:</b> ${m.how === 'practice' ? 'practiced with' : 'watched'} ${esc(titleName(m.name || 'a team member'))}${m.how === 'observed' ? ' on a live guest' : ''}${vals.length ? `, ${pts} of ${SEGMENTS[gi].items.length}` : ''}${m.notes ? `. ${esc(m.notes)}` : ''}\n`; }).join('')}${sm.coached.length ? `<b>Consultants coached:</b>\n${sm.coached.map(c => `- ${esc(titleName(c.name))}${c.via ? `: coached through the store leader${c.score ? `, ${c.score}` : ''}` : ''}${c.drill ? `: ${esc(c.drill)}${c.ran ? ` practice, ${c.score}` : ', practice not run'}${c.rerun === 'better' ? ', second rep better' : c.rerun === 'same' ? ', second rep same' : ''}` : ''}${c.adjust ? `. Adjustment: ${esc(c.adjust)}` : ''}${c.notes ? `\n  Notes: ${esc(c.notes)}` : ''}`).join('\n')}\n` : ''}${x.teamNotes ? `<b>Team notes:</b> ${esc(x.teamNotes)}\n` : ''}${x.reflection ? `<b>Coach next visit:</b> ${esc(x.reflection)}\n` : ''}<b>Notes:</b> ${esc(x.notes || '--')}${fixes.length ? `\n<b>6 Elements to fix:</b> ${esc(fixes.join(', '))}` : ''}</div>
@@ -3493,11 +3533,11 @@ function viewGuide() {
       <li>Open the app and start on <b>Daily brief</b>. It covers yesterday for your stores and your people: wins to celebrate, opportunities, commitments due, and where you're going today.</li>
       <li>Then open <b>Team messages</b>, copy the daily huddle for each store and the market recap, and send them to your team.</li>
     </ul>
-    <h3 style="margin-top:18px">Monday: your week is built for you</h3>
+    <h3 style="margin-top:18px">Sunday: next week is built for you</h3>
     <ul>
       <li>Pick your 2 days off for each week on <b>My week</b> (tap the › arrow for next week). Any 2 days work; Tuesday, Wednesday or Thursday works best. Your schedule builds as soon as you save.</li>
       <li>If you don't pick, the plan uses your default days off (Wednesday and Thursday unless Frank set others).</li>
-      <li>Weeks run Monday to Sunday, the same as WTD in the daily report. Open <b>My week</b> on Monday. The plan is built from Sunday's numbers: 5 visit days around your 2 days off.</li>
+      <li>Weeks run Monday to Sunday, the same as WTD in the daily report. Open <b>My week</b> on Sunday and plan next week from it. It's built from Saturday's numbers: 5 visit days around your 2 days off. Until Monday it keeps updating with each new daily report, unless you've set days by hand.</li>
       <li>Every store gets a visit. Extra days go to the stores that need you most, as a second visit late in the week. Visit 1 sets the plan, visit 2 checks it.</li>
       <li>Visits are full days in one store. More stores than visit days? The lowest-need stores are marked Call.</li>
       <li>While you're on a full-day visit, coach your other stores remotely from <b>Remote coaching</b> on My week: phone, video or Teams. Log it the same way (numbers, focus items, consultants, from-to commitments), minus the 6 Elements walk.</li>
