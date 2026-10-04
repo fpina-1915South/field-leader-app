@@ -1,16 +1,16 @@
-import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610041114';
-import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610041114';
+import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610041627';
+import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610041627';
 import {
   STORES, DISTRICTS, canonicalStore, isKnownStore, parseRsa, rangeFromFileName, parseTeamRoster, resolveReportNames,
   paceFactor, DEFAULT_GOALS, cidOf, status, fmt, goalsFor, TEAM_FOCUS, pickStoreFocus
-} from './base.js?v=202610041114';
+} from './base.js?v=202610041627';
 import {
   iso, fromIso, addDays, daysApart, weekStartOf, DAY_NAMES, DAY_LONG, dow, DEFAULT_OFF, validOff, safeOff, VISIT_DAYS, STORE_GOALS,
   parseDaily, needScore, band, pct, environment, buildPlan, pivotSuggestion, ELEMENTS, SEGMENTS, AORS, PRACTICE, VISIT_TYPES, kindToType, visitScore, visitSummary, consultantCoaching, drillFor, draggers, helpers, STORE_TO_RSA, hasCommitment, commitmentText, blackoutFor, offChoicesFor, storeFocus, rsaPicks, consultantWeeks, teamSignals,
   STORE_METRICS, slug, COACHING, METRICS, PLAIN, isOutlet, driveMin, driveText, MAX_SPLIT_MIN, LEVERS, leverStatus, suggestLever,
   consultantTrends, TREND_ROWS, trendFmt, trendRead, TREND_LABEL,
   OFFER_DEFAULT, PLAY, PLAY_CHECKS, PLAY_CHECKS_REMOTE, offerActive, offerMath, FLIQ_CHECKS, FLIQ_CHECKS_REMOTE, FLIQ_DAILY
-} from './ml.js?v=202610041114';
+} from './ml.js?v=202610041627';
 
 // Legacy Sunday-start weeks, read as the Monday week that replaced them.
 function fromSundayPlan(p, week) {
@@ -160,7 +160,8 @@ async function firebaseBackend() {
   ]);
   const app = initializeApp(firebaseConfig);
   const auth = A.getAuth(app);
-  const db = F.getFirestore(app);
+  // Skip blank fields instead of failing the whole save (Firestore rejects undefined values).
+  const db = F.initializeFirestore(app, { ignoreUndefinedProperties: true });
   const email = () => (auth.currentUser?.email || '').toLowerCase();
   const get = async (c, id) => { const s = await F.getDoc(F.doc(db, c, id)); return s.exists() ? { id: s.id, ...s.data() } : null; };
   const all = async (c, ...wheres) => (await F.getDocs(F.query(F.collection(db, c), ...wheres.map(([a, b]) => F.where(a, '==', b))))).docs.map(d => ({ id: d.id, ...d.data() }));
@@ -598,6 +599,7 @@ async function loadShared() {
     S.meta.latestDaily ? S.be.daily(S.meta.latestDaily) : null, S.be.rsa(), S.be.users().catch(() => [S.user]), S.be.visits(), S.be.roster(), S.be.markets().catch(() => []), S.be.storeLeaders().catch(() => [])
   ]);
   Object.assign(S, { daily, rsa, users, visits, roster, markets, storeLeaders });
+  await syncLocalVisits();
   // Each store's numbers carry the store name, so store goals (like the outlet ticket goal) apply.
   Object.entries(daily?.stores || {}).forEach(([name, snap]) => Object.values(snap || {}).forEach(per => { if (per && typeof per === 'object' && per.k) per.store = name; }));
   S.alerts = seesAll() ? await S.be.alerts().catch(() => []) : [];
@@ -1693,6 +1695,36 @@ function blankVisit(x, who) {
     consultants: [], checks: {}, segs: {}, aor: {}, elNotes: {}, actions: [{}, {}, {}], reflection: '', working: '', notes: '' };
 }
 const localKey = id => `1915fl_draft_${id}`;
+// Visits kept on this device that never reached the server (lost signal, or a save that failed).
+// They are sent up when the app loads, when the phone comes back online, and when the app is reopened.
+function localVisits() {
+  const out = [];
+  try { for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (!k || !k.startsWith('1915fl_draft_')) continue; try { const v = JSON.parse(localStorage.getItem(k)); if (v?.id && v.email) out.push(v); } catch (e) {} } } catch (e) {}
+  return out;
+}
+let syncing = false;
+async function syncLocalVisits(quiet) {
+  if (syncing || !S.user || !S.be || S.be.demo === undefined) return 0;
+  syncing = true; let n = 0, failed = 0;
+  try {
+    for (const v of localVisits()) {
+      if (v.email !== S.user.email && !isAdmin()) continue;
+      const saved = (S.visits || []).find(y => y.id === v.id);
+      if (saved && (saved.at || '') >= (v.at || '')) continue;
+      if (S.V && S.V.id === v.id) continue; // open right now; its own save handles it
+      try { await S.be.saveVisit(v); const i = S.visits.findIndex(y => y.id === v.id); if (i >= 0) S.visits[i] = v; else S.visits.push(v); n++; }
+      catch (e) { failed++; console.warn('visit sync', v.id, e); }
+    }
+  } finally { syncing = false; }
+  if (n && !quiet) toast(`${n} visit${n > 1 ? 's' : ''} saved on this phone ${n > 1 ? 'were' : 'was'} sent up. ${n > 1 ? 'They are' : 'It is'} in the Visit log now.`);
+  if (n) S.lastVisit = latestVisitMap(S.visits);
+  return n;
+}
+function unsyncedIds() {
+  return new Set(localVisits().filter(v => { const s = (S.visits || []).find(y => y.id === v.id); return !s || (s.at || '') < (v.at || ''); }).map(v => v.id));
+}
+window.addEventListener('online', () => syncLocalVisits().then(n => { if (n && S.tab === 'visits') renderShell(); }));
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') syncLocalVisits().then(n => { if (n && S.tab === 'visits' && !S.V) renderShell(); }); });
 function localGet(id) { try { return JSON.parse(localStorage.getItem(localKey(id)) || 'null'); } catch (e) { return null; } }
 function localSet(v) { try { localStorage.setItem(localKey(v.id), JSON.stringify(v)); } catch (e) {} }
 function localDrop(id) { try { localStorage.removeItem(localKey(id)); } catch (e) {} }
@@ -2257,9 +2289,10 @@ function saveDraft(now) {
       await S.be.saveVisit(structuredClone(V));
       const i = S.visits.findIndex(y => y.id === V.id); if (i >= 0) S.visits[i] = structuredClone(V); else S.visits.push(structuredClone(V));
       const t = $('#vsaved'); if (t) t.textContent = V.status === 'done' ? `Submitted · saved ${new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}` : `Draft saved ${new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}`;
-    } catch (e) { const t = $('#vsaved'); if (t) t.textContent = 'Saved on this device. Will retry when you are back online.'; }
+    } catch (e) { console.warn('visit save', e); const t = $('#vsaved'); if (t) t.textContent = 'Saved on this phone, not sent yet. It sends on its own when you have signal. Keep the app open a moment.'; setTimeout(() => saveDraftRetry(V.id), 20000); }
   }, now ? 0 : 900);
 }
+function saveDraftRetry(id) { if (S.V && S.V.id === id) saveDraft(true); else syncLocalVisits(); }
 function wireVisit(V, canLog, snap) {
   const v = $('#view');
   if (S.vBaseFor !== V.id) { S.vBaseFor = V.id; S.vBase = editParts(V); }
@@ -3253,7 +3286,9 @@ function wireMlp() { const l = $('#mlp'); if (l) l.onchange = () => { S.viewEmai
 function viewVisits() {
   const v = $('#view');
   const mine = S.user.stores || [];
-  let list = seesAll() ? S.visits : S.visits.filter(x => x.email === S.user.email || mine.includes(x.store));
+  const pend = unsyncedIds();
+  const pool = [...S.visits.filter(x => !pend.has(x.id)), ...localVisits().filter(x => pend.has(x.id))];
+  let list = seesAll() ? pool : pool.filter(x => x.email === S.user.email || mine.includes(x.store));
   if (S.visitFilter && S.visitFilter !== '*') list = list.filter(x => x.email === S.visitFilter || x.store === S.visitFilter);
   list = list.slice().sort((a, b) => b.date.localeCompare(a.date) || a.store.localeCompare(b.store));
   v.innerHTML = `
@@ -3266,7 +3301,7 @@ function viewVisits() {
   <div class="panel">${list.map(x => {
     const sm = visitSummary(x), fixes = sm.fixes;
     const vid = `${x.email}_${x.date}_${slug(x.store)}${x.remote ? '_remote' : ''}`;
-    return `<details class="vis" data-vid="${esc(vid)}"><summary><b>${esc(x.store)}</b><span class="small">${esc(longDate(x.date))}</span><span class="small muted">${esc(x.name)}</span>${x.remote ? '<span class="pill">Remote</span>' : `<span class="pill" data-pcount="${esc(vid)}" hidden></span>`}${x.edits?.length ? `<span class="pill edited" title="${esc(editedText(x).join(' | '))}">Edited after submit</span>` : ''}${!x.remote && x.status === 'done' && x.photosMissing ? `<span class="pill edited">${x.photosMissing} photo${x.photosMissing > 1 ? 's' : ''} missing</span>` : ''}<span class="pill ${x.vtype === 'Follow-Up' ? 'check' : x.vtype === 'Priority' ? 'set' : ''}">${esc(x.vtype || kindToType(x.kind))}</span>${x.status === 'draft' ? '<span class="pill off">Draft</span>' : ''}${sm.score ? `<span class="pill">${sm.score.pct}%</span>` : ''}${fixes.length ? `<span class="pill off">${fixes.length} to fix</span>` : ''}</summary>
+    return `<details class="vis" data-vid="${esc(vid)}"><summary><b>${esc(x.store)}</b><span class="small">${esc(longDate(x.date))}</span><span class="small muted">${esc(x.name)}</span>${x.remote ? '<span class="pill">Remote</span>' : `<span class="pill" data-pcount="${esc(vid)}" hidden></span>`}${x.edits?.length ? `<span class="pill edited" title="${esc(editedText(x).join(' | '))}">Edited after submit</span>` : ''}${!x.remote && x.status === 'done' && x.photosMissing ? `<span class="pill edited">${x.photosMissing} photo${x.photosMissing > 1 ? 's' : ''} missing</span>` : ''}<span class="pill ${x.vtype === 'Follow-Up' ? 'check' : x.vtype === 'Priority' ? 'set' : ''}">${esc(x.vtype || kindToType(x.kind))}</span>${x.status === 'draft' ? '<span class="pill off">Draft</span>' : ''}${pend.has(x.id) ? '<span class="pill edited" title="Saved on this phone. It sends when you have signal.">Not sent yet</span>' : ''}${sm.score ? `<span class="pill">${sm.score.pct}%</span>` : ''}${fixes.length ? `<span class="pill off">${fixes.length} to fix</span>` : ''}</summary>
       <div class="vbody">${!x.remote && x.status === 'done' && x.photosMissing ? `<b class="warn">Photos missing (${x.photosMissing}):</b> ${esc((x.photosMissingList || []).join(', ') || 'not listed')}\n<b>Reason:</b> ${esc(x.photoReason || 'none given')}\n` : ''}${x.edits?.length ? `<b class="warn">Edited after submit:</b>\n${editedText(x).map(t => '  ' + esc(t)).join('\n')}\n` : ''}${sm.win ? `<b>Leader win:</b> ${esc(sm.winName ? titleName(sm.winName) + ': ' : '')}${esc(sm.win)}\n` : ''}<b>Working:</b> ${esc(x.working || '--')}
 <b>Commitments:</b>
 ${sm.commitments.length ? sm.commitments.map((c, i) => `${i + 1}. ${esc(c)}`).join('\n') : '--'}
