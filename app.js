@@ -1,16 +1,16 @@
-import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610041055';
-import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610041055';
+import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610041114';
+import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610041114';
 import {
   STORES, DISTRICTS, canonicalStore, isKnownStore, parseRsa, rangeFromFileName, parseTeamRoster, resolveReportNames,
   paceFactor, DEFAULT_GOALS, cidOf, status, fmt, goalsFor, TEAM_FOCUS, pickStoreFocus
-} from './base.js?v=202610041055';
+} from './base.js?v=202610041114';
 import {
   iso, fromIso, addDays, daysApart, weekStartOf, DAY_NAMES, DAY_LONG, dow, DEFAULT_OFF, validOff, safeOff, VISIT_DAYS, STORE_GOALS,
   parseDaily, needScore, band, pct, environment, buildPlan, pivotSuggestion, ELEMENTS, SEGMENTS, AORS, PRACTICE, VISIT_TYPES, kindToType, visitScore, visitSummary, consultantCoaching, drillFor, draggers, helpers, STORE_TO_RSA, hasCommitment, commitmentText, blackoutFor, offChoicesFor, storeFocus, rsaPicks, consultantWeeks, teamSignals,
   STORE_METRICS, slug, COACHING, METRICS, PLAIN, isOutlet, driveMin, driveText, MAX_SPLIT_MIN, LEVERS, leverStatus, suggestLever,
   consultantTrends, TREND_ROWS, trendFmt, trendRead, TREND_LABEL,
   OFFER_DEFAULT, PLAY, PLAY_CHECKS, PLAY_CHECKS_REMOTE, offerActive, offerMath, FLIQ_CHECKS, FLIQ_CHECKS_REMOTE, FLIQ_DAILY
-} from './ml.js?v=202610041055';
+} from './ml.js?v=202610041114';
 
 // Legacy Sunday-start weeks, read as the Monday week that replaced them.
 function fromSundayPlan(p, week) {
@@ -524,7 +524,10 @@ async function boot() {
     try { S.user = await S.be.profile(); } catch (e) { S.user = null; }
     if (!S.user) return renderNotRostered(u.email);
     await loadShared();
-    renderShell();
+    // Coming back from the Scorecard: reopen the visit they were on instead of the home screen.
+    let back = null;
+    try { const vv = new URLSearchParams(location.search).get('visit'); if (vv) { history.replaceState(null, '', location.pathname); const [email, date, store, rem] = vv.split('|'); if (email && date && store) back = { email, date, store, remote: rem === '1', kind: 'drop-in', reasonOk: true }; } } catch (e) {}
+    if (back) openVisit(back); else renderShell();
   });
 }
 // Field team Frank named. They're added as logins the first time an admin opens the app, so they show
@@ -1365,7 +1368,7 @@ function whoOn(store, date) {
   return { posted: r.posted !== false, on, pto, off };
 }
 function whoPanel(store, date) {
-  if (!SCH.user) return `<div class="budgetline whoon"><b>Who's working:</b> connect the Smart Scheduler to see who's on the schedule before you walk in. <button type="button" class="btn tiny" data-schedconnect>Connect</button>
+  if (!SCH.user) return `<div class="budgetline whoon"><b>Who's working today:</b> connect the Smart Scheduler once to see who's on the schedule before you walk in. <button type="button" class="btn tiny primary" data-schedconnect>Connect the Smart Scheduler</button>
     <form id="schedform" hidden style="margin-top:8px"><p class="small" style="margin:0 0 6px">Use your Smart Scheduler sign-in (the same email and password as Order Verification). You only do this once on this device.</p>
     <div class="row" style="gap:6px;flex-wrap:wrap"><input type="email" id="schedem" value="${esc(S.user?.email || '')}" autocomplete="username" style="flex:1;min-width:200px"><input type="password" id="schedpw" placeholder="Smart Scheduler password" autocomplete="current-password" style="flex:1;min-width:160px"><button class="btn tiny primary" type="submit">Connect</button></div><p class="small err" id="schederr"></p></form></div>`;
   const w = whoOn(store, date);
@@ -1855,12 +1858,12 @@ async function viewVisit() {
       ${needChip(sc?.score)}
     </div>
   </div>
+  ${whoPanel(x.store, x.date)}
   ${later ? `<div class="warnbox">This visit is on ${esc(longDate(x.date))}. Use it to prep; you can fill it in that day.</div>` : ''}
   ${(() => { const b = budgetFor(x.store, x.date), y = S.meta.latestDaily, mb = y ? budgetToDate(x.store, y) : null, m = S.daily?.stores?.[x.store]?.mtd?.k;
     return b ? `<div class="budgetline"><b>Today's budget at ${esc(x.store)}:</b> ${$k(b.sales)} revenue · SPG $${Math.round(b.spg)} · about ${Math.round(b.traffic)} guests.${mb && m?.netSales != null ? ` Month to date ${$k(m.netSales)} vs ${$k(mb.sales)} budget (${vsTag(vsPct(m.netSales, mb.sales))}).` : ''} <span class="small muted">Make sure the leader knows both numbers.</span></div>` : ''; })()}
   ${(() => { const sc = S.carts?.stores?.[x.store]; if (!sc) return ''; const tops = Object.entries(S.carts.people || {}).filter(([, p]) => p.store === x.store).sort((a, b) => b[1].value - a[1].value).slice(0, 3);
     return `<div class="budgetline cartsline"><b>Open carts at ${esc(x.store)}:</b> ${sc.n} carts · about ${$k(sc.value)} estimated${sc.due ? ` · <b>${sc.due} due a follow-up today</b>` : ''}${sc.old ? ` · ${sc.old} older than 2 weeks` : ''}. Most to follow up: ${tops.map(([, p]) => `${esc(titleName(p.name))} (${p.n}, ${$k(p.value)})`).join(', ')}. <span class="small muted">This is money already in the building: inspect the follow-up plan with the leader.</span></div>`; })()}
-  ${whoPanel(x.store, x.date)}
   ${V.status === 'done' && !x.remote && V.photosMissing ? `<div class="editbox"><b>Submitted with ${V.photosMissing} photo${V.photosMissing > 1 ? 's' : ''} missing.</b> <span class="small">${esc((V.photosMissingList || []).join(', '))}</span><br><span class="small"><b>Reason:</b> ${esc(V.photoReason || 'none given')}. Add them any time and this clears.</span></div>` : ''}
   ${V.edits?.length ? `<div class="editbox"><b>Edited after it was submitted</b> <span class="small">(submitted ${esc(dayLabel((V.submittedAt || V.date).slice(0, 10)))})</span><ul class="small">${editedText(V).map(t => `<li>${esc(t)}</li>`).join('')}</ul></div>` : ''}
   ${env ? `<div class="env ${env.kind}"><b>${env.kind === 'headwind' ? 'Headwind.' : env.kind === 'tailwind' ? 'Tailwind.' : 'Normal traffic.'}</b> ${esc(env.text)}</div>` : ''}
@@ -1899,7 +1902,7 @@ async function viewVisit() {
       const wk = S.weeks?.[c.cid];
       return `<div class="ccard">
         <div class="row" style="justify-content:space-between"><h3 style="margin:0">${esc(titleName(c.name))}${p.store && p.store !== x.store ? ` <span class="small muted">(${esc(p.store)})</span>` : ''}${(() => { if (!onDay) return ''; const on = onDay.on.find(q => q.cid === c.cid); return on ? ` <span class="pill set">On ${x.date === today() ? 'today' : dayLabel(x.date)} ${esc(shiftText(on.sh))}</span>` : onDay.pto.some(q => q.cid === c.cid) ? ' <span class="pill off">PTO</span>' : ' <span class="pill off">Not on the schedule</span>'; })()}
-          <a class="small" href="https://fpina-1915south.github.io/consultant-scorecard/?store=${encodeURIComponent(p.store || x.store)}&c=${encodeURIComponent(c.cid)}" target="_blank" rel="noopener" style="margin-left:6px">Open in Scorecard</a></h3><span class="row" style="gap:6px"><span class="tag ${c.why}">${tagText[c.why] || ''}</span>${canLog ? `<button type="button" class="link" data-rmc="${ci}" aria-label="Remove ${esc(titleName(c.name))}">Remove</button>` : ''}</span></div>
+          <a class="small" href="https://fpina-1915south.github.io/consultant-scorecard/?store=${encodeURIComponent(p.store || x.store)}&c=${encodeURIComponent(c.cid)}&back=${encodeURIComponent(location.origin + location.pathname + '?visit=' + encodeURIComponent([x.email, x.date, x.store, x.remote ? 1 : 0].join('|')))}" data-toscore style="margin-left:6px">Open in Scorecard</a></h3><span class="row" style="gap:6px"><span class="tag ${c.why}">${tagText[c.why] || ''}</span>${canLog ? `<button type="button" class="link" data-rmc="${ci}" aria-label="Remove ${esc(titleName(c.name))}">Remove</button>` : ''}</span></div>
         ${trendBlock(c.cid, p) || (p.k?.sph != null ? `<div class="kpis">
           ${kpiCell(p, 'sph', 'SPH', money)}${wk?.hours >= 1 && wk.sph != null ? `<div class="kc ${wk.priorSph && wk.sph < wk.priorSph * 0.75 ? 'red' : wk.priorSph && wk.sph > wk.priorSph * 1.25 ? 'green' : ''}"><span>This week</span><b>${money(wk.sph)}</b></div>` : ''}
           ${kpiCell(p, 'financePct', 'Finance', p1)}${kpiCell(p, 'beddingPct', 'Bedding', p1)}${kpiCell(p, 'protectionPct', 'Protection', p1)}${kpiCell(p, 'creditApps', 'Apps', n => String(Math.round(n)))}${kpiCell(p, 'cancelPct', 'Cancel', p1, true)}
@@ -2261,6 +2264,7 @@ function wireVisit(V, canLog, snap) {
   const v = $('#view');
   if (S.vBaseFor !== V.id) { S.vBaseFor = V.id; S.vBase = editParts(V); }
   wireWho(v, () => viewVisit());
+  v.querySelectorAll('[data-toscore]').forEach(a => a.onclick = () => { stopMic(); if (canLog) saveDraft(true); });
   $('#back').onclick = () => { stopMic(); if (canLog) { saveDraft(true); sendEditAlert(V); } S.vBaseFor = null; S.visit = null; S.V = null; renderShell(); };
   v.querySelectorAll('.vsec-hd').forEach(h => h.onclick = () => {
     const secEl = h.parentElement, k = secEl.dataset.sec;
@@ -2689,6 +2693,7 @@ async function viewBriefInner() {
     <p class="small" style="margin:6px 0 0">Check in with each store leader: who used it yesterday, what it flagged, and who needs a follow-up. It's on every visit too.</p></section>` : ''}
   <section class="panel today">
     <h3>Today</h3>
+    ${!SCH.user ? `<div id="briefwho">${whoPanel('', t)}</div>` : ''}
     ${todayDay?.store ? `<div class="tstops">${dayStores(todayDay).map((st, j) => { const isP = j === 0, stop = isP ? todayDay : todayDay.stops[j - 1], part = todayDay.stops?.length ? (isP ? (todayDay.part || 'AM') : (stop.part || 'Stop')) : 'Full day';
         const m = j ? driveMin(dayStores(todayDay)[j - 1], st) : null;
         return `<div class="tstop"><div class="row" style="justify-content:space-between;flex-wrap:nowrap"><span><span class="part">${esc(part)}</span> <b>${esc(st)}</b>${isP && todayDay.anchor ? ' <span class="pill anchor">Anchor</span>' : ''}</span>${needChip(S.scores[st]?.score)}</div>
@@ -2744,13 +2749,14 @@ async function viewBriefInner() {
     <div class="row"><button class="btn primary" id="bmsg">Open team messages</button></div>
   </section>`;
   wirePick();
+  wireWho(v, () => viewBrief());
   v.querySelectorAll('[data-bopen]').forEach(b => b.onclick = () => openVisit({ store: b.dataset.bopen, date: t, email, kind: (todayDay.store === b.dataset.bopen ? todayDay.kind : todayDay.stops?.find(y => y.store === b.dataset.bopen)?.kind) || 'first', dayIndex: plan.days.indexOf(todayDay) }));
   v.querySelectorAll('[data-bstop]').forEach(b => b.onclick = () => openVisit({ store: b.dataset.bstop, date: t, email, kind: 'first', dayIndex: plan.days.indexOf(todayDay) }));
   const g = $('#bgo'); if (g) g.onclick = () => openVisit({ store: todayDay.store, date: t, email, kind: todayDay.kind, dayIndex: plan.days.indexOf(todayDay) });
   const w = $('#bweek'); if (w) w.onclick = () => { S.tab = 'week'; renderShell(); };
   v.querySelectorAll('[data-bremote]').forEach(x => x.onclick = () => openVisit({ store: x.dataset.bremote, date: t, email, kind: 'remote', remote: true }));
   v.querySelectorAll('[data-rc]').forEach(x => x.onclick = () => { const o = JSON.parse(x.dataset.rc); openVisit({ ...o, date: t, email, kind: 'remote', remote: true }); });
-  $('#bmsg').onclick = () => { S.tab = 'messages'; S.msgType = 'dailyStore'; renderShell(); };
+  const bm = $('#bmsg'); if (bm) bm.onclick = () => { S.tab = 'messages'; S.msgType = 'dailyStore'; renderShell(); };
 }
 
 // ---------------------------------------------------------------- VP 1 on 1 with a Market Leader
