@@ -1,16 +1,16 @@
-import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610040933';
-import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610040933';
+import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610041055';
+import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610041055';
 import {
   STORES, DISTRICTS, canonicalStore, isKnownStore, parseRsa, rangeFromFileName, parseTeamRoster, resolveReportNames,
   paceFactor, DEFAULT_GOALS, cidOf, status, fmt, goalsFor, TEAM_FOCUS, pickStoreFocus
-} from './base.js?v=202610040933';
+} from './base.js?v=202610041055';
 import {
   iso, fromIso, addDays, daysApart, weekStartOf, DAY_NAMES, DAY_LONG, dow, DEFAULT_OFF, validOff, safeOff, VISIT_DAYS, STORE_GOALS,
   parseDaily, needScore, band, pct, environment, buildPlan, pivotSuggestion, ELEMENTS, SEGMENTS, AORS, PRACTICE, VISIT_TYPES, kindToType, visitScore, visitSummary, consultantCoaching, drillFor, draggers, helpers, STORE_TO_RSA, hasCommitment, commitmentText, blackoutFor, offChoicesFor, storeFocus, rsaPicks, consultantWeeks, teamSignals,
   STORE_METRICS, slug, COACHING, METRICS, PLAIN, isOutlet, driveMin, driveText, MAX_SPLIT_MIN, LEVERS, leverStatus, suggestLever,
   consultantTrends, TREND_ROWS, trendFmt, trendRead, TREND_LABEL,
   OFFER_DEFAULT, PLAY, PLAY_CHECKS, PLAY_CHECKS_REMOTE, offerActive, offerMath, FLIQ_CHECKS, FLIQ_CHECKS_REMOTE, FLIQ_DAILY
-} from './ml.js?v=202610040933';
+} from './ml.js?v=202610041055';
 
 // Legacy Sunday-start weeks, read as the Monday week that replaced them.
 function fromSundayPlan(p, week) {
@@ -1304,6 +1304,93 @@ function dayCard(d, i, plan, canEdit) {
 }
 
 // ---------------------------------------------------------------- a visit (also the store detail page)
+// ---------------------------------------------------------------- Smart Scheduler: who's working
+// Reads the posted schedules straight from the Smart Scheduler. Each Market Leader connects once with
+// their Smart Scheduler sign-in (same email and password as Order Verification); it stays connected.
+const SCHED_CFG = { apiKey: 'AIzaSyDLeBfi4LrYtkXxS9fh9BPf40NcPIsIqQA', authDomain: 'smart-scheduler-1915.firebaseapp.com', projectId: 'smart-scheduler-1915',
+  storageBucket: 'smart-scheduler-1915.firebasestorage.app', messagingSenderId: '1678890298', appId: '1:1678890298:web:483e73dbcf5b7f7875ac03' };
+const SCH = { ready: null, user: null, weeks: {}, hours: null };
+const SCH_ROLES = { C: 'Consultant', PT: 'Part-time Consultant', GM: 'General Manager', L: 'Assistant General Manager', LSL: 'Lead Selling Leader', ASL: 'Assistant Selling Leader', KH: 'Key Holder', CSR: 'Guest Solutions', CSRK: 'Guest Solutions key holder', MM: 'Market Manager' };
+const schedSlug = st => String(st).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+const schedStore = n => { let c = canonicalStore(n); if (!isKnownStore(c)) c = canonicalStore(String(n).replace(/^Jacksonville\s+/i, '')); return c; };
+function schedInit() {
+  if (SCH.ready) return SCH.ready;
+  SCH.ready = (async () => {
+    if (DEMO) { SCH.user = { email: 'demo' }; return SCH; }
+    const [{ initializeApp, getApps }, A, F2] = await Promise.all([import(FB + 'firebase-app.js'), import(FB + 'firebase-auth.js'), import(FB + 'firebase-firestore.js')]);
+    const app = getApps().find(a => a.name === 'sched') || initializeApp(SCHED_CFG, 'sched');
+    Object.assign(SCH, { A, F: F2, auth: A.getAuth(app), db: F2.getFirestore(app) });
+    await new Promise(res => { const un = A.onAuthStateChanged(SCH.auth, u => { SCH.user = u; un(); res(); }); });
+    return SCH;
+  })().catch(e => { console.warn('scheduler', e); return SCH; });
+  return SCH.ready;
+}
+async function schedSignIn(email, pw) { await schedInit(); await SCH.A.signInWithEmailAndPassword(SCH.auth, email, pw); SCH.user = SCH.auth.currentUser; SCH.weeks = {}; }
+// The week's schedules by store (Monday weeks, same as the Smart Scheduler). null when not connected.
+async function schedWeek(week) {
+  await schedInit(); if (!SCH.user) return null;
+  if (SCH.weeks[week]) return SCH.weeks[week];
+  if (DEMO) { const out = {}; const keys = ['O', 'C', '', 'O', 'C', 'O', 'S']; STORES.forEach(st => { const ppl = (S.roster || []).filter(r => r.store === st.name); if (ppl.length) out[st.name] = { posted: true, people: ppl.map((r, i) => ({ name: r.name, role: r.title === 'ASM' ? 'L' : 'C', days: keys.map((k, d) => (i + d) % 4 === 3 ? '' : k) })) }; }); SCH.hours = {}; return (SCH.weeks[week] = out); }
+  const F2 = SCH.F, out = {};
+  try {
+    const [q, h] = await Promise.all([F2.getDocs(F2.query(F2.collection(SCH.db, 'rosters'), F2.where('week', '==', week))), SCH.hours ? null : F2.getDocs(F2.collection(SCH.db, 'stores'))]);
+    if (h) { SCH.hours = {}; h.docs.forEach(d => { SCH.hours[d.id] = d.data(); }); }
+    q.docs.forEach(d => { const r = d.data(), st = schedStore(r.store); if (isKnownStore(st)) out[st] = { ...r, slug: schedSlug(r.store) }; });
+  } catch (e) { console.warn('scheduler read', e); return null; }
+  return (SCH.weeks[week] = out);
+}
+// Shift times from the store's hours, the same templates the Smart Scheduler uses on a normal day.
+function schedShift(r, di, k, iso) {
+  if (!k) return null; if (k === 'PTO') return { pto: true };
+  const sd = SCH.hours?.[r.slug]; let day = sd?.days?.[di] || {};
+  if (sd?.cur && sd.switchOn && iso < sd.switchOn) day = { ...day, ...(sd.cur[di] || {}) };
+  if (day.closed) return null;
+  if (k === 'P') return { name: 'Part-time', in: 11.5, out: 16.5 };
+  const m = /^X:([\d.]+)-([\d.]+)$/.exec(k); if (m) return { name: 'Custom', in: +m[1], out: +m[2] };
+  const o = day.open ?? 10, c = day.close ?? 19, O = { k: 'O', name: 'Opener', in: 9.5, out: 18 };
+  const T = di === 6 ? (c <= 19 ? [{ k: 'S', name: 'Sunday', in: o - 0.5, out: c }] : [{ k: 'S', name: 'Sun open', in: o - 0.5, out: 19 }, { k: 'S2', name: 'Sun close', in: c - 8.5, out: c }])
+    : c <= 19 ? [O, { k: 'C', name: 'Closer', in: 10.5, out: 19 }, { k: 'F', name: 'Full day', in: 9.5, out: 19 }]
+    : c === 20 ? [O, { k: 'C', name: 'Closer', in: 11.5, out: 20 }] : [O, { k: 'M', name: 'Mid', in: 11.5, out: 20 }, { k: 'C', name: 'Closer', in: 12.5, out: 21 }];
+  return T.find(t => t.k === k) || { name: k };
+}
+const clk = t => { const h = Math.floor(t), m = Math.round((t - h) * 60); return `${((h + 11) % 12) + 1}${m ? ':' + String(m).padStart(2, '0') : ''}${h < 12 ? 'a' : 'p'}`; };
+const shiftText = sh => sh?.pto ? 'PTO' : sh?.in != null ? `${clk(sh.in)} to ${clk(sh.out)}` : sh?.name || '';
+// Who is on the schedule at a store on a date: { posted, on: [...], pto: [...], off: [...] }, or null.
+function whoOn(store, date) {
+  const r = SCH.weeks[weekStartOf(date)]?.[store]; if (!r) return null;
+  const di = (dow(date) + 6) % 7, on = [], pto = [], off = [];
+  (r.people || []).forEach(p => { const sh = schedShift(r, di, p.days?.[di], date); const x = { name: p.name, cid: cidOf(p.name), role: p.role, roleLabel: SCH_ROLES[p.role] || p.role, lead: !['C', 'PT', 'CSR'].includes(p.role), sh };
+    (sh?.pto ? pto : sh ? on : off).push(x); });
+  on.sort((a, b) => (b.lead - a.lead) || (a.sh.in ?? 99) - (b.sh.in ?? 99));
+  return { posted: r.posted !== false, on, pto, off };
+}
+function whoPanel(store, date) {
+  if (!SCH.user) return `<div class="budgetline whoon"><b>Who's working:</b> connect the Smart Scheduler to see who's on the schedule before you walk in. <button type="button" class="btn tiny" data-schedconnect>Connect</button>
+    <form id="schedform" hidden style="margin-top:8px"><p class="small" style="margin:0 0 6px">Use your Smart Scheduler sign-in (the same email and password as Order Verification). You only do this once on this device.</p>
+    <div class="row" style="gap:6px;flex-wrap:wrap"><input type="email" id="schedem" value="${esc(S.user?.email || '')}" autocomplete="username" style="flex:1;min-width:200px"><input type="password" id="schedpw" placeholder="Smart Scheduler password" autocomplete="current-password" style="flex:1;min-width:160px"><button class="btn tiny primary" type="submit">Connect</button></div><p class="small err" id="schederr"></p></form></div>`;
+  const w = whoOn(store, date);
+  if (!w) return `<div class="budgetline whoon"><b>Who's working:</b> no schedule in the Smart Scheduler for ${esc(store)} this week yet.</div>`;
+  const line = list => list.map(p => `${esc(titleName(p.name))} <span class="small muted">${esc(shiftText(p.sh))}</span>`).join(' · ');
+  const leads = w.on.filter(p => p.lead), team = w.on.filter(p => !p.lead);
+  return `<div class="budgetline whoon"><b>Who's working ${date === today() ? 'today' : dayLabel(date)} at ${esc(store)}</b>${w.posted ? '' : ' <span class="pill off">Draft schedule</span>'}
+    <p class="small" style="margin:4px 0 0"><b>Leaders and key holders (${leads.length}):</b> ${leads.length ? line(leads) : '<span class="warn">none scheduled</span>'}</p>
+    <p class="small" style="margin:2px 0 0"><b>Consultants (${team.length}):</b> ${team.length ? line(team) : '<span class="warn">none scheduled</span>'}</p>
+    ${w.pto.length ? `<p class="small muted" style="margin:2px 0 0">PTO: ${w.pto.map(p => esc(titleName(p.name))).join(', ')}</p>` : ''}</div>`;
+}
+// One line for the daily brief: who leads the floor and how many consultants are on.
+function whoLine(store, date) {
+  if (!SCH.user) return '';
+  const w = whoOn(store, date); if (!w) return `<p class="small muted" style="margin:4px 0 0">No schedule in the Smart Scheduler yet.</p>`;
+  const leads = w.on.filter(p => p.lead), team = w.on.filter(p => !p.lead);
+  return `<p class="small" style="margin:4px 0 0"><b>On today:</b> ${leads.length ? leads.map(p => `${esc(titleName(p.name).split(' ')[0])} (${esc(p.role === 'MM' ? 'MM' : p.roleLabel)}, ${esc(shiftText(p.sh))})`).join(', ') : '<span class="warn">no leader scheduled</span>'} · ${team.length} consultant${team.length === 1 ? '' : 's'}${w.posted ? '' : ' · draft'}</p>`;
+}
+function wireWho(root, again) {
+  root.querySelectorAll('[data-schedconnect]').forEach(b => b.onclick = () => { const f = root.querySelector('#schedform'); if (f) { f.hidden = false; root.querySelector('#schedpw')?.focus(); } });
+  const f = root.querySelector('#schedform'); if (!f) return;
+  f.onsubmit = async e => { e.preventDefault(); const er = root.querySelector('#schederr'); er.textContent = 'Connecting…';
+    try { await schedSignIn(root.querySelector('#schedem').value.trim().toLowerCase(), root.querySelector('#schedpw').value); toast('Smart Scheduler connected.'); again(); }
+    catch (x) { er.textContent = /invalid|wrong|not-found/.test(x?.code || '') ? "That email and password don't match the Smart Scheduler. Use the same sign-in as Order Verification, or reset it in the Smart Scheduler." : (x?.message || 'Could not connect.'); } };
+}
 async function openVisit(x) {
   S.visit = x; S.V = null; S.vPhotos = []; S.vPlans = [];
   try { S.vPlans = (await Promise.all([S.be.plan(x.email, weekStartOf(x.date)), S.be.plan(x.email, addDays(weekStartOf(x.date), 7))])).filter(Boolean); } catch (e) {}
@@ -1680,7 +1767,11 @@ async function viewVisit() {
     if (f) V.leaderCommit = { ...(V.leaderCommit || {}), key: f.key, what: `Team ${f.label.toLowerCase()}`, from: fmtMetric(f.key, f.value), to: fmtMetric(f.key, f.target ?? f.goal), by: nextDay, supportBy: V.leaderCommit?.supportBy || nextDay };
   }
   const people = S.rsa?.people || [];
-  const picks = rsaPicks(people, x.store, DEFAULT_GOALS, paceFactor(S.rsa?.to), 3, S.weeks || {});
+  // Who's on the Smart Scheduler today. Coaching picks come from people actually working, when we know.
+  try { await Promise.race([schedWeek(weekStartOf(x.date)), new Promise(r => setTimeout(r, 2500))]); } catch (e) {}
+  const onDay = whoOn(x.store, x.date), onSet = onDay ? new Set(onDay.on.map(p => p.cid)) : null;
+  const pickPool = onSet && people.some(p => p.store === x.store && onSet.has(p.cid)) ? people.filter(p => p.store !== x.store || onSet.has(p.cid)) : people;
+  const picks = rsaPicks(pickPool, x.store, DEFAULT_GOALS, paceFactor(S.rsa?.to), 3, S.weeks || {});
   if (!V.consultants.length && picks.length && V.status === 'draft' && !saved) V.consultants = picks.map(p => ({ cid: p.cid, name: p.name, why: p.why, notes: '', practice: {} }));
   const storePeople = people.filter(p => p.store === x.store).sort((a, b) => b.k.sph - a.k.sph);
   // Everyone on this store's sales team roster, even with no RSA numbers yet (new hires, early in the month).
@@ -1769,6 +1860,7 @@ async function viewVisit() {
     return b ? `<div class="budgetline"><b>Today's budget at ${esc(x.store)}:</b> ${$k(b.sales)} revenue · SPG $${Math.round(b.spg)} · about ${Math.round(b.traffic)} guests.${mb && m?.netSales != null ? ` Month to date ${$k(m.netSales)} vs ${$k(mb.sales)} budget (${vsTag(vsPct(m.netSales, mb.sales))}).` : ''} <span class="small muted">Make sure the leader knows both numbers.</span></div>` : ''; })()}
   ${(() => { const sc = S.carts?.stores?.[x.store]; if (!sc) return ''; const tops = Object.entries(S.carts.people || {}).filter(([, p]) => p.store === x.store).sort((a, b) => b[1].value - a[1].value).slice(0, 3);
     return `<div class="budgetline cartsline"><b>Open carts at ${esc(x.store)}:</b> ${sc.n} carts · about ${$k(sc.value)} estimated${sc.due ? ` · <b>${sc.due} due a follow-up today</b>` : ''}${sc.old ? ` · ${sc.old} older than 2 weeks` : ''}. Most to follow up: ${tops.map(([, p]) => `${esc(titleName(p.name))} (${p.n}, ${$k(p.value)})`).join(', ')}. <span class="small muted">This is money already in the building: inspect the follow-up plan with the leader.</span></div>`; })()}
+  ${whoPanel(x.store, x.date)}
   ${V.status === 'done' && !x.remote && V.photosMissing ? `<div class="editbox"><b>Submitted with ${V.photosMissing} photo${V.photosMissing > 1 ? 's' : ''} missing.</b> <span class="small">${esc((V.photosMissingList || []).join(', '))}</span><br><span class="small"><b>Reason:</b> ${esc(V.photoReason || 'none given')}. Add them any time and this clears.</span></div>` : ''}
   ${V.edits?.length ? `<div class="editbox"><b>Edited after it was submitted</b> <span class="small">(submitted ${esc(dayLabel((V.submittedAt || V.date).slice(0, 10)))})</span><ul class="small">${editedText(V).map(t => `<li>${esc(t)}</li>`).join('')}</ul></div>` : ''}
   ${env ? `<div class="env ${env.kind}"><b>${env.kind === 'headwind' ? 'Headwind.' : env.kind === 'tailwind' ? 'Tailwind.' : 'Normal traffic.'}</b> ${esc(env.text)}</div>` : ''}
@@ -1806,7 +1898,8 @@ async function viewVisit() {
       const pk = picks.find(q => q.cid === c.cid);
       const wk = S.weeks?.[c.cid];
       return `<div class="ccard">
-        <div class="row" style="justify-content:space-between"><h3 style="margin:0">${esc(titleName(c.name))}${p.store && p.store !== x.store ? ` <span class="small muted">(${esc(p.store)})</span>` : ''}</h3><span class="row" style="gap:6px"><span class="tag ${c.why}">${tagText[c.why] || ''}</span>${canLog ? `<button type="button" class="link" data-rmc="${ci}" aria-label="Remove ${esc(titleName(c.name))}">Remove</button>` : ''}</span></div>
+        <div class="row" style="justify-content:space-between"><h3 style="margin:0">${esc(titleName(c.name))}${p.store && p.store !== x.store ? ` <span class="small muted">(${esc(p.store)})</span>` : ''}${(() => { if (!onDay) return ''; const on = onDay.on.find(q => q.cid === c.cid); return on ? ` <span class="pill set">On ${x.date === today() ? 'today' : dayLabel(x.date)} ${esc(shiftText(on.sh))}</span>` : onDay.pto.some(q => q.cid === c.cid) ? ' <span class="pill off">PTO</span>' : ' <span class="pill off">Not on the schedule</span>'; })()}
+          <a class="small" href="https://fpina-1915south.github.io/consultant-scorecard/?store=${encodeURIComponent(p.store || x.store)}&c=${encodeURIComponent(c.cid)}" target="_blank" rel="noopener" style="margin-left:6px">Open in Scorecard</a></h3><span class="row" style="gap:6px"><span class="tag ${c.why}">${tagText[c.why] || ''}</span>${canLog ? `<button type="button" class="link" data-rmc="${ci}" aria-label="Remove ${esc(titleName(c.name))}">Remove</button>` : ''}</span></div>
         ${trendBlock(c.cid, p) || (p.k?.sph != null ? `<div class="kpis">
           ${kpiCell(p, 'sph', 'SPH', money)}${wk?.hours >= 1 && wk.sph != null ? `<div class="kc ${wk.priorSph && wk.sph < wk.priorSph * 0.75 ? 'red' : wk.priorSph && wk.sph > wk.priorSph * 1.25 ? 'green' : ''}"><span>This week</span><b>${money(wk.sph)}</b></div>` : ''}
           ${kpiCell(p, 'financePct', 'Finance', p1)}${kpiCell(p, 'beddingPct', 'Bedding', p1)}${kpiCell(p, 'protectionPct', 'Protection', p1)}${kpiCell(p, 'creditApps', 'Apps', n => String(Math.round(n)))}${kpiCell(p, 'cancelPct', 'Cancel', p1, true)}
@@ -2167,6 +2260,7 @@ function saveDraft(now) {
 function wireVisit(V, canLog, snap) {
   const v = $('#view');
   if (S.vBaseFor !== V.id) { S.vBaseFor = V.id; S.vBase = editParts(V); }
+  wireWho(v, () => viewVisit());
   $('#back').onclick = () => { stopMic(); if (canLog) { saveDraft(true); sendEditAlert(V); } S.vBaseFor = null; S.visit = null; S.V = null; renderShell(); };
   v.querySelectorAll('.vsec-hd').forEach(h => h.onclick = () => {
     const secEl = h.parentElement, k = secEl.dataset.sec;
@@ -2517,6 +2611,7 @@ async function viewBriefInner() {
   if (!S.daily) { v.innerHTML = `<div class="panel"><h2>Waiting on the first daily report</h2><p>Your brief builds from the daily report and RSA report. Once they're uploaded, it's here every morning.</p></div>`; return; }
   v.innerHTML = '<p class="loading">Building your brief…</p>';
   const t = today(), week = weekStartOf(t);
+  try { await Promise.race([schedWeek(week), new Promise(r => setTimeout(r, 2500))]); } catch (e) {}
   const plan = await S.be.plan(email, week).catch(() => null);
   const asOf = S.meta.latestDaily;
   const people = S.rsa?.people || [];
@@ -2598,6 +2693,7 @@ async function viewBriefInner() {
         const m = j ? driveMin(dayStores(todayDay)[j - 1], st) : null;
         return `<div class="tstop"><div class="row" style="justify-content:space-between;flex-wrap:nowrap"><span><span class="part">${esc(part)}</span> <b>${esc(st)}</b>${isP && todayDay.anchor ? ' <span class="pill anchor">Anchor</span>' : ''}</span>${needChip(S.scores[st]?.score)}</div>
           ${m != null ? `<p class="small muted" style="margin:0">~${driveText(m)} drive from ${esc(dayStores(todayDay)[j - 1])}</p>` : ''}
+          ${whoLine(st, t)}
           ${stop.status === 'done' ? '<span class="pill done">Visited</span>' : intentHtml(visitIntent(st, { anchor: isP && todayDay.anchor, kind: stop.kind, date: t }), true)}
           <div class="row" style="margin-top:6px"><button class="btn ${j === 0 ? 'primary' : ''}" type="button" data-bopen="${esc(st)}">${stop.status === 'done' ? 'See visit' : `Open ${part === 'Full day' ? '' : esc(part) + ' '}visit`}</button></div></div>`; }).join('')}</div>`
       : ''}
