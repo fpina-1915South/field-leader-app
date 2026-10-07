@@ -1,16 +1,16 @@
-import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610070809';
-import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610070809';
+import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610071024';
+import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610071024';
 import {
   STORES, DISTRICTS, canonicalStore, isKnownStore, parseRsa, rangeFromFileName, parseTeamRoster, resolveReportNames,
   paceFactor, DEFAULT_GOALS, cidOf, status, fmt, goalsFor, TEAM_FOCUS, pickStoreFocus
-} from './base.js?v=202610070809';
+} from './base.js?v=202610071024';
 import {
   iso, fromIso, addDays, daysApart, weekStartOf, DAY_NAMES, DAY_LONG, dow, DEFAULT_OFF, validOff, safeOff, VISIT_DAYS, STORE_GOALS,
   parseDaily, needScore, band, pct, environment, buildPlan, pivotSuggestion, ELEMENTS, SEGMENTS, AORS, PRACTICE, VISIT_TYPES, kindToType, visitScore, visitSummary, consultantCoaching, drillFor, draggers, helpers, STORE_TO_RSA, hasCommitment, commitmentText, blackoutFor, offChoicesFor, storeFocus, rsaPicks, consultantWeeks, teamSignals,
   STORE_METRICS, slug, COACHING, METRICS, PLAIN, isOutlet, driveMin, driveText, MAX_SPLIT_MIN, LONG_DRIVE_MIN, LEVERS, leverStatus, suggestLever,
   consultantTrends, TREND_ROWS, trendFmt, trendRead, TREND_LABEL,
   OFFER_DEFAULT, PLAY, PLAY_CHECKS, PLAY_CHECKS_REMOTE, offerActive, offerMath, FLIQ_CHECKS, FLIQ_CHECKS_REMOTE, FLIQ_DAILY
-} from './ml.js?v=202610070809';
+} from './ml.js?v=202610071024';
 
 // Legacy Sunday-start weeks, read as the Monday week that replaced them.
 function fromSundayPlan(p, week) {
@@ -852,6 +852,11 @@ async function viewWeek() {
     ? pivotSuggestion({ plan, scores: S.scores, today: t, dismissed: plan.dismissed || [] }) : null;
   const off = safeOff(plan?.off || to?.off || who.off, who.role);
   const doneCount = plan ? plan.days.filter(d => d.status === 'done').length : 0;
+  // Input on this week from the weekly 1 on 1 (held on the week before it).
+  const one1 = await S.be.oneOnOne(oneId(email, addDays(week, -7))).catch(() => null);
+  const oneIn = one1 && (one1.status === 'done' || seesAll()) && (Object.values(one1.planInput || {}).some(x => String(x).trim()) || String(one1.planNote || '').trim() || String(one1.goals || '').trim() || String(one1.coachPlan || '').trim()) ? one1 : null;
+  S.wkInput = oneIn?.planInput || {};
+  const inputBy = oneIn ? firstOf(oneIn.heldByName || '') || 'your 1 on 1' : '';
 
   v.innerHTML = `
   <div class="spread">
@@ -877,6 +882,11 @@ async function viewWeek() {
   ${plan && week >= thisWeek ? anchorPanel(plan, who, canEdit) : ''}
   ${sugg ? pivotCard(sugg) : ''}
   ${week >= thisWeek && !plan ? offPanel(week, off, to, who, canEdit, plan, week === thisWeek) : ''}
+  ${oneIn ? `<section class="panel" style="border-left:6px solid #003B4A"><p class="eyebrow">From your 1 on 1${oneIn.heldByName ? ' with ' + esc(oneIn.heldByName) : ''}${oneIn.status !== 'done' ? ' · draft' : ''}</p>
+    ${String(oneIn.planNote || '').trim() ? `<p style="margin:4px 0 8px;white-space:pre-wrap">${esc(oneIn.planNote.trim())}</p>` : ''}
+    ${String(oneIn.goals || '').trim() ? `<p class="eyebrow" style="margin:8px 0 2px">Goals this week</p><p class="small" style="margin:0;white-space:pre-wrap">${esc(oneIn.goals.trim())}</p>` : ''}
+    ${String(oneIn.coachPlan || '').trim() ? `<details class="hist" style="margin-top:8px"><summary>Coaching plan by visit</summary><p class="small" style="margin:6px 0 0;white-space:pre-wrap">${esc(oneIn.coachPlan.trim())}</p></details>` : ''}
+    ${Object.values(oneIn.planInput || {}).some(x => String(x).trim()) ? '<p class="small muted" style="margin:8px 0 0">Input on specific days is on each day below.</p>' : ''}</section>` : ''}
   ${plan ? `
   <div class="cols">
     <div style="min-width:0">
@@ -1328,6 +1338,7 @@ function dayCard(d, i, plan, canEdit) {
   return `<article class="day ${isToday ? 'today' : ''} ${d.status === 'done' && !multi ? 'isdone' : ''}">
     <div class="row" style="justify-content:space-between"><span class="dname">${esc(DAY_LONG[dow(d.date)])} ${esc(shortDate(d.date))}</span>${multi ? `<span class="small muted">${dayStores(d).length} stores</span>` : ''}</div>
     ${dayDriveLine(S.users.find(u => u.email === plan.email) || (plan.email === S.user.email ? S.user : null), d)}
+    ${String(S.wkInput?.[d.date] || '').trim() ? `<p class="small" style="margin:2px 0 6px;padding:6px 8px;border-left:3px solid #F68C2C;background:var(--amber-bg)"><b>1 on 1 input:</b> ${esc(S.wkInput[d.date].trim())}</p>` : ''}
     ${d.store ? block(d.store, multi ? (d.part || 'AM') : '', d.kind, d.status, primaryBtn, d.anchor ? '<div class="row"><span class="pill anchor">Anchor store</span></div>' : '') : '<div class="store">Open day</div>'}
     ${(d.stops || []).map((x, j) => {
       const m = driveMin(j ? d.stops[j - 1].store : d.store, x.store);
@@ -2836,7 +2847,7 @@ async function viewBriefInner() {
 // people performed and which didn't, how the leader ran their week, the one lever the market needs
 // pulled, and where the focus goes this week. Ends with commitments from X to Y by a date, and how.
 const ONE_LEVERS = ['financePct', 'appsToTraffic', 'beddingPct', 'protectionAttach', 'deliveryPct'];   // core behaviors under the two levers
-const O_OPEN = new Set(['glance', 'wins', 'opps', 'ran', 'prev', 'lever', 'focus', 'coach', 'acts', 'notes']);
+const O_OPEN = new Set(['glance', 'prev', 'lever', 'sched', 'goals', 'cplan', 'coach', 'acts', 'notes']);
 const oneId = (email, ws) => `${email}_${ws}`;
 const weekRange = ws => `${shortDate(ws)} to ${shortDate(addDays(ws, 6))}`;
 const moneyK = n => (n < 0 ? '-$' : '$') + Math.abs(Math.round(n)).toLocaleString('en-US');
@@ -2989,6 +3000,47 @@ async function viewOne() {
   const leverSet = new Set(leverStores);
   const whereNow = [...new Set([...leverStores, ...focusStores])].slice(0, 3);
 
+  // ---- This week: the schedule, suggested changes, goals and the coaching plan by visit.
+  const nws = addDays(ws, 7), t0 = today();
+  const wkDays = thisPlan?.days || [];
+  const planStores = new Set(wkDays.flatMap(dayStores));
+  const sc = st => S.scores[st]?.score ?? 0;
+  const needRank = allStores.filter(st => S.scores[st]).sort((a, b) => sc(b) - sc(a));
+  const missingHigh = [...new Set([...leverStores, ...needRank.slice(0, 3)])].filter(st => !planStores.has(st));
+  const openDays = wkDays.filter(d => d.store && d.status !== 'done' && d.date >= t0).sort((a, b) => sc(a.store) - sc(b.store));
+  const used = new Set();
+  const schedSugg = [];
+  missingHigh.forEach(st => {
+    const d = openDays.find(x => !used.has(x.date) && sc(x.store) < sc(st));
+    if (d) { used.add(d.date); schedSugg.push({ date: d.date, text: `Swap ${d.store} (need ${sc(d.store)}) for ${st} (need ${sc(st)})${leverSet.has(st) ? ', a lever store' : ''}, or add ${st} as a remote call.` }); }
+    else schedSugg.push({ date: null, text: `${st} (need ${sc(st)}) isn't on the plan. Add a remote call with the store leader.` });
+  });
+  const counts = {}; wkDays.forEach(d => dayStores(d).forEach(st => counts[st] = (counts[st] || 0) + 1));
+  Object.entries(counts).filter(([st, n]) => n > 1 && missingHigh.length && sc(st) < sc(missingHigh[0])).forEach(([st, n]) => schedSugg.push({ date: null, text: `${st} is on the plan ${n} times while ${missingHigh[0]} isn't. Is the second visit worth more than a first visit there?` }));
+  wkDays.forEach(d => { const x = dayDrive(who, d); if (x?.long) schedSugg.push({ date: d.date, text: `${dayStores(d).join(' and ')}: ${driveText(x.out)} each way. Overnight, pair it with a nearby store, or make it remote.` }); });
+  wkDays.filter(d => d.store && d.date < t0 && d.status !== 'done').forEach(d => schedSugg.push({ date: d.date, text: `${d.store} visit isn't logged yet. Did it happen?` }));
+  const wkBud = st => { let sales = 0, traffic = 0, n = 0; for (let i = 0; i < 7; i++) { const b = budgetFor(st, addDays(nws, i)); if (b) { sales += b.sales; traffic += b.traffic; n++; } } return n ? { sales, traffic, spg: traffic ? sales / traffic : null } : null; };
+  const goalRows = allStores.map(st => ({ st, b: wkBud(st), f: S.daily?.stores?.[st] ? storeFocus(S.daily.stores[st], 1)[0] : null, need: sc(st) })).sort((a, b) => b.need - a.need);
+  const goalText = () => {
+    const tb = goalRows.reduce((a, r) => (a.s += r.b?.sales || 0, a.t += r.b?.traffic || 0, a), { s: 0, t: 0 });
+    const L = [];
+    if (tb.s) L.push(`Market: ${moneyK(tb.s)} sales budget this week${tb.t ? `, SPG with cancellations $${Math.round(tb.s / tb.t)}` : ''}.`);
+    if (topL) L.push(`Lever: ${topL.label}${topL.goal != null ? ` from ${fmtMetric(topL.key, topL.value)} to ${fmtMetric(topL.key, topL.goal)}` : ''}${lever ? `, through ${plainOf(lever.key)}` : ''}.`);
+    goalRows.filter(r => r.b || (r.f && !r.f.stretch)).slice(0, 6).forEach(r => L.push(`${r.st}: ${r.b ? `${moneyK(r.b.sales)} this week${r.b.spg ? `, SPG $${Math.round(r.b.spg)}` : ''}` : 'no budget loaded'}${r.f && !r.f.stretch ? `. ${r.f.label} from ${fmtMetric(r.f.key, r.f.value)} to ${fmtMetric(r.f.key, r.f.goal)}` : ''}.`));
+    L.push(`Visits: every planned visit logged the same day, and every store gets a visit or a remote call.`);
+    return L.join('\n');
+  };
+  const coachPlanText = () => {
+    const L = [];
+    wkDays.filter(d => d.date >= t0 || d.status !== 'done').forEach(d => dayStores(d).forEach(st => {
+      const lv = suggestLever(S.daily?.stores?.[st]?.mtd), lvL = lv ? LEVERS.find(l => l.key === lv)?.label : null;
+      const picks = rsaPicks(S.rsa?.people || [], st, DEFAULT_GOALS, pace, 2, S.weeks || {});
+      L.push(`${dayLabel(d.date)} ${st}: ${lvL ? lvL.toLowerCase() : 'hold the line'}${picks.length ? `. Coach ${picks.map(p => `${titleName(p.name)}${p.focus && !p.focus.stretch ? ` on ${p.focus.label.toLowerCase()}` : ''}`).join(' and ')}` : ''}.`);
+    }));
+    missingHigh.forEach(st => L.push(`Remote call ${st}: coach through the store leader on ${plainOf(storeFocus(S.daily?.stores?.[st] || {}, 1)[0]?.key || 'financePct')}.`));
+    return L.join('\n');
+  };
+
   // Wins and opportunities, in plain words.
   const wins = [
     ...storeWins.map(r => `${r.s}: ${moneyK(r.p.k.netSales)}, ${pct(r.bud ?? 0)} to budget${r.spg != null ? `, SPG with cancellations ${pct(r.spg)} vs LY` : ''}`),
@@ -3042,6 +3094,8 @@ async function viewOne() {
   const doc = saved || { id: oneId(email, ws), email, name: who.name || email, weekStart: ws, status: 'draft', coaching: '', actions: [{}, {}, {}], support: '', supportBy: '', mmNotes: '', vpNotes: '' };
   if (!doc.actions) doc.actions = [{}, {}, {}];
   while (doc.actions.length < 3) doc.actions.push({});
+  if (!doc.planInput) doc.planInput = {};
+  if (holder && canHoldOne()) { if (doc.goals == null) doc.goals = goalText(); if (doc.coachPlan == null) doc.coachPlan = coachPlanText(); }
   if (!saved && holder && canHoldOne()) {
     doc.coaching = coachText();
     const sg = suggest(); for (let i = 0; i < 3 && sg[i]; i++) doc.actions[i] = sg[i];
@@ -3079,6 +3133,7 @@ async function viewOne() {
     </tbody></table></div>` : '';
   const pTable = (arr, empty) => arr.length ? `<ul class="blist">${arr.map(p => `<li><b>${esc(titleName(p.name))}</b> (${esc(p.store)}): $${Math.round(p.wk.sph)} an hour on ${Math.round(p.wk.hours)} hours, ${moneyK(p.wk.sales)}${p.wk.priorSph ? ` <span class="small muted">(was $${Math.round(p.wk.priorSph)})</span>` : ''}</li>`).join('')}</ul>` : `<p class="small muted">${empty}</p>`;
   const prevActs = (prev?.actions || []).filter(hasCommitment);
+  const N0 = prevActs.length ? 3 : 2;
 
   v.innerHTML = `
   <div class="spread">
@@ -3089,27 +3144,26 @@ async function viewOne() {
       <label for="owk" style="margin:0">Week<select id="owk">${weeks.map(w => `<option value="${w}" ${w === ws ? 'selected' : ''}>Week of ${esc(weekRange(w))}</option>`).join('')}</select></label>
     </div>
   </div>
-  ${sec('glance', '1', 'Last week at a glance', 'The market, Monday to Sunday.', `${glance}${storeTable}`)}
-  ${sec('wins', '2', 'Wins to call out', 'Stores, people, and how the week was run. Start here.', `${li(wins.filter(w => !topPeople.slice(0, 3).some(p => w === peopleLine(p))))}
-    ${pTable(topPeople, 'No consultant numbers for that week yet.').replace('<ul class="blist">', '<p class="eyebrow">Who performed (sales per hour for the week, 12+ hours)</p><ul class="blist">')}`)}
-  ${sec('opps', '3', 'Opportunities', "Who didn't perform, and where the week slipped.", `${li(opps.filter(o => !lowPeople.some(p => o.startsWith(peopleLine(p)))))}
-    ${pTable(lowPeople, 'Nobody under the minimum or slipping last week.').replace('<ul class="blist">', `<p class="eyebrow">Who didn't (under the minimum or down 25%+ from their month)</p><ul class="blist">`)}
-    ${rsaEnd && !sameMonth ? `<p class="small muted">The month turned over during this week, so consultant numbers are month to date through ${esc(shortDate(rsaEnd.to))}.</p>` : ''}`)}
-  ${sec('ran', '4', `How ${esc(first)} ran the week`, 'Visits, coaching and follow-through.', `
-    <div class="tiles">
-      ${tileFor('Visits', `${inPerson.length}${planned ? ' of ' + planned : ''}`, planned ? 'full-day, in person' : 'no plan saved that week', planned ? (missed ? 'red' : 'green') : '')}
-      ${tileFor('Remote coaching', String(remote.length), 'calls logged', remote.length ? 'green' : '')}
-      ${tileFor('People coached', String(coachedN), `${practiceN} stand-up practices`, coachedN >= 5 ? 'green' : coachedN ? 'amber' : 'red')}
-      ${tileFor('Commitments', String(commitN), 'set on visits', '')}
+  ${sec('glance', '1', 'Last week in brief', `How the market did and what ${esc(first)} did. Five minutes, then move to this week.`, `${glance}
+    <div class="two" style="gap:14px">
+      <div><p class="eyebrow">Wins</p>${li(wins.slice(0, 3))}</div>
+      <div><p class="eyebrow">Opportunities</p>${li(opps.slice(0, 3))}</div>
     </div>
-    ${notSeen.length ? `<div class="warnbox"><b>No visit or call:</b> ${notSeen.map(esc).join(', ')}</div>` : ''}
+    <p style="margin:8px 0 0"><b>What ${esc(first)} did:</b> ${inPerson.length}${planned ? ` of ${planned}` : ''} visits, ${remote.length} remote call${remote.length === 1 ? '' : 's'}, ${coachedN} ${coachedN === 1 ? 'person' : 'people'} coached, ${practiceN} practice${practiceN === 1 ? '' : 's'} run, ${commitN} commitment${commitN === 1 ? '' : 's'} set${dueWk.length ? `, ${dueDone} of ${dueWk.length} due commitments hit` : ''}.${notSeen.length ? ` <span class="warn">No visit or call: ${esc(notSeen.join(', '))}.</span>` : ''}</p>
+    <details class="hist" style="margin-top:10px"><summary>See the detail (stores, people, visits)</summary>
+    ${storeTable}
+    ${pTable(topPeople, 'No consultant numbers for that week yet.').replace('<ul class="blist">', '<p class="eyebrow">Who performed (sales per hour for the week, 12+ hours)</p><ul class="blist">')}
+    ${pTable(lowPeople, 'Nobody under the minimum or slipping last week.').replace('<ul class="blist">', `<p class="eyebrow">Who didn't (under the minimum or down 25%+ from their month)</p><ul class="blist">`)}
+    ${rsaEnd && !sameMonth ? `<p class="small muted">The month turned over during this week, so consultant numbers are month to date through ${esc(shortDate(rsaEnd.to))}.</p>` : ''}
     ${hasFliq(who) ? (() => { const fv = vw.filter(x => numOf(x.fliq?.floor)); const u = fv.reduce((t2, x) => t2 + (numOf(x.fliq.using) || 0), 0), fl = fv.reduce((t2, x) => t2 + numOf(x.fliq.floor), 0);
       return `<p class="small" style="margin:8px 0 0"><b>FrontLine IQ:</b> ${fv.length ? `${u} of ${fl} associates using it across ${fv.length} visit${fv.length > 1 ? 's' : ''} (${Math.round(u / fl * 100)}%).` : 'not checked on any visit that week.'}</p>`; })() : ''}
     ${schedChanges.length ? `<p class="eyebrow" style="margin-top:10px">Schedule changes that week</p><ul class="blist">${schedChanges.map(a => `<li><b>${esc(a.reason)}</b>${a.note ? ': ' + esc(a.note) : ''} <span class="small muted">(${esc(changeLines(a).join('; '))})</span></li>`).join('')}</ul>` : ''}
     <p class="eyebrow" style="margin-top:10px">Commitments due last week</p>
-    ${dueWk.length ? `<ul class="blist">${dueWk.map(({ x, a, au }) => `<li><b>${esc(x.store)}:</b> ${esc(commitmentText(a))} ${au?.v ? `<span class="rv ${au.v === 'yes' ? 'done' : au.v === 'partial' ? 'part' : 'not'}">${au.v === 'yes' ? 'Done' : au.v === 'partial' ? 'Moving' : 'Not yet'}</span>` : ''}</li>`).join('')}</ul>` : '<p class="small muted">None were due that week.</p>'}`)}
-  ${prevActs.length ? sec('prev', '5', "Last 1 on 1's commitments", 'Where they stand today. Review them first.', `<ul class="blist">${prevActs.map(a => { const au = oneFollow(a, stores, email, prev.weekStart); return `<li>${esc(commitmentText(a))} ${au?.v ? `<span class="rv ${au.v === 'yes' ? 'done' : au.v === 'partial' ? 'part' : 'not'}">${au.v === 'yes' ? 'Done' : au.v === 'partial' ? 'Moving' : 'Not yet'}</span> <span class="small">${esc(au.text)}</span>` : '<span class="small muted">Talk it through.</span>'}</li>`; }).join('')}</ul>`) : ''}
-  ${sec('lever', prevActs.length ? '6' : '5', 'The lever to pull', 'The outcome to move, then the input to coach under it.', `${LS.length ? `<div class="fcard" style="border-left:5px solid #003B4A;margin:0 0 12px">
+    ${dueWk.length ? `<ul class="blist">${dueWk.map(({ x, a, au }) => `<li><b>${esc(x.store)}:</b> ${esc(commitmentText(a))} ${au?.v ? `<span class="rv ${au.v === 'yes' ? 'done' : au.v === 'partial' ? 'part' : 'not'}">${au.v === 'yes' ? 'Done' : au.v === 'partial' ? 'Moving' : 'Not yet'}</span>` : ''}</li>`).join('')}</ul>` : '<p class="small muted">None were due that week.</p>'}
+    </details>`)}
+  ${prevActs.length ? sec('prev', '2', "Last 1 on 1's commitments", 'Where they stand today. Review them first.', `<ul class="blist">${prevActs.map(a => { const au = oneFollow(a, stores, email, prev.weekStart); return `<li>${esc(commitmentText(a))} ${au?.v ? `<span class="rv ${au.v === 'yes' ? 'done' : au.v === 'partial' ? 'part' : 'not'}">${au.v === 'yes' ? 'Done' : au.v === 'partial' ? 'Moving' : 'Not yet'}</span> <span class="small">${esc(au.text)}</span>` : '<span class="small muted">Talk it through.</span>'}</li>`; }).join('')}</ul>`) : ''}
+  <p class="eyebrow" style="margin:18px 0 6px">This week · ${esc(weekRange(nws))}</p>
+  ${sec('lever', String(N0), 'The lever to pull', 'The outcome to move this week, then the input to coach under it.', `${LS.length ? `<div class="fcard" style="border-left:5px solid #003B4A;margin:0 0 12px">
       <div class="spread" style="margin:0"><div><p class="eyebrow">${topL && topL.key === suggestLever(mk) ? 'The lever (suggested from the numbers)' : 'The lever'}</p><h3 style="margin:0 0 4px">${topL ? esc(topL.label) : 'Every lever is at goal'}</h3>
         ${topL ? `<p style="margin:0">Market at <b>${esc(fmtMetric(topL.key, topL.value))}</b>${topL.goal != null ? `, goal ${esc(fmtMetric(topL.key, topL.goal))}` : ''}. ${esc(topL.why)}</p>` : ''}</div>
         ${canEdit ? `<label for="olever" style="margin:0">Lever<select id="olever">${LS.map(l => `<option value="${l.key}" ${topL?.key === l.key ? 'selected' : ''}>${esc(l.label)}${l.value != null ? ` (${esc(fmtMetric(l.key, l.value))})` : ''}</option>`).join('')}</select></label>` : ''}</div>
@@ -3126,10 +3180,29 @@ async function viewOne() {
       <p class="small" style="margin:4px 0 0"><b>Practice it standing up:</b> ${esc(drill.title)}. ${esc(drill.guest)}</p>
     </div>
     ${lever2 ? `<p class="small" style="margin-top:8px"><b>Next input:</b> ${esc(lever2.label)}, ${lever2.hits.length} of ${lever2.of} stores under goal (${lever2.hits.slice(0, 2).map(h => esc(h.store)).join(', ')}).</p>` : ''}` : '<p>Every store number is at goal for the week. Pick a stretch goal together.</p>'}`, true)}
-  ${sec('focus', prevActs.length ? '7' : '6', 'Where the focus goes this week', 'Stores with the most need right now, and whether they are on the plan.', `
-    ${focusStores.length ? `<ul class="blist">${[...new Set([...leverStores, ...focusStores])].map(s => `<li>${needChip(S.scores[s]?.score)} <b>${esc(s)}</b>: ${esc((S.scores[s]?.parts || []).slice(0, 2).map(p => p.text).join('. '))}${thisPlan ? (onPlan.has(s) ? ' <span class="pill done">On the plan</span>' : ' <span class="pill check">Not on the plan</span>') : ''}${leverSet.has(s) ? ' <span class="pill">Lever store</span>' : ''}</li>`).join('')}</ul>` : '<p class="small muted">No scores yet.</p>'}
-    ${thisPlan ? '' : `<p class="small muted">${esc(first)} has no plan saved for this week yet.</p>`}`)}
-  ${!holder ? '' : sec('coach', prevActs.length ? '8' : '7', `Coaching for ${esc(first)}`, 'Written from the numbers. Change anything.', `
+  ${sec('sched', String(N0 + 1), `${esc(first)}'s schedule`, 'Review the week together. Suggestions come from store need, the lever stores and drive time. Add your input on any day.', `
+    ${thisPlan ? `<div class="scroller"><table class="grid"><thead><tr><th>Day</th><th>Store</th><th class="num">Need</th><th>Drive</th><th>Your input</th></tr></thead><tbody>
+      ${wkDays.map(d => { const st = dayStores(d), x = dayDrive(who, d);
+        return `<tr><td class="nm">${esc(dayLabel(d.date))}${d.status === 'done' ? ' <span class="good">✓</span>' : ''}</td><td>${st.length ? st.map(esc).join(' + ') : '<span class="muted">Open</span>'}${st.some(z => leverSet.has(z)) ? ' <span class="pill">Lever</span>' : ''}</td>
+        <td class="num">${st.length ? needChip(S.scores[st[0]]?.score) : ''}</td><td class="small ${x?.long ? 'warn' : 'muted'}">${x ? `${driveText(x.out)} each way` : ''}</td>
+        <td style="min-width:220px"><input id="opi_${d.date}" data-field="planInput.${d.date}" value="${esc(doc.planInput[d.date] || '')}" ${dis} placeholder="${canEdit ? 'Your input for this day' : ''}" style="width:100%"></td></tr>`; }).join('')}
+      </tbody></table></div>
+      <p class="small muted" style="margin:6px 0 0">Days off: ${esc(safeOff(thisPlan.off || who.off, who.role).map(x => DAY_LONG[x]).join(' and '))}.${(() => { const w = weekDrive(who, thisPlan); return w ? ` About ${driveText(w.total)} driving this week.` : ''; })()}</p>`
+    : `<div class="warnbox">${esc(first)} has no plan saved for this week. Build it together on the call: open Weekly plans and pick their week.</div>`}
+    <p class="eyebrow" style="margin-top:12px">Suggested input</p>
+    ${schedSugg.length ? `<ul class="blist">${schedSugg.map((g, k) => `<li>${g.date ? `<b>${esc(dayLabel(g.date))}:</b> ` : ''}${esc(g.text)}${canEdit ? ` <button type="button" class="link" data-osg="${k}">Use</button>` : ''}</li>`).join('')}</ul>` : '<p class="small muted">The plan covers the stores that need them most. Nothing to change.</p>'}
+    ${fieldBox('oplannote', 'Your input on the week overall', doc.planNote, 2, '', 'planNote', dis)}
+    <p class="small muted" style="margin:6px 0 0">${esc(first)} sees your input on their week page. They make the changes; anything they change still asks for a reason.</p>`, true)}
+  ${sec('goals', String(N0 + 2), 'Goals for the week', 'Budget for the week by store, plus the lever and the biggest gap. Agree on them together.', `
+    ${goalRows.some(r => r.b) ? `<div class="scroller"><table class="grid"><thead><tr><th>Store</th><th class="num">Sales budget</th><th class="num">SPG budget</th><th>Biggest gap</th><th class="num">Need</th></tr></thead><tbody>
+      ${goalRows.map(r => `<tr><td class="nm">${esc(r.st)}</td><td class="num">${r.b ? moneyK(r.b.sales) : '--'}</td><td class="num">${r.b?.spg ? '$' + Math.round(r.b.spg) : '--'}</td><td>${r.f && !r.f.stretch ? `${esc(r.f.label)} ${esc(fmtMetric(r.f.key, r.f.value))} to ${esc(fmtMetric(r.f.key, r.f.goal))}` : '<span class="muted">At goal</span>'}</td><td class="num">${needChip(r.need || null)}</td></tr>`).join('')}
+    </tbody></table></div>` : '<p class="small muted">No daily budget loaded for this week yet.</p>'}
+    ${fieldBox('ogoals', 'Goals we agreed', doc.goals, 7, 'Suggested from the budget and the numbers. Change anything.', 'goals', dis)}
+    ${canEdit ? `<button type="button" class="link" id="ogoalsre">Rewrite from the numbers</button>` : ''}`, true)}
+  ${sec('cplan', String(N0 + 3), 'Coaching plan by visit', 'For each visit on the plan: the lever and the two people to coach. Change anything.', `
+    ${fieldBox('ocplan', 'Coaching plan', doc.coachPlan, 8, '', 'coachPlan', dis)}
+    ${canEdit ? `<button type="button" class="link" id="ocplanre">Rewrite from the numbers</button>` : ''}`, true)}
+  ${!holder ? '' : sec('coach', String(N0 + 4), `Coaching for ${esc(first)}`, 'Written from the numbers. Change anything.', `
     ${fieldBox('ocoach', 'Talk track', doc.coaching, 12, '', 'coaching', dis)}
     ${canEdit ? `<button type="button" class="link" id="oregen">Rewrite from the numbers</button>` : ''}`, true)}
   ${sec('acts', '✓', 'Commitments', `Up to 3, each from X to Y by a date, and how. ${esc(first)} owns them.`, `
@@ -3172,12 +3245,15 @@ async function viewOne() {
       'Wins', ...wins.slice(0, 5).map(w => `- ${w}`), '',
       'Opportunities', ...opps.slice(0, 5).map(w => `- ${w}`), '',
       ...(lever ? [`The lever: ${lever.label}. Focus on ${leverStores.join(' and ')}${leverPeople.length ? `. See ${leverPeople.slice(0, 3).map(d => titleName(d.name)).join(', ')} first` : ''}.`, ''] : []),
+      ...(Object.values(doc.planInput || {}).some(x => String(x).trim()) || String(doc.planNote || '').trim() ? ['Your week', ...(wkDays.filter(d => String(doc.planInput?.[d.date] || '').trim()).map(d => `- ${dayLabel(d.date)} ${dayStores(d).join(' + ')}: ${doc.planInput[d.date].trim()}`)), ...(String(doc.planNote || '').trim() ? [doc.planNote.trim()] : []), ''] : []),
+      ...(String(doc.goals || '').trim() ? ['Goals this week', doc.goals.trim(), ''] : []),
+      ...(String(doc.coachPlan || '').trim() ? ['Coaching plan', doc.coachPlan.trim(), ''] : []),
       ...(acts.length ? ['Your commitments', ...acts.map((a, i) => `${i + 1}. ${commitmentText(a)}`), ''] : []),
       ...(String(doc.support || '').trim() ? [`My part: ${doc.support.trim()}${doc.supportBy ? ` by ${shortDate(doc.supportBy)}` : ''}`, ''] : []),
       "Let's go.", firstOf(vp.name) || ''].join('\n');
   };
   $('#ocopy').onclick = async () => { try { await navigator.clipboard.writeText(recap()); toast('Recap copied. Paste it into a text or Teams.'); } catch (e) { toast('Could not copy. Select the text and copy it.', true); } };
-  $('#oprint').onclick = () => { ['glance', 'wins', 'opps', 'ran', 'prev', 'lever', 'focus', 'coach', 'acts', 'notes'].forEach(k => O_OPEN.add(k)); v.querySelectorAll('.vsec').forEach(s => s.classList.add('open')); setTimeout(() => window.print(), 200); };
+  $('#oprint').onclick = () => { ['glance', 'prev', 'lever', 'sched', 'goals', 'cplan', 'coach', 'acts', 'notes'].forEach(k => O_OPEN.add(k)); v.querySelectorAll('.vsec').forEach(s => s.classList.add('open')); setTimeout(() => window.print(), 200); };
   if (!canEdit) return;
   wireMics(v);
   let tmr = null;
@@ -3194,6 +3270,14 @@ async function viewOne() {
     later();
   }));
   $('#oregen').onclick = () => { doc.coaching = coachText(); $('#ocoach').value = doc.coaching; later(); };
+  $('#ogoalsre').onclick = () => { doc.goals = goalText(); $('#ogoals').value = doc.goals; later(); };
+  $('#ocplanre').onclick = () => { doc.coachPlan = coachPlanText(); $('#ocplan').value = doc.coachPlan; later(); };
+  v.querySelectorAll('[data-osg]').forEach(b => b.onclick = () => {
+    const g = schedSugg[+b.dataset.osg];
+    if (g.date && $('#opi_' + g.date)) { const el = $('#opi_' + g.date); el.value = el.value ? el.value + ' ' + g.text : g.text; doc.planInput[g.date] = el.value; }
+    else { const el = $('#oplannote'); el.value = el.value ? el.value + '\n' + g.text : g.text; doc.planNote = el.value; }
+    b.remove(); later();
+  });
   $('#osugg').onclick = () => {
     const have = new Set(doc.actions.filter(hasCommitment).map(a => String(a.what).toLowerCase()));
     let n = 0; const sg = suggest().filter(s => !have.has(s.what.toLowerCase()));
@@ -3960,7 +4044,8 @@ function viewGuide() {
     </ul>
     <h3 style="margin-top:18px">Monday: your 1 on 1</h3>
     <ul>
-      <li>Each week Orlando or your VP holds a 1 on 1 with you on the week that just closed, Monday to Sunday. It covers wins and opportunities for your stores and people, who performed and who didn't, how your visits went, and the one lever your market needs to pull.</li>
+      <li>Each week Orlando or your VP holds a 1 on 1 with you. It starts with a short recap of the week that just closed (Monday to Sunday): how your stores and people did and how you ran your visits. Then it moves to this week: the lever to pull, your schedule, your goals by store and who you'll coach on each visit.</li>
+      <li>Their input on your week shows on <b>My week</b>, at the top and on each day it's about. You make the changes; any change still asks for a reason.</li>
       <li>You leave with up to 3 commitments, each from X to Y by a date, with how you'll get there. They show on your <b>Daily brief</b> all week with where each one stands, and on <b>My 1 on 1</b>.</li>
       <li>Next week's 1 on 1 starts by reviewing them.</li>
     </ul>
