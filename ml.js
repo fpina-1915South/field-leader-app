@@ -4,7 +4,7 @@
 import {
   normalizeHeader, toNumber, parseDate, slug, canonicalStore, isKnownStore, REGIONS, STORE_METRICS,
   COACHING, METRICS, pickFocus, pickStoreFocus, goalsFor, DEFAULT_GOALS, isOutlet, minSphFor, fmt, weeklyTarget
-} from './base.js?v=202610071107';
+} from './base.js?v=202610071137';
 
 const numOrNull = v => (v === '' || v === null || v === undefined ? null : toNumber(v));
 
@@ -347,25 +347,64 @@ export const FLIQ_DAILY = [
 // ---------------------------------------------------------------- drive time between stores
 // City-level coordinates for each store. Drive time is an estimate: straight-line miles x 1.15 for
 // roads, at 60 mph. Good enough to keep a Market Leader from a 3-hour afternoon drive; not routing.
+// Store locations from the Ashley store locator (used for drive times and the at-the-store check on visits).
 export const STORE_GEO = {
-  'Tallahassee': [30.44, -84.28], 'Thomasville': [30.84, -83.98], 'Albany': [31.58, -84.16], 'Macon': [32.84, -83.63],
-  'Warner Robins': [32.61, -83.62], 'Dothan': [31.22, -85.39], 'Enterprise': [31.32, -85.86], 'Panama City': [30.18, -85.66],
-  'Valdosta': [30.83, -83.28], 'Opelika': [32.65, -85.38], 'Columbus': [32.46, -84.99],
-  'Town Center': [30.2597, -81.5246], 'North': [30.4788, -81.6376], 'Orange Park': [30.1992, -81.7381], 'Brunswick': [31.1994, -81.4809],
-  'Yulee': [30.6317, -81.5489], 'St. Augustine': [29.8684, -81.3313], 'Outlet Regency': [30.3180, -81.5564],
-  'Mobile': [30.68, -88.15], "D'Iberville": [30.43, -88.89], 'Spanish Fort': [30.67, -87.92], 'Pensacola': [30.47, -87.21],
-  'Crestview': [30.76, -86.57], 'Ft. Walton': [30.42, -86.62], 'Outlet Pensacola': [30.47, -87.21],
-  'Greensboro': [36.07, -79.79], 'Winston Salem': [36.10, -80.24], 'Burlington': [36.10, -79.44], 'Danville': [36.59, -79.40],
-  'Outlet Greensboro': [36.07, -79.79],
-  'Baton Rouge': [30.45, -91.15], 'Lafayette': [30.22, -92.02], 'Gonzales': [30.24, -90.92], 'Harahan': [29.94, -90.20],
-  'Houma': [29.60, -90.72], 'Lake Charles': [30.23, -93.22], 'Opelousas': [30.53, -92.08], 'Ponchatoula': [30.44, -90.44],
-  'Hattiesburg': [31.33, -89.29], 'Flowood': [32.31, -90.14], 'Harvey': [29.90, -90.08]
+  'Tallahassee': [30.4316, -84.2276],
+  'Thomasville': [30.8444, -83.9469],
+  'Albany': [31.6165, -84.205],
+  'Macon': [32.9308, -83.7136],
+  'Warner Robins': [32.6193, -83.6936],
+  'Dothan': [31.2635, -85.4389],
+  'Enterprise': [31.3051, -85.8218],
+  'Panama City': [30.1904, -85.6482],
+  'Valdosta': [30.8241, -83.3189],
+  'Opelika': [32.6138, -85.4097],
+  'Columbus': [32.5498, -84.94],
+  'Town Center': [30.2597, -81.5246],
+  'North': [30.4788, -81.6376],
+  'Orange Park': [30.1992, -81.7381],
+  'Brunswick': [31.1994, -81.4809],
+  'Yulee': [30.6317, -81.5489],
+  'St. Augustine': [29.8684, -81.3313],
+  'Outlet Regency': [30.318, -81.5564],
+  'Mobile': [30.6514, -88.1151],
+  "D'Iberville": [30.4534, -88.9042],
+  'Spanish Fort': [30.6646, -87.8473],
+  'Pensacola': [30.4935, -87.1913],
+  'Crestview': [30.7349, -86.5637],
+  'Ft. Walton': [30.4305, -86.6071],
+  'Outlet Pensacola': [30.482, -87.2163],
+  'Greensboro': [36.0525, -79.8875],
+  'Winston Salem': [36.069, -80.3238],
+  'Burlington': [36.0696, -79.523],
+  'Danville': [36.5979, -79.4224],
+  'Outlet Greensboro': [36.0386, -79.8479],
+  'Baton Rouge': [30.4353, -91.0849],
+  'Lafayette': [30.185, -92.0731],
+  'Gonzales': [30.2124, -90.9286],
+  'Harahan': [29.9658, -90.1868],
+  'Houma': [29.6115, -90.7496],
+  'Lake Charles': [30.1902, -93.1787],
+  'Opelousas': [30.5171, -92.0663],
+  'Ponchatoula': [30.4802, -90.3266],
+  'Hattiesburg': [31.3239, -89.3863],
+  'Flowood': [32.3441, -90.0569],
+  'Harvey': [29.8768, -90.051]
 };
 // Road drive times in minutes, store to store: routed road times scaled to typical highway speeds (no traffic). Pairs not here fall back to
 // the straight-line estimate below.
 export const ROAD_MIN = { 'Albany|Columbus': 90, 'Albany|Macon': 110, 'Albany|Opelika': 120, 'Albany|Panama City': 180, 'Albany|Tallahassee': 105, 'Albany|Thomasville': 65, 'Albany|Valdosta': 85, 'Albany|Warner Robins': 90, 'Baton Rouge|Flowood': 155, 'Baton Rouge|Gonzales': 20, 'Baton Rouge|Harahan': 70, 'Baton Rouge|Harvey': 80, 'Baton Rouge|Hattiesburg': 145, 'Baton Rouge|Houma': 85, 'Baton Rouge|Lafayette': 65, 'Baton Rouge|Lake Charles': 120, 'Baton Rouge|Opelousas': 70, 'Baton Rouge|Ponchatoula': 45, 'Brunswick|North': 55, 'Brunswick|Orange Park': 80, 'Brunswick|Outlet Regency': 70, 'Brunswick|St. Augustine': 105, 'Brunswick|Town Center': 75, 'Brunswick|Yulee': 55, 'Burlington|Danville': 50, 'Burlington|Greensboro': 25, 'Burlington|Outlet Greensboro': 20, 'Burlington|Winston Salem': 50, 'Columbus|Macon': 100, 'Columbus|Opelika': 40, 'Columbus|Panama City': 195, 'Columbus|Tallahassee': 190, 'Columbus|Thomasville': 155, 'Columbus|Valdosta': 175, 'Columbus|Warner Robins': 85, "Crestview|D'Iberville": 140, 'Crestview|Dothan': 105, 'Crestview|Enterprise': 90, 'Crestview|Ft. Walton': 30, 'Crestview|Mobile': 95, 'Crestview|Outlet Pensacola': 45, 'Crestview|Pensacola': 45, 'Crestview|Spanish Fort': 80, "D'Iberville|Dothan": 240, "D'Iberville|Enterprise": 210, "D'Iberville|Ft. Walton": 160, "D'Iberville|Mobile": 50, "D'Iberville|Outlet Pensacola": 105, "D'Iberville|Pensacola": 105, "D'Iberville|Spanish Fort": 65, 'Danville|Greensboro': 55, 'Danville|Outlet Greensboro': 50, 'Danville|Winston Salem': 75, 'Dothan|Enterprise': 30, 'Dothan|Ft. Walton': 125, 'Dothan|Mobile': 190, 'Dothan|Outlet Pensacola': 145, 'Dothan|Pensacola': 140, 'Dothan|Spanish Fort': 175, 'Enterprise|Ft. Walton': 115, 'Enterprise|Mobile': 165, 'Enterprise|Outlet Pensacola': 130, 'Enterprise|Pensacola': 130, 'Enterprise|Spanish Fort': 160, 'Flowood|Gonzales': 170, 'Flowood|Harahan': 175, 'Flowood|Harvey': 185, 'Flowood|Hattiesburg': 100, 'Flowood|Houma': 205, 'Flowood|Lafayette': 220, 'Flowood|Lake Charles': 275, 'Flowood|Opelousas': 220, 'Flowood|Ponchatoula': 135, 'Ft. Walton|Mobile': 115, 'Ft. Walton|Outlet Pensacola': 60, 'Ft. Walton|Pensacola': 60, 'Ft. Walton|Spanish Fort': 95, 'Gonzales|Harahan': 50, 'Gonzales|Harvey': 65, 'Gonzales|Hattiesburg': 150, 'Gonzales|Houma': 70, 'Gonzales|Lafayette': 80, 'Gonzales|Lake Charles': 135, 'Gonzales|Opelousas': 85, 'Gonzales|Ponchatoula': 60, 'Greensboro|Outlet Greensboro': 5, 'Greensboro|Winston Salem': 30, 'Harahan|Harvey': 20, 'Harahan|Hattiesburg': 110, 'Harahan|Houma': 60, 'Harahan|Lafayette': 130, 'Harahan|Lake Charles': 185, 'Harahan|Opelousas': 130, 'Harahan|Ponchatoula': 55, 'Harvey|Hattiesburg': 110, 'Harvey|Houma': 65, 'Harvey|Lafayette': 140, 'Harvey|Lake Charles': 195, 'Harvey|Opelousas': 145, 'Harvey|Ponchatoula': 65, 'Hattiesburg|Houma': 160, 'Hattiesburg|Lafayette': 205, 'Hattiesburg|Lake Charles': 260, 'Hattiesburg|Opelousas': 210, 'Hattiesburg|Ponchatoula': 105, 'Houma|Lafayette': 100, 'Houma|Lake Charles': 160, 'Houma|Opelousas': 115, 'Houma|Ponchatoula': 95, 'Lafayette|Lake Charles': 70, 'Lafayette|Opelousas': 30, 'Lafayette|Ponchatoula': 105, 'Lake Charles|Opelousas': 80, 'Lake Charles|Ponchatoula': 160, 'Macon|Opelika': 135, 'Macon|Panama City': 280, 'Macon|Tallahassee': 195, 'Macon|Thomasville': 155, 'Macon|Valdosta': 140, 'Macon|Warner Robins': 30, 'Mobile|Outlet Pensacola': 60, 'Mobile|Pensacola': 60, 'Mobile|Spanish Fort': 20, 'North|Orange Park': 25, 'North|Outlet Regency': 15, 'North|St. Augustine': 50, 'North|Town Center': 20, 'North|Yulee': 20, 'Opelika|Panama City': 200, 'Opelika|Tallahassee': 215, 'Opelika|Thomasville': 180, 'Opelika|Valdosta': 200, 'Opelika|Warner Robins': 115, 'Opelousas|Ponchatoula': 110, 'Orange Park|Outlet Regency': 25, 'Orange Park|St. Augustine': 40, 'Orange Park|Town Center': 25, 'Orange Park|Yulee': 45, 'Outlet Greensboro|Winston Salem': 30, 'Outlet Pensacola|Pensacola': 5, 'Outlet Pensacola|Spanish Fort': 40, 'Outlet Regency|St. Augustine': 40, 'Outlet Regency|Town Center': 10, 'Outlet Regency|Yulee': 35, 'Panama City|Tallahassee': 115, 'Panama City|Thomasville': 140, 'Panama City|Valdosta': 180, 'Panama City|Warner Robins': 260, 'Pensacola|Spanish Fort': 40, 'St. Augustine|Town Center': 35, 'St. Augustine|Yulee': 70, 'Tallahassee|Thomasville': 45, 'Tallahassee|Valdosta': 80, 'Tallahassee|Warner Robins': 180, 'Thomasville|Valdosta': 45, 'Thomasville|Warner Robins': 140, 'Town Center|Yulee': 40, 'Valdosta|Warner Robins': 120 };
 // A Market Leader's day starts and ends at home. Over this, one way, the day is flagged as a long drive.
 export const LONG_DRIVE_MIN = 90;
+// Time in the store: a full-day visit runs 6 to 8 hours; a half day or a stop on a multi-store day 3 to 4.
+export const VISIT_STD = { full: { key: 'full', min: 6, max: 8, label: 'Full-day visit' }, half: { key: 'half', min: 3, max: 4, label: 'Half-day or multi-store visit' } };
+// Within this distance of the store (miles) counts as at the store.
+export const AT_STORE_MI = 0.3;
+export function milesBetween(a, b) {
+  const R = 3959, rad = x => x * Math.PI / 180, dLat = rad(b[0] - a[0]), dLon = rad(b[1] - a[1]);
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(rad(a[0])) * Math.cos(rad(b[0])) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
 export function driveMin(a, b) {
   if (a && b && a !== b) { const k = [a, b].sort().join('|'); if (ROAD_MIN[k] != null) return ROAD_MIN[k]; }
   const p = STORE_GEO[a], q = STORE_GEO[b];

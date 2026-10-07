@@ -1,16 +1,16 @@
-import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610071107';
-import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610071107';
+import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610071137';
+import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610071137';
 import {
   STORES, DISTRICTS, canonicalStore, isKnownStore, parseRsa, rangeFromFileName, parseTeamRoster, resolveReportNames,
   paceFactor, DEFAULT_GOALS, cidOf, status, fmt, goalsFor, TEAM_FOCUS, pickStoreFocus
-} from './base.js?v=202610071107';
+} from './base.js?v=202610071137';
 import {
   iso, fromIso, addDays, daysApart, weekStartOf, DAY_NAMES, DAY_LONG, dow, DEFAULT_OFF, validOff, safeOff, VISIT_DAYS, STORE_GOALS,
   parseDaily, needScore, band, pct, environment, buildPlan, pivotSuggestion, ELEMENTS, SEGMENTS, AORS, PRACTICE, VISIT_TYPES, kindToType, visitScore, visitSummary, consultantCoaching, drillFor, draggers, helpers, STORE_TO_RSA, hasCommitment, commitmentText, blackoutFor, offChoicesFor, storeFocus, rsaPicks, consultantWeeks, teamSignals,
-  STORE_METRICS, slug, COACHING, METRICS, PLAIN, isOutlet, driveMin, driveText, MAX_SPLIT_MIN, LONG_DRIVE_MIN, LEVERS, leverStatus, suggestLever,
+  STORE_METRICS, slug, COACHING, METRICS, PLAIN, isOutlet, driveMin, driveText, MAX_SPLIT_MIN, LONG_DRIVE_MIN, VISIT_STD, AT_STORE_MI, milesBetween, STORE_GEO, LEVERS, leverStatus, suggestLever,
   consultantTrends, TREND_ROWS, trendFmt, trendRead, TREND_LABEL,
   OFFER_DEFAULT, PLAY, PLAY_CHECKS, PLAY_CHECKS_REMOTE, offerActive, offerMath, FLIQ_CHECKS, FLIQ_CHECKS_REMOTE, FLIQ_DAILY
-} from './ml.js?v=202610071107';
+} from './ml.js?v=202610071137';
 
 // Legacy Sunday-start weeks, read as the Monday week that replaced them.
 function fromSundayPlan(p, week) {
@@ -246,6 +246,9 @@ async function firebaseBackend() {
     mlCoachFor: e => all('mlcoach', ['email', e]),
     mlCoachAll: () => all('mlcoach'),
     saveMlCoach: d => F.setDoc(F.doc(db, 'mlcoach', d.id), d),
+    // Visit flags cleared by the VP or the field coach (kept apart from the visit, which the leader owns).
+    clears: () => all('flagclears'),
+    saveClear: d => F.setDoc(F.doc(db, 'flagclears', d.id), d),
     alerts: () => all('alerts'),
     offer: async () => (await get('config', 'offer'))?.offer || null,
     saveOffer: o => F.setDoc(F.doc(db, 'config', 'offer'), { offer: o, at: new Date().toISOString() }),
@@ -503,6 +506,8 @@ function demoBackend() {
     mlCoachFor: async e => clone(Object.values(ones).filter(d => d.kind === 'mlcoach' && d.email === e)),
     mlCoachAll: async () => clone(Object.values(ones).filter(d => d.kind === 'mlcoach')),
     async saveMlCoach(d) { ones['mlc_' + d.id] = clone({ ...d, kind: 'mlcoach' }); },
+    clears: async () => clone(Object.values(ones).filter(d => d.kind === 'clear')),
+    async saveClear(d) { ones['clr_' + d.id] = clone({ ...d, kind: 'clear' }); },
     alerts: async () => clone(Object.values(alerts)),
     offer: async () => clone(offerDoc),
     async saveOffer(o) { offerDoc = clone(o); },
@@ -610,6 +615,7 @@ async function loadShared() {
   // Each store's numbers carry the store name, so store goals (like the outlet ticket goal) apply.
   Object.entries(daily?.stores || {}).forEach(([name, snap]) => Object.values(snap || {}).forEach(per => { if (per && typeof per === 'object' && per.k) per.store = name; }));
   S.alerts = seesAll() ? await S.be.alerts().catch(() => []) : [];
+  S.clears = Object.fromEntries((await (S.be.clears ? S.be.clears().catch(() => []) : [])).map(c => [c.id, c]));
   S.offer = (await S.be.offer().catch(() => null)) || OFFER_DEFAULT;
   await seedFieldTeam();
   // Consultant week: compare today's RSA upload with the one through last Saturday.
@@ -1795,10 +1801,88 @@ function timeLine(x) {
   return `Started ${clockOf(t.start)} · not submitted`;
 }
 const timePill = x => { const t = visitTime(x), l = timeLine(x); return l ? `<span class="pill ${t.live ? 'set' : ''}" title="${esc(t.auto ? 'Start stamped at the first entry' : 'Start tapped in the app')}">${t.live ? '● ' : ''}${esc(l)}</span>` : ''; };
-function startVisit(V, auto) {
+// Which time standard applies: a full day when the store is the only one on that day's plan, otherwise a
+// half day (multi-store day, or a store not on the plan). Remote calls have no standard.
+function visitStd(V) {
+  if (!V || V.remote) return null;
+  if (V.std) return VISIT_STD[V.std] || null;
+  const plan = (S.vPlans || []).find(p => p.weekStart === weekStartOf(V.date));
+  const day = plan?.days?.find(d => d.date === V.date), st = dayStores(day);
+  return VISIT_STD[st.length === 1 && st[0] === V.store ? 'full' : 'half'];
+}
+// Short visit: submitted, with a start time, under the minimum for its standard.
+function shortVisit(x) {
+  const std = x?.std ? VISIT_STD[x.std] : null, t = visitTime(x);
+  if (!std || x.remote || t.mins == null) return null;
+  return t.mins < std.min * 60 ? { std, mins: t.mins } : null;
+}
+// Where the phone was, checked against the store. Only the distance is kept, never the coordinates.
+function geoCheck(store) {
+  return new Promise(res => {
+    const g = STORE_GEO[store];
+    if (!g) return res({ err: 'nostore', at: new Date().toISOString() });
+    if (!navigator.geolocation) return res({ err: 'unavailable', at: new Date().toISOString() });
+    navigator.geolocation.getCurrentPosition(p => {
+      const dist = milesBetween([p.coords.latitude, p.coords.longitude], g), acc = Math.round(p.coords.accuracy || 0);
+      res({ dist: Math.round(dist * 100) / 100, acc, ok: dist <= AT_STORE_MI + Math.min(acc, 400) / 1609, rough: acc > 1500, at: new Date().toISOString() });
+    }, e => res({ err: e.code === 1 ? 'denied' : e.code === 3 ? 'timeout' : 'unavailable', at: new Date().toISOString() }), { enableHighAccuracy: true, timeout: 12000, maximumAge: 60000 });
+  });
+}
+const geoText = g => !g ? '' : g.err === 'denied' ? 'location not shared' : g.err ? 'location unavailable' : g.rough ? `location too rough to confirm (${(g.acc / 1609).toFixed(1)} mi accuracy)` : g.ok ? 'at the store' : `${g.dist < 10 ? g.dist.toFixed(1) : Math.round(g.dist)} mi from the store`;
+const geoBad = g => !!g && (g.err === 'denied' || (!g.err && !g.rough && !g.ok));
+// Flags for a visit, as pills: short on time, not at the store, no start.
+function flagList(x) {
+  if (!x || x.remote) return [];
+  const out = [], sh = shortVisit(x);
+  if (sh) out.push(`<span class="pill edited" title="${esc(sh.std.label)}: ${sh.std.min} to ${sh.std.max} hours${x.shortReason ? '. Reason: ' + esc(x.shortReason) : ''}">Short: ${esc(durText(sh.mins))} of ${sh.std.min} hr min</span>`);
+  if (geoBad(x.startGeo)) out.push(`<span class="pill edited" title="Checked when the visit started">Start: ${esc(geoText(x.startGeo))}</span>`);
+  else if (x.startGeo?.ok) out.push('<span class="pill done">At the store</span>');
+  if (geoBad(x.endGeo)) out.push(`<span class="pill edited" title="Checked at submit">Submit: ${esc(geoText(x.endGeo))}</span>`);
+  if (x.status === 'done' && !x.startedAt && x.date >= '2026-10-08') out.push('<span class="pill edited">No start time</span>');
+  return out;
+}
+const clearOf = x => (S.clears || {})[x?.id];
+function visitFlags(x) {
+  const f = flagList(x); if (!f.length) return '';
+  const c = clearOf(x);
+  return c ? `<span class="pill done" title="${esc(c.note || '')}">Flag cleared by ${esc(firstOf(c.byName || c.by))}</span>` : f.join('');
+}
+// The VP and the field coach can clear a visit's flags with a note. Market Leaders can't.
+function clearCtl(x) {
+  if (!flagList(x).length) return '';
+  const c = clearOf(x);
+  if (c) return `<p class="small" style="margin:6px 0 0"><span class="pill done">Flag cleared</span> by ${esc(c.byName || c.by)} ${esc(dayLabel(c.at.slice(0, 10)))}: ${esc(c.note)}</p>`;
+  return reviews() ? `<div class="small" style="margin:6px 0 0" data-clrbox="${esc(x.id)}"><button class="btn tiny" type="button" data-clr="${esc(x.id)}">Clear flag</button></div>` : '';
+}
+document.addEventListener('click', e => {
+  const b = e.target.closest?.('[data-clr]'); if (!b || !reviews()) return;
+  e.preventDefault();
+  const id = b.dataset.clr, box = b.closest('[data-clrbox]');
+  box.innerHTML = `<label for="clrn_${esc(id)}" style="margin:0">Why clear it?<input id="clrn_${esc(id)}" style="width:100%" placeholder="e.g. Off-site training at the DC, approved"></label><div class="row" style="gap:6px;margin-top:6px"><button class="btn tiny primary" type="button" data-clrok="${esc(id)}">Clear flag</button><button class="link" type="button" data-clrno="1">Cancel</button></div>`;
+  box.querySelector('[data-clrno]').onclick = () => { box.innerHTML = `<button class="btn tiny" type="button" data-clr="${esc(id)}">Clear flag</button>`; };
+  box.querySelector('[data-clrok]').onclick = async () => {
+    const note = box.querySelector('input').value.trim(); if (note.length < 4) return toast('Add a short note on why.', true);
+    const x = S.visits.find(v => v.id === id) || (S.V?.id === id ? S.V : null);
+    const flags = x ? flagList(x).map(h => h.replace(/<[^>]+>/g, '')) : [];
+    const d = { id, visitId: id, email: x?.email || '', store: x?.store || '', date: x?.date || '', flags, note, by: S.user.email, byName: S.user.name || S.user.email, at: new Date().toISOString() };
+    try { await S.be.saveClear(d); S.clears = { ...(S.clears || {}), [id]: d }; toast('Flag cleared.'); if (S.visit) viewVisit(); else renderShell(); }
+    catch (err) { toast(friendly(err), true); }
+  };
+});
+async function startVisit(V, auto) {
   if (!V || V.startedAt || V.status === 'done' || V.email !== S.user.email || V.date !== today()) return false;
   V.startedAt = new Date().toISOString(); if (auto) V.startAuto = true; else delete V.startAuto;
-  saveDraft(true); return true;
+  const std = visitStd(V); if (std) V.std = std.key;
+  saveDraft(true);
+  if (!V.remote) geoCheck(V.store).then(g => { V.startGeo = g; saveDraft(true); const el = document.querySelector('#vtimeline'); if (el && S.V === V) el.innerHTML = timeBlock(V); if (geoBad(g)) toast(`Heads up: ${geoText(g)}. ${g.err === 'denied' ? 'Allow location for the app so the visit shows you at the store.' : 'Your VP sees where the visit was started.'}`, true); });
+  return true;
+}
+// The time line on an open visit: standard, start, time so far, location.
+function timeBlock(V) {
+  const std = visitStd(V), t = visitTime(V);
+  const so = t.live ? t.liveMins : t.mins;
+  const under = std && so != null && so < std.min * 60;
+  return `${timePill(V)} ${std ? `<span class="pill ${!t.live && under ? 'edited' : ''}">${esc(std.label)}: ${std.min} to ${std.max} hr${t.live && under ? ` · ${esc(durText(std.min * 60 - so))} to go` : ''}</span>` : ''}${!V.remote && V.startGeo ? ` <span class="pill ${geoBad(V.startGeo) ? 'edited' : V.startGeo.ok ? 'done' : ''}">${esc(geoText(V.startGeo))}</span>` : ''}${V.shortReason ? ` <span class="small">Short visit reason: ${esc(V.shortReason)}</span>` : ''}`;
 }
 async function viewVisit() {
   const x = S.visit, v = $('#view');
@@ -1961,7 +2045,7 @@ async function viewVisit() {
       ${needChip(sc?.score)}
     </div>
   </div>
-  ${canLog && x.email === S.user.email && x.date === today() && !V.startedAt && V.status !== 'done' ? `<div class="startbar"><div><b>${x.remote ? 'Starting the call?' : 'Walking in?'}</b> Tap Start. It time-stamps the ${x.remote ? 'call' : 'visit'} so your VP can see you're on it, and submitting stamps the end.</div><button class="btn primary" type="button" id="vstart">Start ${x.remote ? 'call' : 'visit'}</button></div>` : timeLine(V) ? `<p class="small" style="margin:0 0 8px">${timePill(V)}</p>` : ''}
+  ${canLog && x.email === S.user.email && x.date === today() && !V.startedAt && V.status !== 'done' ? `<div class="startbar"><div><b>${x.remote ? 'Starting the call?' : 'Walking in?'}</b> Tap Start. It time-stamps the ${x.remote ? 'call' : 'visit'} so your VP can see you're on it, and submitting stamps the end.${visitStd(V) ? ` ${esc(visitStd(V).label)}: ${visitStd(V).min} to ${visitStd(V).max} hours. Start also checks you're at the store.` : ''}</div><button class="btn primary" type="button" id="vstart">Start ${x.remote ? 'call' : 'visit'}</button></div>` : timeLine(V) ? `<p class="small" style="margin:0 0 8px" id="vtimeline">${timeBlock(V)} ${V.status === 'done' ? visitFlags(V) : ''}</p>${V.status === 'done' ? clearCtl(V) : ''}` : ''}
   ${whoPanel(x.store, x.date)}
   ${later ? `<div class="warnbox">This visit is on ${esc(longDate(x.date))}. Use it to prep; you can fill it in that day.</div>` : ''}
   ${(() => { const b = budgetFor(x.store, x.date), y = S.meta.latestDaily, mb = y ? budgetToDate(x.store, y) : null, m = S.daily?.stores?.[x.store]?.mtd?.k;
@@ -2307,7 +2391,7 @@ let vTimer = null;
 // ---------------------------------------------------------------- edits after submit
 // Once a visit is submitted, any later change is stamped on the visit (who, when, which parts) and
 // sent to the VP's review list, so nothing gets quietly rewritten after the fact.
-const EDIT_SKIP = new Set(['startedAt', 'endedAt', 'startAuto', 'at', 'by', 'needScore', 'commitments', 'edits', 'lastEdit', 'submittedAt', 'status', 'follow', 'photosMissing', 'photosMissingList', 'id', 'email', 'name', 'role', 'store', 'date']);
+const EDIT_SKIP = new Set(['startedAt', 'endedAt', 'startAuto', 'std', 'startGeo', 'endGeo', 'shortReason', 'at', 'by', 'needScore', 'commitments', 'edits', 'lastEdit', 'submittedAt', 'status', 'follow', 'photosMissing', 'photosMissingList', 'id', 'email', 'name', 'role', 'store', 'date']);
 const EDIT_LABEL = { leaderWin: 'Leader win', checks: '6 Elements walk', segs: 'Value segments', aor: 'AOR walk', elNotes: '6 Elements notes', segMeta: 'Value segments',
   consultants: 'Consultants', actions: 'Action plan', leaderCommit: 'Store leader commitment', working: 'What is working', notes: 'Notes', teamNotes: 'Team notes',
   reflection: 'Reflection', photoReason: 'Reason for missing photos', focus: 'Team focus', lever: 'Lever', play: 'Run the play', fliq: 'FrontLine IQ', floor: 'Leader knows the floor', intent: 'Why you are here', vtype: 'Visit type', kind: 'Visit type' };
@@ -2367,8 +2451,8 @@ function saveDraft(now) {
 function saveDraftRetry(id) { if (S.V && S.V.id === id) saveDraft(true); else syncLocalVisits(); }
 function wireVisit(V, canLog, snap) {
   const v = $('#view');
-  const vs = $('#vstart'); if (vs) vs.onclick = () => { if (startVisit(V)) { toast(`Started ${clockOf(V.startedAt)}.`); viewVisit(); } };
-  if (canLog && !V.startedAt && V.date === today()) { const auto = () => { if (startVisit(V, true)) { const b = v.querySelector('.startbar'); if (b) b.outerHTML = `<p class="small" style="margin:0 0 8px">${timePill(V)}</p>`; } }; v.addEventListener('input', auto, { capture: true, once: true }); v.addEventListener('change', auto, { capture: true, once: true }); }
+  const vs = $('#vstart'); if (vs) vs.onclick = async () => { if (await startVisit(V)) { toast(`Started ${clockOf(V.startedAt)}.${V.remote ? '' : ' Checking your location…'}`); viewVisit(); } };
+  if (canLog && !V.startedAt && V.date === today()) { const auto = async () => { if (await startVisit(V, true)) { const b = v.querySelector('.startbar'); if (b) b.outerHTML = `<p class="small" style="margin:0 0 8px" id="vtimeline">${timeBlock(V)}</p>`; } }; v.addEventListener('input', auto, { capture: true, once: true }); v.addEventListener('change', auto, { capture: true, once: true }); }
   if (S.vBaseFor !== V.id) { S.vBaseFor = V.id; S.vBase = editParts(V); }
   wireWho(v, () => viewVisit());
   v.querySelectorAll('[data-toscore]').forEach(a => a.onclick = () => { stopMic(); if (canLog) saveDraft(true); });
@@ -2522,6 +2606,25 @@ function wireVisit(V, canLog, snap) {
     }, 30));
   };
   const goPhoto = m => goFix('el' + m.e.n, [...document.querySelectorAll(`[data-sec="el${m.e.n}"] [data-photo="${m.e.key}"]`)].find(b => b.dataset.item === m.a)?.closest('.aphoto'), `Take the photo of ${m.a}, then tap Submit again.`);
+  const shortReasonBox = (std, so) => {
+    document.querySelector('#shortreason')?.remove();
+    const box = document.createElement('section'); box.id = 'shortreason'; box.className = 'panel editbox';
+    box.innerHTML = `<h3 style="margin:0 0 4px">Short visit: ${esc(durText(so))} in the store</h3>
+      <p class="small" style="margin:0 0 8px">${esc(std.label)}s run ${std.min} to ${std.max} hours. You can submit now. The visit will be flagged as short with your reason, and your VP sees it.</p>
+      <label for="srsn">Why is it short?<select id="srsn"><option value="">Pick a reason</option>${['Called to another store (issue or emergency)', 'Planned short: meeting, training or event', 'Store closed early or weather', 'Personal or family', 'Forgot to tap Start when I arrived', 'Other'].map(r => `<option>${esc(r)}</option>`).join('')}</select></label>
+      ${fieldBox('srnote', 'Details', '', 2, 'What happened.', '', '')}
+      <div class="row" style="gap:8px;margin-top:8px"><button type="button" class="btn primary" id="srok">Submit as a short visit</button><button type="button" class="btn" id="srno">Keep working</button></div>`;
+    const bar = document.querySelector('.vbar'); bar.parentNode.insertBefore(box, bar);
+    box.scrollIntoView({ behavior: 'smooth', block: 'center' }); box.classList.add('needfix');
+    wireMics?.(box);
+    $('#srno').onclick = () => box.remove();
+    $('#srok').onclick = () => {
+      const r = $('#srsn').value, n = ($('#srnote').value || '').trim();
+      if (!r) return toast('Pick a reason first.', true);
+      if (r === 'Other' && n.length < 5) return toast('Add a few words on why.', true);
+      V.shortReason = n ? `${r}: ${n}` : r; saveDraft(true); box.remove(); $('#vsubmit').click();
+    };
+  };
   const photoReasonBox = missing => {
     document.querySelector('#photoreason')?.remove();
     const box = document.createElement('section'); box.id = 'photoreason'; box.className = 'panel editbox';
@@ -2558,8 +2661,15 @@ function wireVisit(V, canLog, snap) {
       // Photos can be skipped, but the Market Leader says why, and the visit is flagged with what's missing.
       else if (!String(V.photoReason || '').trim()) return photoReasonBox(missing);
     }
+    // Time in the store: under the minimum, the leader gives a reason and the visit is flagged.
+    if (!V.remote && V.status !== 'done' && V.startedAt && V.date === today()) {
+      const std = visitStd(V), so = Math.round((Date.now() - Date.parse(V.startedAt)) / 60000);
+      if (std) V.std = std.key;
+      if (std && so < std.min * 60 && !String(V.shortReason || '').trim()) return shortReasonBox(std, so);
+    }
     const wasDone = V.status === 'done';
     if (!wasDone) S.vBaseFor = null; // the first submit is not an edit
+    if (!wasDone && !V.remote && V.date === today()) geoCheck(V.store).then(g => { V.endGeo = g; saveDraft(true); });
     V.status = 'done'; V.submittedAt = V.submittedAt || new Date().toISOString(); if (!wasDone) V.endedAt = V.endedAt || V.submittedAt;
     saveDraft(true);
     if (wasDone) sendEditAlert(V); else { S.vBaseFor = V.id; S.vBase = editParts(V); }
@@ -3384,8 +3494,8 @@ async function fieldTodayPanel() {
   const none = rows.filter(r => !r.vs.length).map(r => firstOf(r.l.name || r.l.email));
   return `<section class="panel" id="fieldnow"><h3 style="margin:0 0 4px">In the field today</h3>
     <p class="small" style="margin:0 0 8px">Visits started in the app, with start and end times. As of ${esc(clockOf(new Date().toISOString()))}. <button class="link" type="button" id="fnrefresh">Refresh</button></p>
-    ${live.length ? `<ul class="blist">${live.map(({ l, x }) => `<li><span class="good">● On ${x.remote ? 'a call' : 'a visit'}</span> <b>${esc(firstOf(l.name || l.email))}</b> at ${esc(x.store)} since ${esc(clockOf(x.startedAt))} (${esc(durText(visitTime(x).liveMins))})</li>`).join('')}</ul>` : '<p class="small muted" style="margin:0">Nobody is on a visit right now.</p>'}
-    ${done.length ? `<p class="eyebrow" style="margin:8px 0 2px">Done today</p><ul class="blist small">${done.map(({ l, x }) => `<li><b>${esc(firstOf(l.name || l.email))}</b>, ${esc(x.store)}${x.remote ? ' (call)' : ''}: ${esc(timeLine(x))}</li>`).join('')}</ul>` : ''}
+    ${live.length ? `<ul class="blist">${live.map(({ l, x }) => `<li><span class="good">● On ${x.remote ? 'a call' : 'a visit'}</span> <b>${esc(firstOf(l.name || l.email))}</b> at ${esc(x.store)} since ${esc(clockOf(x.startedAt))} (${esc(durText(visitTime(x).liveMins))}${x.std ? ` of ${VISIT_STD[x.std].min} hr min` : ''}) ${!x.remote && x.startGeo ? `<span class="pill ${geoBad(x.startGeo) ? 'edited' : x.startGeo.ok ? 'done' : ''}">${esc(geoText(x.startGeo))}</span>` : ''}</li>`).join('')}</ul>` : '<p class="small muted" style="margin:0">Nobody is on a visit right now.</p>'}
+    ${done.length ? `<p class="eyebrow" style="margin:8px 0 2px">Done today</p><ul class="blist small">${done.map(({ l, x }) => `<li><b>${esc(firstOf(l.name || l.email))}</b>, ${esc(x.store)}${x.remote ? ' (call)' : ''}: ${esc(timeLine(x))} ${visitFlags(x)}</li>`).join('')}</ul>` : ''}
     ${none.length ? `<p class="small muted" style="margin:6px 0 0">Nothing started yet: ${esc(none.join(', '))}.</p>` : ''}</section>`;
 }
 // ---------------------------------------------------------------- daily coaching of Market Leaders
@@ -3438,13 +3548,17 @@ const ML_HABITS = {
     ask: ['What did you find on the walk? What did the leader fix before you left?', 'Which photos are missing and why?'],
     play: 'Have them walk you through how they\'d run the 6 Elements walk with the leader in 20 minutes, so the leader does the finding and the fixing.',
     commit: { what: 'Walk the 6 Elements with the leader and photograph every area', to: 'Every store visit' } },
+  time: { t: 'Give the store the full time', why: 'Short visits leave before the floor gets busy and before the coaching sticks. The store sees you leave early and learns the visit is a box to check.',
+    good: 'Full-day visits run 6 to 8 hours, half-day or multi-store stops 3 to 4. In at open or before the rush, there through the busy hours, and out only after the leader owns the commitments.',
+    ask: ['How long were you in the store yesterday, and what got cut short?', 'What would you have done with another two hours on the floor?', 'What pulls you out early, and how do we protect the time?'],
+    play: '', commit: { what: 'Stay the full standard: 6 to 8 hours on full days, 3 to 4 on half days', to: 'Every in-store visit at the standard' } },
   plan: { t: 'Work the plan', why: 'The plan puts their time where the money is. Visits that don\'t happen or don\'t get logged can\'t be followed up.',
     good: 'Five visit days a week, logged the same day. Changes to the plan have a reason.',
     ask: ['Which planned visits didn\'t get logged this week? What happened?', 'What would have to change for every visit to be logged before you leave the lot?'],
     play: '',
     commit: { what: 'Log every visit before leaving the lot', to: 'Every planned visit logged the same day' } }
 };
-const HABIT_ORDER = ['plan', 'follow', 'lever', 'coached', 'practice', 'viaLeader', 'commits', 'leader', 'win', 'walk'];
+const HABIT_ORDER = ['plan', 'time', 'follow', 'lever', 'coached', 'practice', 'viaLeader', 'commits', 'leader', 'win', 'walk'];
 // Which habits a visit showed. ok is true, false, or null when it doesn't apply.
 function visitQuality(x) {
   const sm = visitSummary(x);
@@ -3460,6 +3574,7 @@ function visitQuality(x) {
     { k: 'viaLeader', ok: x.remote ? sm.coached.some(c => c.via) : null, note: x.remote ? (sm.coached.some(c => c.via) ? 'Coached through the store leader' : 'Did not coach through the store leader') : '' },
     { k: 'commits', ok: acts.length >= 2 && full >= 2, note: `${acts.length} commitment${acts.length === 1 ? '' : 's'}, ${full} with a target and a date` },
     { k: 'leader', ok: !!sm.leaderCommit, note: sm.leaderCommit ? 'Store leader has their own commitment' : 'No store leader commitment' },
+    { k: 'time', ok: x.remote || !x.std || visitTime(x).mins == null ? null : !shortVisit(x) || !!clearOf(x), note: (() => { const sh = shortVisit(x), t = visitTime(x); return sh ? `${durText(sh.mins)} in the store, minimum ${sh.std.min} hours${x.shortReason ? ` (${x.shortReason})` : ''}` : t.mins != null ? `${durText(t.mins)} in the store` : ''; })() },
     { k: 'walk', ok: x.remote ? null : !!sm.score && !x.photosMissing, note: x.remote ? '' : `${sm.score ? `6 Elements ${sm.score.pct}%` : '6 Elements not walked'}${x.photosMissing ? `, ${x.photosMissing} photos missing` : ''}` }
   ];
   const app = checks.filter(c => c.ok !== null);
@@ -3545,10 +3660,10 @@ async function viewMlCoach() {
       : '<p class="small muted" style="margin:0">No commitment from an earlier daily coaching yet. Today sets the first one.</p>'}
 
     <h3 style="margin:16px 0 6px">3. Review the visits <span class="small muted">(5 min)</span></h3>
-    ${P.yVisits.length ? P.yVisits.map(({ x, q }) => `<details class="vis" ${P.yVisits.length < 3 ? 'open' : ''}><summary><b>${esc(x.store)}</b><span class="small">${esc(dayLabel(x.date))}</span>${x.remote ? '<span class="pill">Remote</span>' : '<span class="pill set">In store</span>'}${qPill(q.pct)}${timePill(x)}</summary>
+    ${P.yVisits.length ? P.yVisits.map(({ x, q }) => `<details class="vis" ${P.yVisits.length < 3 ? 'open' : ''}><summary><b>${esc(x.store)}</b><span class="small">${esc(dayLabel(x.date))}</span>${x.remote ? '<span class="pill">Remote</span>' : '<span class="pill set">In store</span>'}${qPill(q.pct)}${timePill(x)}${visitFlags(x)}</summary>
       <ul class="blist small" style="margin:6px 0">${q.checks.filter(c => c.ok !== null).map(c => `<li>${mark(c.ok)} <b>${esc(ML_HABITS[c.k].t)}:</b> ${esc(c.note)}</li>`).join('')}</ul>
       ${q.sm.commitments.length ? `<p class="small" style="margin:4px 0"><b>Their commitments:</b></p><ol class="small" style="margin:0 0 4px">${q.sm.commitments.map(c => `<li>${esc(c)}</li>`).join('')}</ol>` : ''}
-      <button class="btn tiny" type="button" data-mov='${esc(JSON.stringify({ store: x.store, date: x.date, email: x.email, kind: x.kind, remote: !!x.remote }))}'>Open the visit</button></details>`).join('')
+      ${clearCtl(x)}<button class="btn tiny" type="button" data-mov='${esc(JSON.stringify({ store: x.store, date: x.date, email: x.email, kind: x.kind, remote: !!x.remote }))}'>Open the visit</button></details>`).join('')
       : `<p class="warn" style="margin:0">No visits logged ${P.lastDay ? 'since ' + esc(dayLabel(P.lastDay)) : 'in the last 7 days'}.${P.notLogged.length ? ` Planned but not logged: ${P.notLogged.map(d => esc(dayLabel(d.date)) + ' ' + esc(dayStores(d).join(', '))).join('; ')}.` : ''} Start the call there.</p>`}
 
     <h3 style="margin:16px 0 6px">4. Teach one habit <span class="small muted">(4 min)</span></h3>
@@ -3712,11 +3827,12 @@ function viewVisits() {
   <div class="panel">${list.map(x => {
     const sm = visitSummary(x), fixes = sm.fixes;
     const vid = `${x.email}_${x.date}_${slug(x.store)}${x.remote ? '_remote' : ''}`;
-    return `<details class="vis" data-vid="${esc(vid)}"><summary><b>${esc(x.store)}</b><span class="small">${esc(longDate(x.date))}</span><span class="small muted">${esc(x.name)}</span>${timePill(x)}${x.remote ? '<span class="pill">Remote</span>' : `<span class="pill" data-pcount="${esc(vid)}" hidden></span>`}${x.edits?.length ? `<span class="pill edited" title="${esc(editedText(x).join(' | '))}">Edited after submit</span>` : ''}${!x.remote && x.status === 'done' && x.photosMissing ? `<span class="pill edited">${x.photosMissing} photo${x.photosMissing > 1 ? 's' : ''} missing</span>` : ''}<span class="pill ${x.vtype === 'Follow-Up' ? 'check' : x.vtype === 'Priority' ? 'set' : ''}">${esc(x.vtype || kindToType(x.kind))}</span>${x.status === 'draft' ? '<span class="pill off">Draft</span>' : ''}${pend.has(x.id) ? '<span class="pill edited" title="Saved on this phone. It sends when you have signal.">Not sent yet</span>' : ''}${sm.score ? `<span class="pill">${sm.score.pct}%</span>` : ''}${fixes.length ? `<span class="pill off">${fixes.length} to fix</span>` : ''}</summary>
+    return `<details class="vis" data-vid="${esc(vid)}"><summary><b>${esc(x.store)}</b><span class="small">${esc(longDate(x.date))}</span><span class="small muted">${esc(x.name)}</span>${timePill(x)}${visitFlags(x)}${x.remote ? '<span class="pill">Remote</span>' : `<span class="pill" data-pcount="${esc(vid)}" hidden></span>`}${x.edits?.length ? `<span class="pill edited" title="${esc(editedText(x).join(' | '))}">Edited after submit</span>` : ''}${!x.remote && x.status === 'done' && x.photosMissing ? `<span class="pill edited">${x.photosMissing} photo${x.photosMissing > 1 ? 's' : ''} missing</span>` : ''}<span class="pill ${x.vtype === 'Follow-Up' ? 'check' : x.vtype === 'Priority' ? 'set' : ''}">${esc(x.vtype || kindToType(x.kind))}</span>${x.status === 'draft' ? '<span class="pill off">Draft</span>' : ''}${pend.has(x.id) ? '<span class="pill edited" title="Saved on this phone. It sends when you have signal.">Not sent yet</span>' : ''}${sm.score ? `<span class="pill">${sm.score.pct}%</span>` : ''}${fixes.length ? `<span class="pill off">${fixes.length} to fix</span>` : ''}</summary>
       <div class="vbody">${!x.remote && x.status === 'done' && x.photosMissing ? `<b class="warn">Photos missing (${x.photosMissing}):</b> ${esc((x.photosMissingList || []).join(', ') || 'not listed')}\n<b>Reason:</b> ${esc(x.photoReason || 'none given')}\n` : ''}${x.edits?.length ? `<b class="warn">Edited after submit:</b>\n${editedText(x).map(t => '  ' + esc(t)).join('\n')}\n` : ''}${sm.win ? `<b>Leader win:</b> ${esc(sm.winName ? titleName(sm.winName) + ': ' : '')}${esc(sm.win)}\n` : ''}<b>Working:</b> ${esc(x.working || '--')}
 <b>Commitments:</b>
 ${sm.commitments.length ? sm.commitments.map((c, i) => `${i + 1}. ${esc(c)}`).join('\n') : '--'}
 ${sm.leaderCommit ? `<b>Leader commits to:</b> ${esc(sm.leaderCommit)}\n` : ''}${sm.support ? `<b>Support needed:</b> ${esc(sm.support)}\n` : ''}${x.leaderCommit?.notes ? `<b>Leader notes:</b> ${esc(x.leaderCommit.notes)}\n` : ''}${Object.entries(x.segMeta || {}).filter(([, m]) => m?.how || m?.name).map(([gi, m]) => { const vals = Object.values(x.segs?.[gi] || {}); const pts = vals.reduce((t, v) => t + (v === 'yes' ? 1 : v === 'partial' ? 0.5 : 0), 0); return `<b>${esc(SEGMENTS[gi]?.name || '')}:</b> ${m.how === 'practice' ? 'practiced with' : 'watched'} ${esc(titleName(m.name || 'a team member'))}${m.how === 'observed' ? ' on a live guest' : ''}${vals.length ? `, ${pts} of ${SEGMENTS[gi].items.length}` : ''}${m.notes ? `. ${esc(m.notes)}` : ''}\n`; }).join('')}${sm.coached.length ? `<b>Consultants coached:</b>\n${sm.coached.map(c => `- ${esc(titleName(c.name))}${c.via ? `: coached through the store leader${c.score ? `, ${c.score}` : ''}` : ''}${c.drill ? `: ${esc(c.drill)}${c.ran ? ` practice, ${c.score}` : ', practice not run'}${c.rerun === 'better' ? ', second rep better' : c.rerun === 'same' ? ', second rep same' : ''}` : ''}${c.adjust ? `. Adjustment: ${esc(c.adjust)}` : ''}${c.notes ? `\n  Notes: ${esc(c.notes)}` : ''}`).join('\n')}\n` : ''}${x.teamNotes ? `<b>Team notes:</b> ${esc(x.teamNotes)}\n` : ''}${x.reflection ? `<b>Coach next visit:</b> ${esc(x.reflection)}\n` : ''}<b>Notes:</b> ${esc(x.notes || '--')}${fixes.length ? `\n<b>6 Elements to fix:</b> ${esc(fixes.join(', '))}` : ''}</div>
+      ${clearCtl(x)}
       ${x.remote ? '' : `<div class="logph" data-lp="${esc(vid)}"></div>`}
       <button class="btn tiny" data-ov='${esc(JSON.stringify({ store: x.store, date: x.date, email: x.email, kind: x.kind, remote: !!x.remote }))}' style="margin-top:8px">Open</button></details>`;
   }).join('') || '<p class="muted">No visits logged yet.</p>'}</div>`;
