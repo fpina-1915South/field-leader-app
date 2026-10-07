@@ -1,16 +1,16 @@
-import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610070556';
-import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610070556';
+import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610070809';
+import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610070809';
 import {
   STORES, DISTRICTS, canonicalStore, isKnownStore, parseRsa, rangeFromFileName, parseTeamRoster, resolveReportNames,
   paceFactor, DEFAULT_GOALS, cidOf, status, fmt, goalsFor, TEAM_FOCUS, pickStoreFocus
-} from './base.js?v=202610070556';
+} from './base.js?v=202610070809';
 import {
   iso, fromIso, addDays, daysApart, weekStartOf, DAY_NAMES, DAY_LONG, dow, DEFAULT_OFF, validOff, safeOff, VISIT_DAYS, STORE_GOALS,
   parseDaily, needScore, band, pct, environment, buildPlan, pivotSuggestion, ELEMENTS, SEGMENTS, AORS, PRACTICE, VISIT_TYPES, kindToType, visitScore, visitSummary, consultantCoaching, drillFor, draggers, helpers, STORE_TO_RSA, hasCommitment, commitmentText, blackoutFor, offChoicesFor, storeFocus, rsaPicks, consultantWeeks, teamSignals,
-  STORE_METRICS, slug, COACHING, METRICS, PLAIN, isOutlet, driveMin, driveText, MAX_SPLIT_MIN, LEVERS, leverStatus, suggestLever,
+  STORE_METRICS, slug, COACHING, METRICS, PLAIN, isOutlet, driveMin, driveText, MAX_SPLIT_MIN, LONG_DRIVE_MIN, LEVERS, leverStatus, suggestLever,
   consultantTrends, TREND_ROWS, trendFmt, trendRead, TREND_LABEL,
   OFFER_DEFAULT, PLAY, PLAY_CHECKS, PLAY_CHECKS_REMOTE, offerActive, offerMath, FLIQ_CHECKS, FLIQ_CHECKS_REMOTE, FLIQ_DAILY
-} from './ml.js?v=202610070556';
+} from './ml.js?v=202610070809';
 
 // Legacy Sunday-start weeks, read as the Monday week that replaced them.
 function fromSundayPlan(p, week) {
@@ -261,7 +261,7 @@ function demoBackend() {
   const leaders = [
     { email: 'east@demo', name: 'Demo Market Leader (Jacksonville)', role: 'leader', stores: ['Town Center', 'Orange Park', 'Yulee', 'St. Augustine'], off: DEFAULT_OFF },
     { email: 'nc@demo', name: 'Demo Market Leader (Carolinas)', role: 'leader', pilots: ['frontlineiq'], stores: ['Greensboro', 'Winston Salem', 'Burlington', 'Danville', 'Outlet Greensboro'], off: DEFAULT_OFF },
-    { email: 'director@demo', name: 'Demo Director (East)', role: 'director', coach: true, stores: ['Town Center', 'North', 'Orange Park', 'Brunswick', 'Yulee', 'St. Augustine', 'Outlet Regency'], off: [0, 6] },
+    { email: 'director@demo', name: 'Demo Director (East)', role: 'director', coach: true, homeMin: { 'Town Center': 6, 'North': 27, 'Orange Park': 28, 'Outlet Regency': 12, 'St. Augustine': 45, 'Yulee': 48, 'Brunswick': 95 }, stores: ['Town Center', 'North', 'Orange Park', 'Brunswick', 'Yulee', 'St. Augustine', 'Outlet Regency'], off: [0, 6] },
     { email: 'gulf@demo', name: 'Demo Market Leader (Gulf Coast)', role: 'leader', stores: ['Mobile', "D'Iberville", 'Spanish Fort', 'Pensacola', 'Crestview', 'Ft. Walton'], off: [2, 3] }
   ];
   const users = {
@@ -882,7 +882,7 @@ async function viewWeek() {
     <div style="min-width:0">
       ${canEdit && week >= thisWeek ? `<div class="row" style="margin:0 0 12px"><button class="btn" type="button" id="wkedit">${S.editWeek ? 'Close editor' : 'Edit my week'}</button><button class="btn" type="button" id="wkrebuild">Rebuild from the numbers</button><span class="small muted">Set any day by hand, or let the app redo the open days.</span></div>` : ''}
       ${S.editWeek && canEdit ? weekEditor(plan, who) : `<div class="days">${plan.days.map((d, i) => dayCard(d, i, plan, canEdit)).join('')}</div>`}
-      <div class="offrow"><span>${doneCount} of ${plan.days.length} visits done</span><span>· Days off: <b>${off.map(x => DAY_LONG[x]).join(' and ')}</b></span></div>
+      <div class="offrow"><span>${doneCount} of ${plan.days.length} visits done</span>${(() => { const w = weekDrive(who, plan); return w ? `<span>· About <b>${driveText(w.total)}</b> driving this week${w.long ? `, <span class="warn">${w.long} long day${w.long > 1 ? 's' : ''}</span>` : ''}</span>` : ''; })()}<span>· Days off: <b>${off.map(x => DAY_LONG[x]).join(' and ')}</b></span></div>
       ${week === thisWeek ? remotePanel(plan, who, canEdit) : ''}
       ${(plan.pivots || []).length ? `<div class="panel"><h3>Changes made this week</h3><ul class="small">${plan.pivots.map(p => `<li>${esc(dayLabel(p.date))}: ${esc(p.from || 'open')} to <b>${esc(p.to)}</b>${p.reason ? '. ' + esc(p.reason) : ''}</li>`).join('')}</ul></div>` : ''}
     </div>
@@ -1288,6 +1288,23 @@ function pivotCard(s) {
     <div class="row"><button class="btn accent" id="pvyes">Make the swap</button><button class="btn" id="pvno">Keep my plan</button></div>
   </div>`;
 }
+// Drive for a visit day: home to the first store, between stores, and back home. Home times are saved on
+// the leader's user record as minutes per store (the address itself is never stored).
+function dayDrive(who, d) {
+  const st = dayStores(d), h = who?.homeMin || {};
+  if (!st.length || h[st[0]] == null) return null;
+  const legs = st.slice(1).reduce((t, s, j) => t + (driveMin(st[j], s) || 0), 0);
+  const out = h[st[0]], back = h[st[st.length - 1]] ?? out;
+  return { out, back, legs, total: out + legs + back, long: Math.max(out, back) > LONG_DRIVE_MIN };
+}
+function dayDriveLine(who, d) {
+  const x = dayDrive(who, d); if (!x) return '';
+  return `<p class="small ${x.long ? 'warn' : 'muted'}" style="margin:2px 0 6px">${x.long ? 'Long drive: ' : ''}~${driveText(x.out)} from home${x.legs ? `, ~${driveText(x.legs)} between stores` : ''}, ~${driveText(x.back)} back. ${driveText(x.total)} driving.${x.long ? ' Think about an overnight or a remote visit.' : ''}</p>`;
+}
+function weekDrive(who, plan) {
+  const days = (plan?.days || []).map(d => dayDrive(who, d)).filter(Boolean);
+  return days.length ? { total: days.reduce((t, x) => t + x.total, 0), long: days.filter(x => x.long).length, n: days.length } : null;
+}
 function dayCard(d, i, plan, canEdit) {
   const t = today(), past = d.date < t, isToday = d.date === t;
   const stores = S.users.find(u => u.email === plan.email)?.stores || (plan.email === S.user.email ? S.user.stores : Object.keys(plan.basis));
@@ -1310,6 +1327,7 @@ function dayCard(d, i, plan, canEdit) {
   const primaryBtn = d.store ? `<button class="btn tiny ${isToday ? 'primary' : ''}" data-go="${i}">${d.status === 'done' ? 'See visit' : `Open ${multi ? (d.part || 'AM') + ' ' : ''}visit`}</button>` : '';
   return `<article class="day ${isToday ? 'today' : ''} ${d.status === 'done' && !multi ? 'isdone' : ''}">
     <div class="row" style="justify-content:space-between"><span class="dname">${esc(DAY_LONG[dow(d.date)])} ${esc(shortDate(d.date))}</span>${multi ? `<span class="small muted">${dayStores(d).length} stores</span>` : ''}</div>
+    ${dayDriveLine(S.users.find(u => u.email === plan.email) || (plan.email === S.user.email ? S.user : null), d)}
     ${d.store ? block(d.store, multi ? (d.part || 'AM') : '', d.kind, d.status, primaryBtn, d.anchor ? '<div class="row"><span class="pill anchor">Anchor store</span></div>' : '') : '<div class="store">Open day</div>'}
     ${(d.stops || []).map((x, j) => {
       const m = driveMin(j ? d.stops[j - 1].store : d.store, x.store);
@@ -3226,6 +3244,7 @@ async function viewLeaders() {
       <p class="small" style="margin:6px 0">${p ? `<b>${done}</b> of ${p.days.length} visits logged${due ? ` · <span class="warn">${due} not logged</span>` : ''}${(p.pivots || []).length ? ` · ${p.pivots.length} changes` : ''} · ${S.visits.filter(v => v.remote && v.email === l.email && v.date >= week && v.date <= addDays(week, 6)).length} remote` : '<span class="warn">No plan yet this week</span>'}</p>
       ${p ? `<ul class="small" style="padding-left:18px;margin:4px 0">${p.days.map(d => `<li>${esc(dayLabel(d.date))}: ${esc(d.store || 'Open')} ${d.status === 'done' ? '<span class="good">✓</span>' : d.date < t ? '<span class="warn">not logged</span>' : ''}</li>`).join('')}</ul>` : ''}
       <p class="small" style="margin:6px 0">Days off this week: <b>${safeOff(p?.off || l.off, l.role).map(x => DAY_NAMES[x]).join(', ')}</b> · Next week: ${(() => { const n = nextOff.find(x => x.email === l.email); return n ? `<b>${n.off.map(x => DAY_NAMES[x]).join(', ')}</b>` : '<span class="warn">not set</span>'; })()}</p>
+      ${(() => { const w = weekDrive(l, p); return w ? `<p class="small" style="margin:6px 0">Driving this week: about <b>${driveText(w.total)}</b>${w.long ? ` · <span class="warn">${w.long} long day${w.long > 1 ? 's' : ''}</span>` : ''}</p>` : ''; })()}
       ${top ? `<p class="small" style="margin:6px 0">Highest need: <b>${esc(top)}</b> ${needChip(S.scores[top]?.score)}</p>` : ''}
       ${sugg ? `<p class="small warn">Pivot waiting: add ${esc(sugg.to)}, drop ${esc(sugg.from)}</p>` : ''}
       <button class="btn tiny" data-lw="${esc(l.email)}">Open week</button>

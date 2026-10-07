@@ -4,7 +4,7 @@
 import {
   normalizeHeader, toNumber, parseDate, slug, canonicalStore, isKnownStore, REGIONS, STORE_METRICS,
   COACHING, METRICS, pickFocus, pickStoreFocus, goalsFor, DEFAULT_GOALS, isOutlet, minSphFor, fmt, weeklyTarget
-} from './base.js?v=202610070556';
+} from './base.js?v=202610070809';
 
 const numOrNull = v => (v === '' || v === null || v === undefined ? null : toNumber(v));
 
@@ -351,8 +351,8 @@ export const STORE_GEO = {
   'Tallahassee': [30.44, -84.28], 'Thomasville': [30.84, -83.98], 'Albany': [31.58, -84.16], 'Macon': [32.84, -83.63],
   'Warner Robins': [32.61, -83.62], 'Dothan': [31.22, -85.39], 'Enterprise': [31.32, -85.86], 'Panama City': [30.18, -85.66],
   'Valdosta': [30.83, -83.28], 'Opelika': [32.65, -85.38], 'Columbus': [32.46, -84.99],
-  'Town Center': [30.26, -81.53], 'North': [30.48, -81.63], 'Orange Park': [30.17, -81.71], 'Brunswick': [31.15, -81.49],
-  'Yulee': [30.63, -81.61], 'St. Augustine': [29.90, -81.31], 'Outlet Regency': [30.33, -81.55],
+  'Town Center': [30.2597, -81.5246], 'North': [30.4788, -81.6376], 'Orange Park': [30.1992, -81.7381], 'Brunswick': [31.1994, -81.4809],
+  'Yulee': [30.6317, -81.5489], 'St. Augustine': [29.8684, -81.3313], 'Outlet Regency': [30.3180, -81.5564],
   'Mobile': [30.68, -88.15], "D'Iberville": [30.43, -88.89], 'Spanish Fort': [30.67, -87.92], 'Pensacola': [30.47, -87.21],
   'Crestview': [30.76, -86.57], 'Ft. Walton': [30.42, -86.62], 'Outlet Pensacola': [30.47, -87.21],
   'Greensboro': [36.07, -79.79], 'Winston Salem': [36.10, -80.24], 'Burlington': [36.10, -79.44], 'Danville': [36.59, -79.40],
@@ -361,7 +361,13 @@ export const STORE_GEO = {
   'Houma': [29.60, -90.72], 'Lake Charles': [30.23, -93.22], 'Opelousas': [30.53, -92.08], 'Ponchatoula': [30.44, -90.44],
   'Hattiesburg': [31.33, -89.29], 'Flowood': [32.31, -90.14], 'Harvey': [29.90, -90.08]
 };
+// Road drive times in minutes (typical, no traffic), looked up store to store. Pairs not here fall back to
+// the straight-line estimate below.
+export const ROAD_MIN = { 'North|Town Center': 28, 'Orange Park|Town Center': 29, 'Outlet Regency|Town Center': 13, 'St. Augustine|Town Center': 45, 'Town Center|Yulee': 49, 'Brunswick|Town Center': 96, 'North|Orange Park': 34, 'North|Outlet Regency': 20, 'North|St. Augustine': 64, 'North|Yulee': 24, 'Brunswick|North': 70, 'Orange Park|Outlet Regency': 32, 'Orange Park|St. Augustine': 48, 'Orange Park|Yulee': 56, 'Brunswick|Orange Park': 101, 'Outlet Regency|St. Augustine': 49, 'Outlet Regency|Yulee': 42, 'Brunswick|Outlet Regency': 88, 'St. Augustine|Yulee': 86, 'Brunswick|St. Augustine': 132, 'Brunswick|Yulee': 68 };
+// A Market Leader's day starts and ends at home. Over this, one way, the day is flagged as a long drive.
+export const LONG_DRIVE_MIN = 90;
 export function driveMin(a, b) {
+  if (a && b && a !== b) { const k = [a, b].sort().join('|'); if (ROAD_MIN[k] != null) return ROAD_MIN[k]; }
   const p = STORE_GEO[a], q = STORE_GEO[b];
   if (!p || !q || a === b) return a === b ? 0 : null;
   const R = 3959, rad = x => x * Math.PI / 180;
