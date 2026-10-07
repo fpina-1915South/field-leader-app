@@ -1,16 +1,16 @@
-import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610071024';
-import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610071024';
+import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610071048';
+import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610071048';
 import {
   STORES, DISTRICTS, canonicalStore, isKnownStore, parseRsa, rangeFromFileName, parseTeamRoster, resolveReportNames,
   paceFactor, DEFAULT_GOALS, cidOf, status, fmt, goalsFor, TEAM_FOCUS, pickStoreFocus
-} from './base.js?v=202610071024';
+} from './base.js?v=202610071048';
 import {
   iso, fromIso, addDays, daysApart, weekStartOf, DAY_NAMES, DAY_LONG, dow, DEFAULT_OFF, validOff, safeOff, VISIT_DAYS, STORE_GOALS,
   parseDaily, needScore, band, pct, environment, buildPlan, pivotSuggestion, ELEMENTS, SEGMENTS, AORS, PRACTICE, VISIT_TYPES, kindToType, visitScore, visitSummary, consultantCoaching, drillFor, draggers, helpers, STORE_TO_RSA, hasCommitment, commitmentText, blackoutFor, offChoicesFor, storeFocus, rsaPicks, consultantWeeks, teamSignals,
   STORE_METRICS, slug, COACHING, METRICS, PLAIN, isOutlet, driveMin, driveText, MAX_SPLIT_MIN, LONG_DRIVE_MIN, LEVERS, leverStatus, suggestLever,
   consultantTrends, TREND_ROWS, trendFmt, trendRead, TREND_LABEL,
   OFFER_DEFAULT, PLAY, PLAY_CHECKS, PLAY_CHECKS_REMOTE, offerActive, offerMath, FLIQ_CHECKS, FLIQ_CHECKS_REMOTE, FLIQ_DAILY
-} from './ml.js?v=202610071024';
+} from './ml.js?v=202610071048';
 
 // Legacy Sunday-start weeks, read as the Monday week that replaced them.
 function fromSundayPlan(p, week) {
@@ -1774,6 +1774,32 @@ function localGet(id) { try { return JSON.parse(localStorage.getItem(localKey(id
 function localSet(v) { try { localStorage.setItem(localKey(v.id), JSON.stringify(v)); } catch (e) {} }
 function localDrop(id) { try { localStorage.removeItem(localKey(id)); } catch (e) {} }
 
+// ---------------------------------------------------------------- visit time stamps
+// Start is stamped when the leader taps Start (or makes their first entry on the day of the visit);
+// the end is the first submit. Both are device time, saved with the visit.
+const clockOf = iso => iso ? new Date(iso).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : '';
+const durText = m => m == null ? '' : m < 60 ? `${m} min` : `${Math.floor(m / 60)} hr${m % 60 ? ` ${m % 60} min` : ''}`;
+function visitTime(x) {
+  const start = x?.startedAt || null;
+  const end = x?.status === 'done' ? (x.endedAt || (String(x.submittedAt || '').length > 10 ? x.submittedAt : null)) : null;
+  let mins = start && end ? Math.round((Date.parse(end) - Date.parse(start)) / 60000) : null;
+  if (mins != null && (mins < 0 || end.slice(0, 10) !== start.slice(0, 10))) mins = null; // submitted another day: no duration
+  const live = !!start && !end && x.date === today();
+  return { start, end, mins, live, liveMins: live ? Math.round((Date.now() - Date.parse(start)) / 60000) : null, auto: !!x?.startAuto };
+}
+function timeLine(x) {
+  const t = visitTime(x);
+  if (!t.start) return x?.status === 'done' && t.end ? `Submitted ${clockOf(t.end)} · no start time` : '';
+  if (t.live) return `Started ${clockOf(t.start)} · in progress ${durText(t.liveMins)}`;
+  if (t.end) return `${clockOf(t.start)} to ${clockOf(t.end)}${t.mins != null ? ` · ${durText(t.mins)}` : ' · submitted later'}`;
+  return `Started ${clockOf(t.start)} · not submitted`;
+}
+const timePill = x => { const t = visitTime(x), l = timeLine(x); return l ? `<span class="pill ${t.live ? 'set' : ''}" title="${esc(t.auto ? 'Start stamped at the first entry' : 'Start tapped in the app')}">${t.live ? '● ' : ''}${esc(l)}</span>` : ''; };
+function startVisit(V, auto) {
+  if (!V || V.startedAt || V.status === 'done' || V.email !== S.user.email || V.date !== today()) return false;
+  V.startedAt = new Date().toISOString(); if (auto) V.startAuto = true; else delete V.startAuto;
+  saveDraft(true); return true;
+}
 async function viewVisit() {
   const x = S.visit, v = $('#view');
   const who = S.users.find(u => u.email === x.email) || S.user;
@@ -1935,6 +1961,7 @@ async function viewVisit() {
       ${needChip(sc?.score)}
     </div>
   </div>
+  ${canLog && x.email === S.user.email && x.date === today() && !V.startedAt && V.status !== 'done' ? `<div class="startbar"><div><b>${x.remote ? 'Starting the call?' : 'Walking in?'}</b> Tap Start. It time-stamps the ${x.remote ? 'call' : 'visit'} so your VP can see you're on it, and submitting stamps the end.</div><button class="btn primary" type="button" id="vstart">Start ${x.remote ? 'call' : 'visit'}</button></div>` : timeLine(V) ? `<p class="small" style="margin:0 0 8px">${timePill(V)}</p>` : ''}
   ${whoPanel(x.store, x.date)}
   ${later ? `<div class="warnbox">This visit is on ${esc(longDate(x.date))}. Use it to prep; you can fill it in that day.</div>` : ''}
   ${(() => { const b = budgetFor(x.store, x.date), y = S.meta.latestDaily, mb = y ? budgetToDate(x.store, y) : null, m = S.daily?.stores?.[x.store]?.mtd?.k;
@@ -2280,7 +2307,7 @@ let vTimer = null;
 // ---------------------------------------------------------------- edits after submit
 // Once a visit is submitted, any later change is stamped on the visit (who, when, which parts) and
 // sent to the VP's review list, so nothing gets quietly rewritten after the fact.
-const EDIT_SKIP = new Set(['at', 'by', 'needScore', 'commitments', 'edits', 'lastEdit', 'submittedAt', 'status', 'follow', 'photosMissing', 'photosMissingList', 'id', 'email', 'name', 'role', 'store', 'date']);
+const EDIT_SKIP = new Set(['startedAt', 'endedAt', 'startAuto', 'at', 'by', 'needScore', 'commitments', 'edits', 'lastEdit', 'submittedAt', 'status', 'follow', 'photosMissing', 'photosMissingList', 'id', 'email', 'name', 'role', 'store', 'date']);
 const EDIT_LABEL = { leaderWin: 'Leader win', checks: '6 Elements walk', segs: 'Value segments', aor: 'AOR walk', elNotes: '6 Elements notes', segMeta: 'Value segments',
   consultants: 'Consultants', actions: 'Action plan', leaderCommit: 'Store leader commitment', working: 'What is working', notes: 'Notes', teamNotes: 'Team notes',
   reflection: 'Reflection', photoReason: 'Reason for missing photos', focus: 'Team focus', lever: 'Lever', play: 'Run the play', fliq: 'FrontLine IQ', floor: 'Leader knows the floor', intent: 'Why you are here', vtype: 'Visit type', kind: 'Visit type' };
@@ -2340,6 +2367,8 @@ function saveDraft(now) {
 function saveDraftRetry(id) { if (S.V && S.V.id === id) saveDraft(true); else syncLocalVisits(); }
 function wireVisit(V, canLog, snap) {
   const v = $('#view');
+  const vs = $('#vstart'); if (vs) vs.onclick = () => { if (startVisit(V)) { toast(`Started ${clockOf(V.startedAt)}.`); viewVisit(); } };
+  if (canLog && !V.startedAt && V.date === today()) { const auto = () => { if (startVisit(V, true)) { const b = v.querySelector('.startbar'); if (b) b.outerHTML = `<p class="small" style="margin:0 0 8px">${timePill(V)}</p>`; } }; v.addEventListener('input', auto, { capture: true, once: true }); v.addEventListener('change', auto, { capture: true, once: true }); }
   if (S.vBaseFor !== V.id) { S.vBaseFor = V.id; S.vBase = editParts(V); }
   wireWho(v, () => viewVisit());
   v.querySelectorAll('[data-toscore]').forEach(a => a.onclick = () => { stopMic(); if (canLog) saveDraft(true); });
@@ -2531,7 +2560,7 @@ function wireVisit(V, canLog, snap) {
     }
     const wasDone = V.status === 'done';
     if (!wasDone) S.vBaseFor = null; // the first submit is not an edit
-    V.status = 'done'; V.submittedAt = V.submittedAt || new Date().toISOString();
+    V.status = 'done'; V.submittedAt = V.submittedAt || new Date().toISOString(); if (!wasDone) V.endedAt = V.endedAt || V.submittedAt;
     saveDraft(true);
     if (wasDone) sendEditAlert(V); else { S.vBaseFor = V.id; S.vBase = editParts(V); }
     try {
@@ -2623,6 +2652,7 @@ async function viewBrief() {
   await viewBriefInner();
   const top = html => { const el = document.createElement('div'); el.innerHTML = html; const v = $('#view'); if (el.firstElementChild && v) v.insertBefore(el.firstElementChild, v.firstChild); };
   if (!seesAll()) { const c = await mlCoachCard(); if (c && S.tab === 'brief' && !S.visit) top(c); return; }
+  if (S.tab === 'brief' && !S.visit) { top(await fieldTodayPanel()); const fr = $('#fnrefresh'); if (fr) fr.onclick = () => viewBrief(); }
   if (isCoach()) {
     if (!S.mlcAll || S.mlcAt !== today()) { S.mlcAll = await S.be.mlCoachAll().catch(() => []); S.mlcAt = today(); }
     const n = coachNudge(); if (n && S.tab === 'brief' && !S.visit) { top(n); const g = $('#gocoach'); if (g) g.onclick = () => { S.tab = 'mlcoach'; renderShell(); }; }
@@ -3328,6 +3358,7 @@ async function viewLeaders() {
       <p class="small" style="margin:6px 0">${p ? `<b>${done}</b> of ${p.days.length} visits logged${due ? ` · <span class="warn">${due} not logged</span>` : ''}${(p.pivots || []).length ? ` · ${p.pivots.length} changes` : ''} · ${S.visits.filter(v => v.remote && v.email === l.email && v.date >= week && v.date <= addDays(week, 6)).length} remote` : '<span class="warn">No plan yet this week</span>'}</p>
       ${p ? `<ul class="small" style="padding-left:18px;margin:4px 0">${p.days.map(d => `<li>${esc(dayLabel(d.date))}: ${esc(d.store || 'Open')} ${d.status === 'done' ? '<span class="good">✓</span>' : d.date < t ? '<span class="warn">not logged</span>' : ''}</li>`).join('')}</ul>` : ''}
       <p class="small" style="margin:6px 0">Days off this week: <b>${safeOff(p?.off || l.off, l.role).map(x => DAY_NAMES[x]).join(', ')}</b> · Next week: ${(() => { const n = nextOff.find(x => x.email === l.email); return n ? `<b>${n.off.map(x => DAY_NAMES[x]).join(', ')}</b>` : '<span class="warn">not set</span>'; })()}</p>
+      <p class="small" style="margin:6px 0"><b>Today:</b> ${fieldNow(l.email, true) || '<span class="muted">nothing started</span>'}</p>
       ${(() => { const w = weekDrive(l, p); return w ? `<p class="small" style="margin:6px 0">Driving this week: about <b>${driveText(w.total)}</b>${w.long ? ` · <span class="warn">${w.long} long day${w.long > 1 ? 's' : ''}</span>` : ''}</p>` : ''; })()}
       ${top ? `<p class="small" style="margin:6px 0">Highest need: <b>${esc(top)}</b> ${needChip(S.scores[top]?.score)}</p>` : ''}
       ${sugg ? `<p class="small warn">Pivot waiting: add ${esc(sugg.to)}, drop ${esc(sugg.from)}</p>` : ''}
@@ -3337,6 +3368,26 @@ async function viewLeaders() {
   v.querySelectorAll('[data-lw]').forEach(b => b.onclick = () => { S.viewEmail = b.dataset.lw; S.tab = 'week'; S.week = null; renderShell(); });
 }
 
+// Today's visits for a leader, with start and end times.
+function fieldNow(email, long) {
+  const t = today(), list = S.visits.filter(x => x.email === email && x.date === t && (x.startedAt || x.status === 'done'));
+  if (!list.length) return '';
+  return (long ? '' : '<br>') + list.map(x => { const vt = visitTime(x); return `<span class="small ${vt.live ? 'good' : 'muted'}">${esc(x.store)}${x.remote ? ' (call)' : ''}: ${esc(timeLine(x))}</span>`; }).join(long ? ' · ' : '<br>');
+}
+// On the VP and coach brief: who is on a visit right now, and today's finished visits with their length.
+async function fieldTodayPanel() {
+  try { S.visits = await S.be.visits(); } catch (e) {}
+  const t = today(), ls = leaders().filter(l => l.email !== S.user.email || isCoach());
+  const rows = ls.map(l => ({ l, vs: S.visits.filter(x => x.email === l.email && x.date === t && (x.startedAt || x.status === 'done')) }));
+  const live = rows.flatMap(r => r.vs.filter(x => visitTime(x).live).map(x => ({ l: r.l, x })));
+  const done = rows.flatMap(r => r.vs.filter(x => !visitTime(x).live).map(x => ({ l: r.l, x })));
+  const none = rows.filter(r => !r.vs.length).map(r => firstOf(r.l.name || r.l.email));
+  return `<section class="panel" id="fieldnow"><h3 style="margin:0 0 4px">In the field today</h3>
+    <p class="small" style="margin:0 0 8px">Visits started in the app, with start and end times. As of ${esc(clockOf(new Date().toISOString()))}. <button class="link" type="button" id="fnrefresh">Refresh</button></p>
+    ${live.length ? `<ul class="blist">${live.map(({ l, x }) => `<li><span class="good">● On ${x.remote ? 'a call' : 'a visit'}</span> <b>${esc(firstOf(l.name || l.email))}</b> at ${esc(x.store)} since ${esc(clockOf(x.startedAt))} (${esc(durText(visitTime(x).liveMins))})</li>`).join('')}</ul>` : '<p class="small muted" style="margin:0">Nobody is on a visit right now.</p>'}
+    ${done.length ? `<p class="eyebrow" style="margin:8px 0 2px">Done today</p><ul class="blist small">${done.map(({ l, x }) => `<li><b>${esc(firstOf(l.name || l.email))}</b>, ${esc(x.store)}${x.remote ? ' (call)' : ''}: ${esc(timeLine(x))}</li>`).join('')}</ul>` : ''}
+    ${none.length ? `<p class="small muted" style="margin:6px 0 0">Nothing started yet: ${esc(none.join(', '))}.</p>` : ''}</section>`;
+}
 // ---------------------------------------------------------------- daily coaching of Market Leaders
 // The field coach (Orlando) or the VP coaches each Market Leader every day, remote, on how they ran
 // their visits. Each visit is read for the habits of an effective Market Leader; the habit missed most
@@ -3473,7 +3524,7 @@ async function viewMlCoach() {
   <div class="scroller"><table class="grid"><thead><tr><th>Market Leader</th><th>Today</th><th>Last visits</th><th class="num">Habits (7 days)</th><th>Work on</th><th>Coached</th></tr></thead><tbody>
     ${team.map(m => { const p = pics[m.email], d = S.mlcAll.filter(x => x.email === m.email && x.status === 'done').sort((a, b) => b.date.localeCompare(a.date))[0];
       return `<tr data-mlc="${esc(m.email)}" style="cursor:pointer;${m.email === ml.email ? 'box-shadow:inset 4px 0 0 #F68C2C' : ''}"><td class="nm"><b>${esc(m.name || m.email)}</b>${m.email === ml.email ? ' <span class="pill set">Open</span>' : ''}</td>
-        <td>${dayStores(p.todayDay).length ? esc(dayStores(p.todayDay).join(', ')) : p.todayDay ? 'Off or open' : '<span class="muted">No plan</span>'}</td>
+        <td>${dayStores(p.todayDay).length ? esc(dayStores(p.todayDay).join(', ')) : p.todayDay ? 'Off or open' : '<span class="muted">No plan</span>'}${fieldNow(m.email)}</td>
         <td>${p.lastDay ? `${esc(dayLabel(p.lastDay))}: ${p.yVisits.filter(y => y.x.date === p.lastDay).map(y => esc(y.x.store) + (y.x.remote ? ' (remote)' : '')).join(', ')}` : '<span class="warn">None in 7 days</span>'}${p.notLogged.length ? ` <span class="warn">· ${p.notLogged.length} not logged</span>` : ''}</td>
         <td class="num">${qPill(p.avg)}</td><td>${p.ranked[0] ? esc(ML_HABITS[p.ranked[0]].t) : '<span class="muted">--</span>'}</td>
         <td>${d ? (d.date === t ? '<span class="pill done">Today</span>' : esc(dayLabel(d.date))) : '<span class="warn">Not yet</span>'}</td></tr>`; }).join('')}
@@ -3494,7 +3545,7 @@ async function viewMlCoach() {
       : '<p class="small muted" style="margin:0">No commitment from an earlier daily coaching yet. Today sets the first one.</p>'}
 
     <h3 style="margin:16px 0 6px">3. Review the visits <span class="small muted">(5 min)</span></h3>
-    ${P.yVisits.length ? P.yVisits.map(({ x, q }) => `<details class="vis" ${P.yVisits.length < 3 ? 'open' : ''}><summary><b>${esc(x.store)}</b><span class="small">${esc(dayLabel(x.date))}</span>${x.remote ? '<span class="pill">Remote</span>' : '<span class="pill set">In store</span>'}${qPill(q.pct)}</summary>
+    ${P.yVisits.length ? P.yVisits.map(({ x, q }) => `<details class="vis" ${P.yVisits.length < 3 ? 'open' : ''}><summary><b>${esc(x.store)}</b><span class="small">${esc(dayLabel(x.date))}</span>${x.remote ? '<span class="pill">Remote</span>' : '<span class="pill set">In store</span>'}${qPill(q.pct)}${timePill(x)}</summary>
       <ul class="blist small" style="margin:6px 0">${q.checks.filter(c => c.ok !== null).map(c => `<li>${mark(c.ok)} <b>${esc(ML_HABITS[c.k].t)}:</b> ${esc(c.note)}</li>`).join('')}</ul>
       ${q.sm.commitments.length ? `<p class="small" style="margin:4px 0"><b>Their commitments:</b></p><ol class="small" style="margin:0 0 4px">${q.sm.commitments.map(c => `<li>${esc(c)}</li>`).join('')}</ol>` : ''}
       <button class="btn tiny" type="button" data-mov='${esc(JSON.stringify({ store: x.store, date: x.date, email: x.email, kind: x.kind, remote: !!x.remote }))}'>Open the visit</button></details>`).join('')
@@ -3661,7 +3712,7 @@ function viewVisits() {
   <div class="panel">${list.map(x => {
     const sm = visitSummary(x), fixes = sm.fixes;
     const vid = `${x.email}_${x.date}_${slug(x.store)}${x.remote ? '_remote' : ''}`;
-    return `<details class="vis" data-vid="${esc(vid)}"><summary><b>${esc(x.store)}</b><span class="small">${esc(longDate(x.date))}</span><span class="small muted">${esc(x.name)}</span>${x.remote ? '<span class="pill">Remote</span>' : `<span class="pill" data-pcount="${esc(vid)}" hidden></span>`}${x.edits?.length ? `<span class="pill edited" title="${esc(editedText(x).join(' | '))}">Edited after submit</span>` : ''}${!x.remote && x.status === 'done' && x.photosMissing ? `<span class="pill edited">${x.photosMissing} photo${x.photosMissing > 1 ? 's' : ''} missing</span>` : ''}<span class="pill ${x.vtype === 'Follow-Up' ? 'check' : x.vtype === 'Priority' ? 'set' : ''}">${esc(x.vtype || kindToType(x.kind))}</span>${x.status === 'draft' ? '<span class="pill off">Draft</span>' : ''}${pend.has(x.id) ? '<span class="pill edited" title="Saved on this phone. It sends when you have signal.">Not sent yet</span>' : ''}${sm.score ? `<span class="pill">${sm.score.pct}%</span>` : ''}${fixes.length ? `<span class="pill off">${fixes.length} to fix</span>` : ''}</summary>
+    return `<details class="vis" data-vid="${esc(vid)}"><summary><b>${esc(x.store)}</b><span class="small">${esc(longDate(x.date))}</span><span class="small muted">${esc(x.name)}</span>${timePill(x)}${x.remote ? '<span class="pill">Remote</span>' : `<span class="pill" data-pcount="${esc(vid)}" hidden></span>`}${x.edits?.length ? `<span class="pill edited" title="${esc(editedText(x).join(' | '))}">Edited after submit</span>` : ''}${!x.remote && x.status === 'done' && x.photosMissing ? `<span class="pill edited">${x.photosMissing} photo${x.photosMissing > 1 ? 's' : ''} missing</span>` : ''}<span class="pill ${x.vtype === 'Follow-Up' ? 'check' : x.vtype === 'Priority' ? 'set' : ''}">${esc(x.vtype || kindToType(x.kind))}</span>${x.status === 'draft' ? '<span class="pill off">Draft</span>' : ''}${pend.has(x.id) ? '<span class="pill edited" title="Saved on this phone. It sends when you have signal.">Not sent yet</span>' : ''}${sm.score ? `<span class="pill">${sm.score.pct}%</span>` : ''}${fixes.length ? `<span class="pill off">${fixes.length} to fix</span>` : ''}</summary>
       <div class="vbody">${!x.remote && x.status === 'done' && x.photosMissing ? `<b class="warn">Photos missing (${x.photosMissing}):</b> ${esc((x.photosMissingList || []).join(', ') || 'not listed')}\n<b>Reason:</b> ${esc(x.photoReason || 'none given')}\n` : ''}${x.edits?.length ? `<b class="warn">Edited after submit:</b>\n${editedText(x).map(t => '  ' + esc(t)).join('\n')}\n` : ''}${sm.win ? `<b>Leader win:</b> ${esc(sm.winName ? titleName(sm.winName) + ': ' : '')}${esc(sm.win)}\n` : ''}<b>Working:</b> ${esc(x.working || '--')}
 <b>Commitments:</b>
 ${sm.commitments.length ? sm.commitments.map((c, i) => `${i + 1}. ${esc(c)}`).join('\n') : '--'}
