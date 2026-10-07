@@ -1,16 +1,16 @@
-import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610062228';
-import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610062228';
+import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610070556';
+import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610070556';
 import {
   STORES, DISTRICTS, canonicalStore, isKnownStore, parseRsa, rangeFromFileName, parseTeamRoster, resolveReportNames,
   paceFactor, DEFAULT_GOALS, cidOf, status, fmt, goalsFor, TEAM_FOCUS, pickStoreFocus
-} from './base.js?v=202610062228';
+} from './base.js?v=202610070556';
 import {
   iso, fromIso, addDays, daysApart, weekStartOf, DAY_NAMES, DAY_LONG, dow, DEFAULT_OFF, validOff, safeOff, VISIT_DAYS, STORE_GOALS,
   parseDaily, needScore, band, pct, environment, buildPlan, pivotSuggestion, ELEMENTS, SEGMENTS, AORS, PRACTICE, VISIT_TYPES, kindToType, visitScore, visitSummary, consultantCoaching, drillFor, draggers, helpers, STORE_TO_RSA, hasCommitment, commitmentText, blackoutFor, offChoicesFor, storeFocus, rsaPicks, consultantWeeks, teamSignals,
   STORE_METRICS, slug, COACHING, METRICS, PLAIN, isOutlet, driveMin, driveText, MAX_SPLIT_MIN, LEVERS, leverStatus, suggestLever,
   consultantTrends, TREND_ROWS, trendFmt, trendRead, TREND_LABEL,
   OFFER_DEFAULT, PLAY, PLAY_CHECKS, PLAY_CHECKS_REMOTE, offerActive, offerMath, FLIQ_CHECKS, FLIQ_CHECKS_REMOTE, FLIQ_DAILY
-} from './ml.js?v=202610062228';
+} from './ml.js?v=202610070556';
 
 // Legacy Sunday-start weeks, read as the Monday week that replaced them.
 function fromSundayPlan(p, week) {
@@ -663,6 +663,8 @@ const activeOffer = () => offerActive(S.offer, today()) ? S.offer : null;
 const isCoach = () => !!S.user?.coach && S.user?.role !== 'exec';
 const seesAll = () => ['admin', 'exec'].includes(S.user?.role) || isCoach();
 const reviews = () => isAdmin() || isCoach();
+// The field coach can load the reports (daily, RSA, budgets, carts, rosters) but not Setup.
+const canUpload = () => isAdmin() || isCoach();
 const defaultView = () => (isCoach() && (S.user.stores || []).length ? S.user.email : leaders()[0]?.email) || null;
 // Field leaders = Market Leaders and directors. Each store has one Market Leader; directors can overlap.
 const leaders = () => S.users.filter(u => FIELD.includes(u.role) && (u.stores || []).length).sort((a, b) => (a.role === 'leader' ? 0 : 1) - (b.role === 'leader' ? 0 : 1) || (a.name || a.email).localeCompare(b.name || b.email));
@@ -734,7 +736,8 @@ function renderShell() {
   tabs.push(['one', seesAll() ? '1 on 1s' : 'My 1 on 1']);
   if (canHoldOne() || S.user.role === 'exec') tabs.push(['mlcoach', 'Daily coaching']);
   tabs.push(['week', seesAll() ? 'Weekly plans' : 'My week'], ['stores', seesAll() ? 'Stores' : 'My stores'], ['messages', 'Team messages'], ['visits', 'Visit log']);
-  if (isAdmin()) tabs.push(['upload', 'Upload'], ['setup', 'Setup']);
+  if (canUpload()) tabs.push(['upload', 'Upload']);
+  if (isAdmin()) tabs.push(['setup', 'Setup']);
   tabs.push(['guide', 'How it works']);
   if (!tabs.some(t => t[0] === S.tab)) S.tab = tabs[0][0];
   $('#app').innerHTML = `
