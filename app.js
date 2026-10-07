@@ -1,16 +1,16 @@
-import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610041627';
-import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610041627';
+import { firebaseConfig, OWNER_EMAIL, EMAIL_DOMAIN } from './config.js?v=202610062228';
+import { kickoff, visitRecap, marketUpdate, dailyStore, dailyMarket } from './msgs.js?v=202610062228';
 import {
   STORES, DISTRICTS, canonicalStore, isKnownStore, parseRsa, rangeFromFileName, parseTeamRoster, resolveReportNames,
   paceFactor, DEFAULT_GOALS, cidOf, status, fmt, goalsFor, TEAM_FOCUS, pickStoreFocus
-} from './base.js?v=202610041627';
+} from './base.js?v=202610062228';
 import {
   iso, fromIso, addDays, daysApart, weekStartOf, DAY_NAMES, DAY_LONG, dow, DEFAULT_OFF, validOff, safeOff, VISIT_DAYS, STORE_GOALS,
   parseDaily, needScore, band, pct, environment, buildPlan, pivotSuggestion, ELEMENTS, SEGMENTS, AORS, PRACTICE, VISIT_TYPES, kindToType, visitScore, visitSummary, consultantCoaching, drillFor, draggers, helpers, STORE_TO_RSA, hasCommitment, commitmentText, blackoutFor, offChoicesFor, storeFocus, rsaPicks, consultantWeeks, teamSignals,
   STORE_METRICS, slug, COACHING, METRICS, PLAIN, isOutlet, driveMin, driveText, MAX_SPLIT_MIN, LEVERS, leverStatus, suggestLever,
   consultantTrends, TREND_ROWS, trendFmt, trendRead, TREND_LABEL,
   OFFER_DEFAULT, PLAY, PLAY_CHECKS, PLAY_CHECKS_REMOTE, offerActive, offerMath, FLIQ_CHECKS, FLIQ_CHECKS_REMOTE, FLIQ_DAILY
-} from './ml.js?v=202610041627';
+} from './ml.js?v=202610062228';
 
 // Legacy Sunday-start weeks, read as the Monday week that replaced them.
 function fromSundayPlan(p, week) {
@@ -242,6 +242,10 @@ async function firebaseBackend() {
     saveOneOnOne: d => F.setDoc(F.doc(db, 'oneonones', d.id), d),
     onePrivate: async id => (await get('oneprivate', id)) || sundayDoc(await get('oneprivate', sundayId(id)), id),
     saveOnePrivate: d => F.setDoc(F.doc(db, 'oneprivate', d.id), d),
+    // Daily coaching of Market Leaders (Orlando or the VP), one doc per Market Leader per day.
+    mlCoachFor: e => all('mlcoach', ['email', e]),
+    mlCoachAll: () => all('mlcoach'),
+    saveMlCoach: d => F.setDoc(F.doc(db, 'mlcoach', d.id), d),
     alerts: () => all('alerts'),
     offer: async () => (await get('config', 'offer'))?.offer || null,
     saveOffer: o => F.setDoc(F.doc(db, 'config', 'offer'), { offer: o, at: new Date().toISOString() }),
@@ -257,7 +261,7 @@ function demoBackend() {
   const leaders = [
     { email: 'east@demo', name: 'Demo Market Leader (Jacksonville)', role: 'leader', stores: ['Town Center', 'Orange Park', 'Yulee', 'St. Augustine'], off: DEFAULT_OFF },
     { email: 'nc@demo', name: 'Demo Market Leader (Carolinas)', role: 'leader', pilots: ['frontlineiq'], stores: ['Greensboro', 'Winston Salem', 'Burlington', 'Danville', 'Outlet Greensboro'], off: DEFAULT_OFF },
-    { email: 'director@demo', name: 'Demo Director (East)', role: 'director', stores: ['Town Center', 'North', 'Orange Park', 'Brunswick', 'Yulee', 'St. Augustine', 'Outlet Regency'], off: [0, 6] },
+    { email: 'director@demo', name: 'Demo Director (East)', role: 'director', coach: true, stores: ['Town Center', 'North', 'Orange Park', 'Brunswick', 'Yulee', 'St. Augustine', 'Outlet Regency'], off: [0, 6] },
     { email: 'gulf@demo', name: 'Demo Market Leader (Gulf Coast)', role: 'leader', stores: ['Mobile', "D'Iberville", 'Spanish Fort', 'Pensacola', 'Crestview', 'Ft. Walton'], off: [2, 3] }
   ];
   const users = {
@@ -496,6 +500,9 @@ function demoBackend() {
     async saveOneOnOne(d) { ones[d.id] = clone(d); },
     onePrivate: async id => clone(ones['p_' + id] || null),
     async saveOnePrivate(d) { ones['p_' + d.id] = clone(d); },
+    mlCoachFor: async e => clone(Object.values(ones).filter(d => d.kind === 'mlcoach' && d.email === e)),
+    mlCoachAll: async () => clone(Object.values(ones).filter(d => d.kind === 'mlcoach')),
+    async saveMlCoach(d) { ones['mlc_' + d.id] = clone({ ...d, kind: 'mlcoach' }); },
     alerts: async () => clone(Object.values(alerts)),
     offer: async () => clone(offerDoc),
     async saveOffer(o) { offerDoc = clone(o); },
@@ -651,7 +658,12 @@ function scoresFor(daily) {
 const isAdmin = () => S.user?.role === 'admin';
 const hasFliq = u => (u?.pilots || []).includes('frontlineiq');
 const activeOffer = () => offerActive(S.offer, today()) ? S.offer : null;
-const seesAll = () => ['admin', 'exec'].includes(S.user?.role);
+// A field coach (Orlando) keeps his own market and also sees everything like a VP: he holds the
+// Market Leader 1 on 1s and coaches them every day, remote.
+const isCoach = () => !!S.user?.coach && S.user?.role !== 'exec';
+const seesAll = () => ['admin', 'exec'].includes(S.user?.role) || isCoach();
+const reviews = () => isAdmin() || isCoach();
+const defaultView = () => (isCoach() && (S.user.stores || []).length ? S.user.email : leaders()[0]?.email) || null;
 // Field leaders = Market Leaders and directors. Each store has one Market Leader; directors can overlap.
 const leaders = () => S.users.filter(u => FIELD.includes(u.role) && (u.stores || []).length).sort((a, b) => (a.role === 'leader' ? 0 : 1) - (b.role === 'leader' ? 0 : 1) || (a.name || a.email).localeCompare(b.name || b.email));
 const leaderOf = store => S.users.find(l => l.role === 'leader' && (l.stores || []).includes(store));
@@ -720,6 +732,7 @@ function renderShell() {
   tabs.push(['brief', 'Daily brief']);
   if (seesAll()) tabs.push(['leaders', 'Leaders']);
   tabs.push(['one', seesAll() ? '1 on 1s' : 'My 1 on 1']);
+  if (canHoldOne() || S.user.role === 'exec') tabs.push(['mlcoach', 'Daily coaching']);
   tabs.push(['week', seesAll() ? 'Weekly plans' : 'My week'], ['stores', seesAll() ? 'Stores' : 'My stores'], ['messages', 'Team messages'], ['visits', 'Visit log']);
   if (isAdmin()) tabs.push(['upload', 'Upload'], ['setup', 'Setup']);
   tabs.push(['guide', 'How it works']);
@@ -731,7 +744,7 @@ function renderShell() {
   const ab = $('#alertgo'); if (ab) ab.onclick = () => { S.tab = 'brief'; S.visit = null; renderShell(); setTimeout(() => $('#alerts')?.scrollIntoView({ behavior: 'smooth' }), 300); };
   document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => { S.tab = b.dataset.tab; S.visit = null; renderShell(); });
   if (S.visit) return viewVisit();
-  ({ brief: viewBrief, one: viewOne, leaders: viewLeaders, week: viewWeek, stores: viewStores, messages: viewMessages, visits: viewVisits, upload: viewUpload, setup: viewSetup, guide: viewGuide })[S.tab]();
+  ({ brief: viewBrief, one: viewOne, mlcoach: viewMlCoach, leaders: viewLeaders, week: viewWeek, stores: viewStores, messages: viewMessages, visits: viewVisits, upload: viewUpload, setup: viewSetup, guide: viewGuide })[S.tab]();
 }
 const dataLine = () => {
   const d = S.meta.latestDaily;
@@ -749,7 +762,7 @@ const CHANGE_REASONS = ['Called into a store (issue or emergency)', 'Store numbe
 const vpNames = () => { const a = S.users.filter(u => u.role === 'admin'); return a.length ? a.map(u => firstOf(u.name) || u.email).join(' and ') : 'your VP'; };
 const needsReason = () => !isAdmin();
 function alertBar() {
-  if (!isAdmin()) return '';
+  if (!reviews()) return '';
   const n = (S.alerts || []).filter(a => !a.seen).length;
   return n ? `<div class="warnbox" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:0 0 14px"><b>${n} schedule change${n > 1 ? 's' : ''} to review.</b><button class="btn tiny" id="alertgo" type="button">Review</button></div>` : '';
 }
@@ -802,7 +815,7 @@ async function viewWeek() {
   const v = $('#view');
   const week = S.week || (S.week = weekStartOf(today()));
   const thisWeek = weekStartOf(today());
-  if (seesAll() && !S.viewEmail) S.viewEmail = leaders()[0]?.email || null;
+  if (seesAll() && !S.viewEmail) S.viewEmail = defaultView();
   const email = seesAll() ? S.viewEmail : S.user.email;
   const who = S.users.find(u => u.email === email) || (email === S.user.email ? S.user : null);
   const picker = seesAll() ? `<label for="lp" style="margin:0">Field leader<select id="lp">${leaders().map(l => `<option value="${esc(l.email)}" ${l.email === email ? 'selected' : ''}>${esc(whoLabel(l))}</option>`).join('')}</select></label>` : '';
@@ -2566,7 +2579,7 @@ function viewStores() {
     <tbody>${list.map(row).join('') || '<tr><td colspan="14">No stores.</td></tr>'}</tbody>
   </table></div></div>
   <p class="small">Tap a store for its coaching plan. SPG uses SPG with cancellations. Close rate is basis points against budget.</p>`;
-  v.querySelectorAll('[data-store]').forEach(r => r.onclick = () => openVisit({ store: r.dataset.store, date: today(), email: seesAll() ? (leaderOf(r.dataset.store)?.email || S.user.email) : S.user.email, kind: 'drop-in' }));
+  v.querySelectorAll('[data-store]').forEach(r => r.onclick = () => openVisit({ store: r.dataset.store, date: today(), email: seesAll() && !(S.user.stores || []).includes(r.dataset.store) ? (leaderOf(r.dataset.store)?.email || S.user.email) : S.user.email, kind: 'drop-in' }));
   const sf = $('#sf'); if (sf) sf.onchange = () => { S.storeFilter = sf.value; viewStores(); };
 }
 
@@ -2576,7 +2589,12 @@ function viewStores() {
 // The VP's review list sits on top of the daily brief: newest first, unreviewed at the top.
 async function viewBrief() {
   await viewBriefInner();
-  if (!seesAll()) return;
+  const top = html => { const el = document.createElement('div'); el.innerHTML = html; const v = $('#view'); if (el.firstElementChild && v) v.insertBefore(el.firstElementChild, v.firstChild); };
+  if (!seesAll()) { const c = await mlCoachCard(); if (c && S.tab === 'brief' && !S.visit) top(c); return; }
+  if (isCoach()) {
+    if (!S.mlcAll || S.mlcAt !== today()) { S.mlcAll = await S.be.mlCoachAll().catch(() => []); S.mlcAt = today(); }
+    const n = coachNudge(); if (n && S.tab === 'brief' && !S.visit) { top(n); const g = $('#gocoach'); if (g) g.onclick = () => { S.tab = 'mlcoach'; renderShell(); }; }
+  }
   const list = (S.alerts || []).filter(a => !a.seen || a.at >= addDays(today(), -7)).sort((a, b) => (a.seen - b.seen) || b.at.localeCompare(a.at)).slice(0, 12);
   if (!list.length) return;
   const el = document.createElement('section');
@@ -2586,12 +2604,12 @@ async function viewBrief() {
     ${list.map(a => a.type === 'visitEdit' ? `<div class="ap" style="${a.seen ? 'opacity:.7' : ''}">
       <div class="row" style="justify-content:space-between"><b>${esc(a.name)}</b><span class="small muted">${esc(dayLabel(a.at.slice(0, 10)))} ${esc(new Date(a.at).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }))}</span></div>
       <p style="margin:4px 0"><span class="pill edited">Edited after submit</span> ${esc(a.store)} visit from ${esc(dayLabel(a.visitDate))}, submitted ${esc(dayLabel((a.submittedAt || a.visitDate).slice(0, 10)))}. Changed: ${esc((a.parts || []).join(', '))}.</p>
-      <div class="row" style="gap:8px">${a.seen ? `<span class="small muted">Reviewed${a.seenByName ? ' by ' + esc(a.seenByName) : ''}</span>` : isAdmin() ? `<button class="btn tiny" data-seen="${esc(a.id)}" type="button">Mark reviewed</button>` : ''}<button class="btn tiny" type="button" data-aov='${esc(JSON.stringify({ store: a.store, date: a.visitDate, email: a.forEmail, remote: /_remote$/.test(a.visitId || '') }))}'>Open visit</button></div>
+      <div class="row" style="gap:8px">${a.seen ? `<span class="small muted">Reviewed${a.seenByName ? ' by ' + esc(a.seenByName) : ''}</span>` : reviews() ? `<button class="btn tiny" data-seen="${esc(a.id)}" type="button">Mark reviewed</button>` : ''}<button class="btn tiny" type="button" data-aov='${esc(JSON.stringify({ store: a.store, date: a.visitDate, email: a.forEmail, remote: /_remote$/.test(a.visitId || '') }))}'>Open visit</button></div>
     </div>` : `<div class="ap" style="${a.seen ? 'opacity:.7' : ''}">
       <div class="row" style="justify-content:space-between"><b>${esc(a.name)}</b><span class="small muted">${esc(dayLabel(a.at.slice(0, 10)))} · week of ${esc(shortDate(a.weekStart))}</span></div>
       <p style="margin:4px 0"><span class="pill check">${esc(a.reason)}</span>${a.note ? ` ${esc(a.note)}` : ''}</p>
       ${(a.changes || []).length ? `<ul class="blist small" style="margin:4px 0">${changeLines(a).map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}
-      ${a.seen ? `<span class="small muted">Reviewed${a.seenByName ? ' by ' + esc(a.seenByName) : ''}</span>` : isAdmin() ? `<button class="btn tiny" data-seen="${esc(a.id)}" type="button">Mark reviewed</button>` : ''}
+      ${a.seen ? `<span class="small muted">Reviewed${a.seenByName ? ' by ' + esc(a.seenByName) : ''}</span>` : reviews() ? `<button class="btn tiny" data-seen="${esc(a.id)}" type="button">Mark reviewed</button>` : ''}
     </div>`).join('')}`;
   const v = $('#view'); v.insertBefore(el, v.firstChild);
   el.querySelectorAll('[data-aov]').forEach(b => b.onclick = () => openVisit(JSON.parse(b.dataset.aov)));
@@ -2638,7 +2656,7 @@ function cartsPanel(stores) {
 }
 async function viewBriefInner() {
   const v = $('#view');
-  if (seesAll() && !S.viewEmail) S.viewEmail = leaders()[0]?.email || null;
+  if (seesAll() && !S.viewEmail) S.viewEmail = defaultView();
   const email = seesAll() ? S.viewEmail : S.user.email;
   const who = S.users.find(u => u.email === email) || (email === S.user.email ? S.user : null);
   const picker = seesAll() ? `<label for="bp" style="margin:0">Field leader<select id="bp">${leaders().map(l => `<option value="${esc(l.email)}" ${l.email === email ? 'selected' : ''}>${esc(whoLabel(l))}</option>`).join('')}</select></label>` : '';
@@ -2803,7 +2821,7 @@ const weekRange = ws => `${shortDate(ws)} to ${shortDate(addDays(ws, 6))}`;
 const moneyK = n => (n < 0 ? '-$' : '$') + Math.abs(Math.round(n)).toLocaleString('en-US');
 const firstOf = n => titleName(String(n || '').trim().split(/\s+/)[0] || '');
 const plainOf = key => PLAIN[key] || (STORE_METRICS.find(m => m.key === key)?.label || key).toLowerCase();
-const canHoldOne = () => isAdmin();
+const canHoldOne = () => isAdmin() || isCoach();
 
 // Market totals for a period: sales and budget add up; rates are weighted by each store's sales.
 function rollup(stores, daily, per) {
@@ -2857,10 +2875,11 @@ function oneFollow(a, stores, email, ws) {
 
 async function viewOne() {
   const v = $('#view');
-  const holder = canHoldOne() || S.user.role === 'exec';
-  const mms = holder ? leaders() : [S.user];
-  if (holder && (!S.oneEmail || !mms.some(l => l.email === S.oneEmail))) S.oneEmail = mms.find(l => l.role === 'leader')?.email || mms[0]?.email || null;
-  const email = holder ? S.oneEmail : S.user.email;
+  const holderRole = canHoldOne() || S.user.role === 'exec';
+  const mms = !holderRole ? [S.user] : isCoach() ? [...leaders().filter(l => l.role === 'leader'), S.user] : leaders();
+  if (holderRole && (!S.oneEmail || !mms.some(l => l.email === S.oneEmail))) S.oneEmail = mms.find(l => l.role === 'leader')?.email || mms[0]?.email || null;
+  const email = holderRole ? S.oneEmail : S.user.email;
+  const holder = holderRole && !(isCoach() && email === S.user.email);
   const who = S.users.find(u => u.email === email) || (email === S.user.email ? S.user : null);
   if (!who) { v.innerHTML = `<div class="panel"><h2>1 on 1s</h2><p>No Market Leaders set up yet. Add them in Setup and put them on a market.</p></div>`; return; }
   const weeks = Array.from({ length: 8 }, (_, i) => addDays(weekStartOf(today()), -7 * (i + 1)));
@@ -3002,19 +3021,21 @@ async function viewOne() {
   const doc = saved || { id: oneId(email, ws), email, name: who.name || email, weekStart: ws, status: 'draft', coaching: '', actions: [{}, {}, {}], support: '', supportBy: '', mmNotes: '', vpNotes: '' };
   if (!doc.actions) doc.actions = [{}, {}, {}];
   while (doc.actions.length < 3) doc.actions.push({});
-  if (!saved && canHoldOne()) {
+  if (!saved && holder && canHoldOne()) {
     doc.coaching = coachText();
     const sg = suggest(); for (let i = 0; i < 3 && sg[i]; i++) doc.actions[i] = sg[i];
   }
   if (holder) { const pv = await S.be.onePrivate(doc.id).catch(() => null); doc.vpNotes = pv?.vpNotes || ''; }
   S.O = doc;
-  const canEdit = canHoldOne();
+  const canEdit = holder && canHoldOne();
   const dis = canEdit ? '' : 'disabled';
 
   if (!holder && !saved) {
     v.innerHTML = `<div class="panel"><p class="eyebrow">1 on 1 · Week of ${esc(weekRange(ws))}</p><h2>Nothing yet for this week</h2><p>Your 1 on 1 shows up here once it's held.</p>
-      <label for="owk" style="max-width:260px">Week<select id="owk">${weeks.map(w => `<option value="${w}" ${w === ws ? 'selected' : ''}>Week of ${esc(weekRange(w))}</option>`).join('')}</select></label></div>`;
+      <div class="row" style="gap:10px">${holderRole ? `<label for="omm" style="margin:0">Market Leader<select id="omm">${mms.map(l => `<option value="${esc(l.email)}" ${l.email === email ? 'selected' : ''}>${esc(l.email === S.user.email ? 'Me (with my VP)' : whoLabel(l))}</option>`).join('')}</select></label>` : ''}
+      <label for="owk" style="max-width:260px;margin:0">Week<select id="owk">${weeks.map(w => `<option value="${w}" ${w === ws ? 'selected' : ''}>Week of ${esc(weekRange(w))}</option>`).join('')}</select></label></div></div>`;
     $('#owk').onchange = e => { S.oneWeek = e.target.value; viewOne(); };
+    const om = $('#omm'); if (om) om.onchange = e => { S.oneEmail = e.target.value; S.oneWeek = null; viewOne(); };
     return;
   }
 
@@ -3043,7 +3064,7 @@ async function viewOne() {
     <div><p class="eyebrow">1 on 1 · Week of ${esc(weekRange(ws))}</p><h2 class="big" style="margin:0">${esc(who.name || who.email)}</h2>
       <p class="small" style="margin:4px 0 0">${esc(marketsOf(email).map(m => m.name).join(', ') || allStores.length + ' stores')} · ${doc.status === 'done' ? `<span class="pill done">Held ${esc(shortDate(doc.heldAt?.slice(0, 10) || today()))}${doc.heldByName ? ' with ' + esc(doc.heldByName) : ''}</span>` : '<span class="pill check">Not held yet</span>'}</p></div>
     <div class="row">
-      ${holder ? `<label for="omm" style="margin:0">Market Leader<select id="omm">${mms.map(l => `<option value="${esc(l.email)}" ${l.email === email ? 'selected' : ''}>${esc(whoLabel(l))}</option>`).join('')}</select></label>` : ''}
+      ${holderRole ? `<label for="omm" style="margin:0">Market Leader<select id="omm">${mms.map(l => `<option value="${esc(l.email)}" ${l.email === email ? 'selected' : ''}>${esc(l.email === S.user.email ? 'Me (with my VP)' : whoLabel(l))}</option>`).join('')}</select></label>` : ''}
       <label for="owk" style="margin:0">Week<select id="owk">${weeks.map(w => `<option value="${w}" ${w === ws ? 'selected' : ''}>Week of ${esc(weekRange(w))}</option>`).join('')}</select></label>
     </div>
   </div>
@@ -3210,6 +3231,239 @@ async function viewLeaders() {
   v.querySelectorAll('[data-lw]').forEach(b => b.onclick = () => { S.viewEmail = b.dataset.lw; S.tab = 'week'; S.week = null; renderShell(); });
 }
 
+// ---------------------------------------------------------------- daily coaching of Market Leaders
+// The field coach (Orlando) or the VP coaches each Market Leader every day, remote, on how they ran
+// their visits. Each visit is read for the habits of an effective Market Leader; the habit missed most
+// becomes the day's coaching, with questions to ask, a role-play to run on the call and one commitment.
+const ML_HABITS = {
+  lever: { t: 'Walk in with a purpose', why: 'A visit without a lever turns into a store walk and a chat. The leader can\'t repeat back why you came, so nothing changes after you leave.',
+    good: 'Before the car door opens, they know the one lever (close rate or average ticket), the input behind it, and the two people to coach. They say it to the store leader in the first 10 minutes.',
+    ask: ['What lever did you pull in that store, and why that one?', 'If I called the store leader right now, what would they say you came to fix?', 'What did you read in the numbers before you walked in?'],
+    play: 'You play the store leader. Ask them to open the visit with you in 60 seconds: the win, the lever, the two people, and what good looks like by end of day.',
+    commit: { what: 'Set the lever and say it to the store leader in the first 10 minutes', to: 'Every visit, lever set before arrival' } },
+  follow: { t: 'Start with follow-up', why: 'If commitments from the last visit are never inspected, the team learns they don\'t matter. Follow-up is where accountability lives.',
+    good: 'Every visit opens by inspecting last visit\'s commitments on the floor: done, partial or not done, with the number next to it. Not done gets a reason and a new date, never a shrug.',
+    ask: ['What did the store commit to last time, and where does each one stand?', 'Which one wasn\'t done? What did you do about it?', 'How did you check it: did you see it on the floor or take their word?'],
+    play: 'You play a store leader who didn\'t do the commitment and has a good excuse. Have them hold the line kindly: what got in the way, what changes, and the new date.',
+    commit: { what: 'Inspect every open commitment before anything new', to: 'Every visit, each one marked done, partial or not done' } },
+  win: { t: 'Catch a win first', why: 'Leaders who only hear what\'s wrong stop listening. A specific win, said out loud, earns the right to coach.',
+    good: 'They open with one specific win for the store leader: a number, a behavior they saw, a person who grew. Specific, not "good job".',
+    ask: ['What was the store leader\'s win yesterday?', 'How did you say it to them, and who else heard it?'],
+    play: 'Have them give you (as the store leader) a win in two sentences: what they did and why it mattered to the guest or the number.',
+    commit: { what: 'Open every visit with one specific win for the leader', to: 'Every visit, logged in the app' } },
+  coached: { t: 'Coach people, not just the store', why: 'Numbers move when consultants change behavior. A visit that only covers the building leaves the people where they were.',
+    good: 'At least two consultants coached on one behavior each, picked from their numbers: the gap, why it matters, and what to do on the next guest.',
+    ask: ['Who did you coach, and on what behavior?', 'Why those two people?', 'What will they do differently on their next guest?'],
+    play: 'You play a consultant with a low finance rate. Have them coach you in 3 minutes: start with a question, not the number, and end with one thing to do on the next guest.',
+    commit: { what: 'Coach two consultants on one behavior each, picked from their numbers', to: 'Two people every visit' } },
+  practice: { t: 'Practice, don\'t just talk', why: 'Talking about a behavior feels like coaching but doesn\'t change it. People change when they practice it and get a second rep.',
+    good: 'Every person coached gets a quick role-play, feedback on what worked and one adjustment, then a second rep that\'s better than the first.',
+    ask: ['Did you run the practice with them? How did the second rep compare to the first?', 'What adjustment did you give them?', 'What gets in the way of running the role-play?'],
+    play: 'Run it with them right now: you are the consultant, they coach you through a buying power role-play, give one adjustment, and run it again.',
+    commit: { what: 'Run a role-play and a second rep with everyone coached', to: 'Every person coached gets two reps' } },
+  viaLeader: { t: 'Coach through the store leader on remote visits', why: 'On a call, the Market Leader can\'t be on the floor. The store leader can. If the leader doesn\'t coach, nobody does after the call ends.',
+    good: 'On remote visits, they coach the store leader to coach the consultant: the leader runs the role-play and the Market Leader scores the leader\'s coaching.',
+    ask: ['On your remote calls, who did the coaching: you or the store leader?', 'How did the leader do coaching their person? What one thing would make them better?'],
+    play: 'You play the store leader. Have them prep you to coach a consultant on bedding: the behavior, the question to open with, and how you\'ll know it worked.',
+    commit: { what: 'On remote visits, have the store leader run the coaching while you score it', to: 'Every remote visit' } },
+  commits: { t: 'Commitments that can be checked', why: '"Work on finance" can\'t be inspected. "Finance from 18% to 25% by Friday, the leader checks every guest" can.',
+    good: 'Two or three commitments, each with what, from X to Y, how, who owns it and by when. The store leader owns them, not the Market Leader.',
+    ask: ['Read me one commitment from yesterday. How will you know on the next visit if it got done?', 'Who owns it, you or the leader?', 'What\'s the date?'],
+    play: 'Take one of their vague commitments and have them rewrite it out loud with from, to, how, owner and date.',
+    commit: { what: 'Every commitment has what, from X to Y, owner and date', to: 'All commitments, every visit' } },
+  leader: { t: 'Develop the store leader', why: 'The Market Leader is in the store one day. The store leader is there every day. The visit is only as good as what the leader does tomorrow.',
+    good: 'They leave the store leader with their own commitment (from X to Y by a date) and ask what support they need. The leader leaves stronger, not just busier.',
+    ask: ['What did the store leader commit to, in their own words?', 'What support did they ask you for, and when will you deliver it?'],
+    play: 'You play the store leader. Have them close the visit with you: your commitment, how they\'ll check on it, and the support they owe you.',
+    commit: { what: 'Close every visit with the store leader\'s own commitment and support needed', to: 'Every visit' } },
+  walk: { t: 'Walk the 6 Elements and show it', why: 'The building is what the guest sees first. Photos and notes let the leader and the VP see the same store.',
+    good: 'The 6 Elements walked with the leader, every area photographed, each fix with an owner and a date.',
+    ask: ['What did you find on the walk? What did the leader fix before you left?', 'Which photos are missing and why?'],
+    play: 'Have them walk you through how they\'d run the 6 Elements walk with the leader in 20 minutes, so the leader does the finding and the fixing.',
+    commit: { what: 'Walk the 6 Elements with the leader and photograph every area', to: 'Every store visit' } },
+  plan: { t: 'Work the plan', why: 'The plan puts their time where the money is. Visits that don\'t happen or don\'t get logged can\'t be followed up.',
+    good: 'Five visit days a week, logged the same day. Changes to the plan have a reason.',
+    ask: ['Which planned visits didn\'t get logged this week? What happened?', 'What would have to change for every visit to be logged before you leave the lot?'],
+    play: '',
+    commit: { what: 'Log every visit before leaving the lot', to: 'Every planned visit logged the same day' } }
+};
+const HABIT_ORDER = ['plan', 'follow', 'lever', 'coached', 'practice', 'viaLeader', 'commits', 'leader', 'win', 'walk'];
+// Which habits a visit showed. ok is true, false, or null when it doesn't apply.
+function visitQuality(x) {
+  const sm = visitSummary(x);
+  const prior = S.visits.some(y => y.store === x.store && y.id !== x.id && y.status !== 'draft' && y.date < x.date && (y.actions || []).some(hasCommitment));
+  const acts = (x.actions || []).filter(hasCommitment);
+  const full = acts.filter(a => String(a.to || '').trim() && a.due).length;
+  const checks = [
+    { k: 'lever', ok: !!x.lever, note: x.lever ? `Lever: ${x.lever === 'closeRate' ? 'close rate' : x.lever === 'avgTicket' ? 'average ticket' : x.lever}` : 'No lever set' },
+    { k: 'follow', ok: prior ? Object.keys(x.follow || {}).length > 0 : null, note: prior ? (Object.keys(x.follow || {}).length ? 'Last visit\'s commitments inspected' : 'Last visit\'s commitments not marked') : 'No earlier commitments' },
+    { k: 'win', ok: !!String(x.leaderWin?.text || '').trim(), note: String(x.leaderWin?.text || '').trim() ? 'Leader win logged' : 'No leader win' },
+    { k: 'coached', ok: sm.coached.length >= 2, note: `${sm.coached.length} consultant${sm.coached.length === 1 ? '' : 's'} coached` },
+    { k: 'practice', ok: sm.coached.length ? sm.coached.some(c => c.ran) : false, note: sm.coached.length ? `${sm.coached.filter(c => c.ran).length} of ${sm.coached.length} practiced${sm.coached.some(c => c.rerun) ? ', with a second rep' : ''}` : 'Nobody practiced' },
+    { k: 'viaLeader', ok: x.remote ? sm.coached.some(c => c.via) : null, note: x.remote ? (sm.coached.some(c => c.via) ? 'Coached through the store leader' : 'Did not coach through the store leader') : '' },
+    { k: 'commits', ok: acts.length >= 2 && full >= 2, note: `${acts.length} commitment${acts.length === 1 ? '' : 's'}, ${full} with a target and a date` },
+    { k: 'leader', ok: !!sm.leaderCommit, note: sm.leaderCommit ? 'Store leader has their own commitment' : 'No store leader commitment' },
+    { k: 'walk', ok: x.remote ? null : !!sm.score && !x.photosMissing, note: x.remote ? '' : `${sm.score ? `6 Elements ${sm.score.pct}%` : '6 Elements not walked'}${x.photosMissing ? `, ${x.photosMissing} photos missing` : ''}` }
+  ];
+  const app = checks.filter(c => c.ok !== null);
+  return { checks, pct: app.length ? Math.round(app.filter(c => c.ok).length / app.length * 100) : null, sm };
+}
+const mlcId = (email, date) => `${email}_${date}`;
+const mlTeam = () => S.users.filter(u => u.role === 'leader' && (u.stores || []).length && u.email !== S.user.email).sort((a, b) => (a.name || a.email).localeCompare(b.name || b.email));
+// Everything the coach needs on one Market Leader: recent visits read for habits, the plan, today's store.
+async function mlPicture(ml) {
+  const t = today(), wk = weekStartOf(t);
+  const plan = await S.be.plan(ml.email, wk).catch(() => null);
+  const recent = S.visits.filter(x => x.email === ml.email && x.status !== 'draft' && x.date >= addDays(t, -7) && x.date <= t).sort((a, b) => b.date.localeCompare(a.date));
+  const lastDay = recent.filter(x => x.date < t)[0]?.date || null;
+  const yVisits = recent.filter(x => x.date === lastDay || x.date === t).map(x => ({ x, q: visitQuality(x) }));
+  const weekQ = recent.map(x => visitQuality(x));
+  const misses = {};
+  weekQ.forEach(q => q.checks.forEach(c => { if (c.ok === false) misses[c.k] = (misses[c.k] || 0) + 1; }));
+  const notLogged = (plan?.days || []).filter(d => d.date < t && dayStores(d).length && !S.visits.some(x => x.email === ml.email && x.date === d.date && !x.remote && dayStores(d).includes(x.store) && x.status !== 'draft'));
+  if (notLogged.length) misses.plan = notLogged.length + 1;
+  const ranked = HABIT_ORDER.filter(k => misses[k]).sort((a, b) => misses[b] - misses[a] || HABIT_ORDER.indexOf(a) - HABIT_ORDER.indexOf(b));
+  const todayDay = (plan?.days || []).find(d => d.date === t);
+  const avg = weekQ.filter(q => q.pct != null).map(q => q.pct);
+  return { plan, recent, lastDay, yVisits, weekQ, misses, ranked, notLogged, todayDay, avg: avg.length ? Math.round(avg.reduce((a, b) => a + b, 0) / avg.length) : null };
+}
+async function viewMlCoach() {
+  const v = $('#view');
+  const team = mlTeam();
+  if (!team.length) { v.innerHTML = '<div class="panel"><h2>Daily coaching</h2><p>No Market Leaders set up yet.</p></div>'; return; }
+  v.innerHTML = '<p class="loading">Reading the team\'s visits…</p>';
+  const t = today(), canEdit = canHoldOne();
+  if (!S.mlcAll || S.mlcAt !== t) { S.mlcAll = await S.be.mlCoachAll().catch(() => []); S.mlcAt = t; }
+  const pics = {};
+  await Promise.all(team.map(async ml => { pics[ml.email] = await mlPicture(ml); }));
+  if (!S.mlcEmail || !team.some(m => m.email === S.mlcEmail)) S.mlcEmail = (team.find(m => !S.mlcAll.some(d => d.email === m.email && d.date === t && d.status === 'done')) || team[0]).email;
+  const ml = team.find(m => m.email === S.mlcEmail), P = pics[ml.email], first = firstOf(ml.name || ml.email);
+  const history = S.mlcAll.filter(d => d.email === ml.email).sort((a, b) => b.date.localeCompare(a.date));
+  const prev = history.find(d => d.date < t && d.status === 'done');
+  const saved = history.find(d => d.date === t);
+  const focusKey = saved?.focus || P.ranked[0] || 'coached';
+  const H = ML_HABITS[focusKey];
+  const doc = saved || { id: mlcId(ml.email, t), email: ml.email, name: ml.name || ml.email, date: t, status: 'draft', focus: focusKey, prevCheck: '', notes: '', today: '', commit: { what: H.commit.what, from: '', to: H.commit.to, by: addDays(t, 1) } };
+  if (!doc.commit) doc.commit = {};
+  S.MLC = doc;
+  const doneToday = team.filter(m => S.mlcAll.some(d => d.email === m.email && d.date === t && d.status === 'done')).length;
+  const mk = rollup(ml.stores || [], S.daily, 'mtd');
+  const todayStores = dayStores(P.todayDay);
+  const tStore = todayStores[0];
+  const tSnap = tStore ? S.daily?.stores?.[tStore] : null;
+  const tLever = tSnap ? suggestLever(tSnap.mtd) : null;
+  const tFocus = tSnap ? storeFocus(tSnap, 2) : [];
+  const win = (() => {
+    const w = P.recent.find(x => String(x.leaderWin?.text || '').trim());
+    const bestStore = (ml.stores || []).map(s => ({ s, p: S.daily?.stores?.[s]?.mtd })).filter(r => r.p?.vsBud?.netSales != null).sort((a, b) => b.p.vsBud.netSales - a.p.vsBud.netSales)[0];
+    const best = P.yVisits.slice().sort((a, b) => (b.q.pct ?? 0) - (a.q.pct ?? 0))[0];
+    return best?.q.pct >= 75 ? `Their ${best.x.store} visit hit ${best.q.pct}% of the habits. Name what they did well.` : bestStore && bestStore.p.vsBud.netSales >= 0 ? `${bestStore.s} is ${pct(bestStore.p.vsBud.netSales)} to budget month to date.` : w ? `${w.store}: ${w.leaderWin.text}` : 'Ask them for their best moment from yesterday.';
+  })();
+  const dis = canEdit ? '' : 'disabled';
+  const qPill = p => p == null ? '<span class="pill">--</span>' : `<span class="pill ${p >= 80 ? 'done' : p >= 55 ? 'check' : 'off'}">${p}%</span>`;
+  const mark = ok => ok === null ? '' : ok ? '<span class="good">✓</span>' : '<span class="bad">✗</span>';
+  v.innerHTML = `
+  <div class="spread"><div><h2 class="big" style="margin:0">Daily coaching</h2><p class="small" style="margin:4px 0 0">A 15-minute call with each Market Leader every day, on how they ran their visits. <b>${doneToday} of ${team.length}</b> coached today.</p></div></div>
+  <div class="scroller"><table class="grid"><thead><tr><th>Market Leader</th><th>Today</th><th>Last visits</th><th class="num">Habits (7 days)</th><th>Work on</th><th>Coached</th></tr></thead><tbody>
+    ${team.map(m => { const p = pics[m.email], d = S.mlcAll.filter(x => x.email === m.email && x.status === 'done').sort((a, b) => b.date.localeCompare(a.date))[0];
+      return `<tr data-mlc="${esc(m.email)}" style="cursor:pointer;${m.email === ml.email ? 'box-shadow:inset 4px 0 0 #F68C2C' : ''}"><td class="nm"><b>${esc(m.name || m.email)}</b>${m.email === ml.email ? ' <span class="pill set">Open</span>' : ''}</td>
+        <td>${dayStores(p.todayDay).length ? esc(dayStores(p.todayDay).join(', ')) : p.todayDay ? 'Off or open' : '<span class="muted">No plan</span>'}</td>
+        <td>${p.lastDay ? `${esc(dayLabel(p.lastDay))}: ${p.yVisits.filter(y => y.x.date === p.lastDay).map(y => esc(y.x.store) + (y.x.remote ? ' (remote)' : '')).join(', ')}` : '<span class="warn">None in 7 days</span>'}${p.notLogged.length ? ` <span class="warn">· ${p.notLogged.length} not logged</span>` : ''}</td>
+        <td class="num">${qPill(p.avg)}</td><td>${p.ranked[0] ? esc(ML_HABITS[p.ranked[0]].t) : '<span class="muted">--</span>'}</td>
+        <td>${d ? (d.date === t ? '<span class="pill done">Today</span>' : esc(dayLabel(d.date))) : '<span class="warn">Not yet</span>'}</td></tr>`; }).join('')}
+  </tbody></table></div>
+
+  <section class="panel" style="margin-top:14px">
+    <p class="eyebrow">Coaching ${esc(first)} · ${esc(longDate(t))}${saved?.status === 'done' ? ` · <span class="good">Done${saved.coachName ? ' by ' + esc(saved.coachName) : ''}</span>` : ''}</p>
+    <h2 style="margin:4px 0">${esc(ml.name || ml.email)}</h2>
+    <p class="small" style="margin:0">${esc((ml.stores || []).length + ' stores')}${mk ? ` · Month to date ${moneyK(mk.k.netSales)}, ${mk.vsBud.netSales != null ? pct(mk.vsBud.netSales) + ' to budget' : 'no budget'}${mk.vsLy.spg != null ? `, SPG with cancellations ${pct(mk.vsLy.spg)} vs LY` : ''}` : ''}</p>
+
+    <h3 style="margin:16px 0 6px">1. Open with a win <span class="small muted">(2 min)</span></h3>
+    <p style="margin:0">${esc(win)}</p>
+
+    <h3 style="margin:16px 0 6px">2. Inspect yesterday's commitment <span class="small muted">(2 min)</span></h3>
+    ${prev?.commit?.what ? `<p style="margin:0 0 6px"><b>${esc(dayLabel(prev.date))}:</b> ${esc(prev.commit.what)}${prev.commit.to ? `, to ${esc(prev.commit.to)}` : ''}${prev.commit.by ? ` by ${esc(shortDate(prev.commit.by))}` : ''}</p>
+      <div class="row" style="gap:6px">${[['yes', 'Done'], ['partial', 'Partly'], ['no', 'Not done']].map(([k, l]) => `<button type="button" class="btn tiny ${doc.prevCheck === k ? 'primary' : ''}" data-pc="${k}" ${dis}>${l}</button>`).join('')}</div>
+      ${(() => { const h = ML_HABITS[prev.focus]; if (!h) return ''; const seen = P.yVisits.map(y => y.q.checks.find(c => c.k === prev.focus)).filter(c => c && c.ok !== null); return seen.length ? `<p class="small" style="margin:6px 0 0">In the app since: ${seen.map(c => `${mark(c.ok)} ${esc(c.note)}`).join(' · ')}</p>` : ''; })()}`
+      : '<p class="small muted" style="margin:0">No commitment from an earlier daily coaching yet. Today sets the first one.</p>'}
+
+    <h3 style="margin:16px 0 6px">3. Review the visits <span class="small muted">(5 min)</span></h3>
+    ${P.yVisits.length ? P.yVisits.map(({ x, q }) => `<details class="vis" ${P.yVisits.length < 3 ? 'open' : ''}><summary><b>${esc(x.store)}</b><span class="small">${esc(dayLabel(x.date))}</span>${x.remote ? '<span class="pill">Remote</span>' : '<span class="pill set">In store</span>'}${qPill(q.pct)}</summary>
+      <ul class="blist small" style="margin:6px 0">${q.checks.filter(c => c.ok !== null).map(c => `<li>${mark(c.ok)} <b>${esc(ML_HABITS[c.k].t)}:</b> ${esc(c.note)}</li>`).join('')}</ul>
+      ${q.sm.commitments.length ? `<p class="small" style="margin:4px 0"><b>Their commitments:</b></p><ol class="small" style="margin:0 0 4px">${q.sm.commitments.map(c => `<li>${esc(c)}</li>`).join('')}</ol>` : ''}
+      <button class="btn tiny" type="button" data-mov='${esc(JSON.stringify({ store: x.store, date: x.date, email: x.email, kind: x.kind, remote: !!x.remote }))}'>Open the visit</button></details>`).join('')
+      : `<p class="warn" style="margin:0">No visits logged ${P.lastDay ? 'since ' + esc(dayLabel(P.lastDay)) : 'in the last 7 days'}.${P.notLogged.length ? ` Planned but not logged: ${P.notLogged.map(d => esc(dayLabel(d.date)) + ' ' + esc(dayStores(d).join(', '))).join('; ')}.` : ''} Start the call there.</p>`}
+
+    <h3 style="margin:16px 0 6px">4. Teach one habit <span class="small muted">(4 min)</span></h3>
+    <label for="mlfocus" style="max-width:420px">Habit to coach today<select id="mlfocus" ${dis}>${HABIT_ORDER.map(k => `<option value="${k}" ${k === focusKey ? 'selected' : ''}>${esc(ML_HABITS[k].t)}${P.misses[k] ? ` (missed ${P.misses[k] > 1 ? P.misses[k] + ' times' : 'once'} this week)` : ''}</option>`).join('')}</select></label>
+    <div class="fcard" style="margin-top:8px">
+      <p style="margin:0 0 6px"><b>Why it matters:</b> ${esc(H.why)}</p>
+      <p style="margin:0 0 6px"><b>What good looks like:</b> ${esc(H.good)}</p>
+      <p style="margin:0 0 4px"><b>Ask ${esc(first)}:</b></p><ul class="blist" style="margin:0 0 6px">${H.ask.map(q => `<li>${esc(q)}</li>`).join('')}</ul>
+      ${H.play ? `<p style="margin:0"><b>Role-play on the call:</b> ${esc(H.play)} Then give one adjustment and run it again.</p>` : ''}
+    </div>
+
+    <h3 style="margin:16px 0 6px">5. Plan today <span class="small muted">(2 min)</span></h3>
+    ${todayStores.length ? `<p style="margin:0 0 6px">${esc(first)} is in <b>${esc(todayStores.join(', '))}</b> today${P.todayDay?.kind ? ` (${esc(kindToType(P.todayDay.kind))})` : ''}.${tLever ? ` The numbers point to <b>${tLever === 'closeRate' ? 'close rate' : 'average ticket'}</b>` : ''}${tFocus.length ? `${tLever ? ', through' : ' Focus:'} ${tFocus.map(f => esc(f.label) + ' at ' + esc(fmtMetric(f.key, f.value))).join(' and ')}` : ''}${tLever || tFocus.length ? '.' : ''}</p>
+      <ul class="blist small" style="margin:0"><li>What lever and which two people are you coaching today, and why them?</li><li>What will you do differently today on <b>${esc(H.t.toLowerCase())}</b>?</li><li>What will the store leader own when you leave?</li></ul>`
+      : `<p class="small" style="margin:0">${P.todayDay ? 'No store on the plan today.' : 'No plan this week.'} Ask where they'll be and what they'll get done.</p>`}
+    ${fieldBox('mltoday', 'Their plan for today, in their words', doc.today, 2, '', '', dis)}
+
+    <h3 style="margin:16px 0 6px">6. Lock one commitment <span class="small muted">(1 min)</span></h3>
+    <div style="display:grid;gap:8px;grid-template-columns:repeat(auto-fit,minmax(180px,1fr))">
+      <div style="grid-column:1/-1">${fieldInput('mlcw', 'What they will do', doc.commit.what, '', dis, 'style="width:100%"')}</div>
+      <div>${fieldInput('mlcf', 'From (today)', doc.commit.from, '', dis, 'placeholder="Where it is now" style="width:100%"')}</div>
+      <div>${fieldInput('mlct', 'To', doc.commit.to, '', dis, 'style="width:100%"')}</div>
+      <div><label for="mlcb">By<input type="date" id="mlcb" value="${esc(doc.commit.by || '')}" ${dis}></label></div>
+    </div>
+    ${fieldBox('mlnotes', 'Your notes from the call', doc.notes, 3, '', '', dis)}
+    ${canEdit ? `<div class="row" style="margin-top:12px;gap:8px"><button class="btn primary" type="button" id="mlsave">${saved?.status === 'done' ? 'Update' : 'Save coaching'}</button><button class="btn" type="button" id="mlcopy">Copy recap to text ${esc(first)}</button><span class="small muted" id="mlsaved"></span></div>` : ''}
+  </section>
+  ${history.filter(d => d.status === 'done').length ? `<section class="panel"><h3 style="margin:0 0 6px">Coaching history for ${esc(first)}</h3>${history.filter(d => d.status === 'done').slice(0, 10).map(d => `<p class="small" style="margin:4px 0"><b>${esc(dayLabel(d.date))}</b> · ${esc(ML_HABITS[d.focus]?.t || '')}${d.prevCheck ? ` · prior commitment: ${d.prevCheck === 'yes' ? '<span class="good">done</span>' : d.prevCheck === 'partial' ? '<span class="warn">partly</span>' : '<span class="bad">not done</span>'}` : ''}<br>${esc(d.commit?.what || '')}${d.commit?.to ? `, to ${esc(d.commit.to)}` : ''}${d.notes ? `<br><span class="muted">${esc(d.notes)}</span>` : ''}</p>`).join('')}</section>` : ''}`;
+  wireMics(v);
+  v.querySelectorAll('[data-mlc]').forEach(r => r.onclick = () => { S.mlcEmail = r.dataset.mlc; viewMlCoach(); });
+  v.querySelectorAll('[data-mov]').forEach(b => b.onclick = () => openVisit(JSON.parse(b.dataset.mov)));
+  if (!canEdit) return;
+  const grab = () => Object.assign(doc, { today: $('#mltoday').value.trim(), notes: $('#mlnotes').value.trim(), commit: { what: $('#mlcw').value.trim(), from: $('#mlcf').value.trim(), to: $('#mlct').value.trim(), by: $('#mlcb').value } });
+  $('#mlfocus').onchange = e => { grab(); const h = ML_HABITS[e.target.value]; doc.focus = e.target.value; doc.commit = { ...doc.commit, what: h.commit.what, to: h.commit.to }; S.mlcAll = [...S.mlcAll.filter(d => d.id !== doc.id), { ...doc }]; viewMlCoach(); };
+  v.querySelectorAll('[data-pc]').forEach(b => b.onclick = () => { grab(); doc.prevCheck = doc.prevCheck === b.dataset.pc ? '' : b.dataset.pc; S.mlcAll = [...S.mlcAll.filter(d => d.id !== doc.id), { ...doc }]; viewMlCoach(); });
+  $('#mlsave').onclick = async () => {
+    grab();
+    if (!doc.commit.what) return toast('Add the one thing they commit to.', true);
+    const out = { ...doc, status: 'done', coach: S.user.email, coachName: S.user.name || S.user.email, at: new Date().toISOString(), prevFocus: prev?.focus || null, prevDate: prev?.date || null, visits: P.yVisits.map(y => ({ id: y.x.id, store: y.x.store, date: y.x.date, pct: y.q.pct })) };
+    try { await S.be.saveMlCoach(out); S.mlcAll = [...S.mlcAll.filter(d => d.id !== out.id), out]; toast(`Saved. ${first} sees the commitment on their daily brief.`); viewMlCoach(); }
+    catch (e) { toast(friendly(e), true); }
+  };
+  $('#mlcopy').onclick = async () => {
+    grab();
+    const c = doc.commit;
+    const txt = `${first}, thanks for the time today. Win: ${win}\nWe worked on: ${H.t}.\nYour commitment: ${c.what}${c.from ? `, from ${c.from}` : ''}${c.to ? ` to ${c.to}` : ''}${c.by ? ` by ${shortDate(c.by)}` : ''}.${doc.today ? `\nToday: ${doc.today}` : ''}\nI'll check in on it tomorrow. Let's go.`;
+    try { await navigator.clipboard.writeText(txt); toast('Copied. Paste it into a text or Teams.'); } catch (e) { toast(txt); }
+  };
+}
+// On the Market Leader's own brief: the latest daily coaching, so the commitment stays in front of them.
+async function mlCoachCard() {
+  if (seesAll() || S.user.role !== 'leader') return '';
+  const list = await S.be.mlCoachFor(S.user.email).catch(() => []);
+  const d = list.filter(x => x.status === 'done' && x.date >= addDays(today(), -3)).sort((a, b) => b.date.localeCompare(a.date))[0];
+  if (!d) return '';
+  const c = d.commit || {};
+  return `<section class="panel" style="border-left:6px solid var(--navy, #003B4A)"><p class="eyebrow">Daily coaching · ${esc(dayLabel(d.date))}${d.coachName ? ' with ' + esc(firstOf(d.coachName)) : ''}</p>
+    <h3 style="margin:2px 0 6px">${esc(ML_HABITS[d.focus]?.t || 'Your focus')}</h3>
+    <p style="margin:0"><b>You committed to:</b> ${esc(c.what || '')}${c.from ? `, from ${esc(c.from)}` : ''}${c.to ? ` to ${esc(c.to)}` : ''}${c.by ? ` by ${esc(shortDate(c.by))}` : ''}.</p>
+    ${ML_HABITS[d.focus] ? `<p class="small" style="margin:6px 0 0"><b>What good looks like:</b> ${esc(ML_HABITS[d.focus].good)}</p>` : ''}</section>`;
+}
+// On the coach's own brief: who still needs today's call.
+function coachNudge() {
+  if (!isCoach() || S.viewEmail !== S.user.email) return '';
+  const team = mlTeam(), t = today();
+  const done = team.filter(m => (S.mlcAll || []).some(d => d.email === m.email && d.date === t && d.status === 'done'));
+  const left = team.filter(m => !done.includes(m));
+  return `<section class="panel" style="border-left:6px solid #F68C2C"><h3 style="margin:0 0 4px">Coach your Market Leaders today</h3>
+    <p class="small" style="margin:0 0 8px">${done.length} of ${team.length} coached.${left.length ? ` Still to call: <b>${left.map(m => esc(firstOf(m.name || m.email))).join(', ')}</b>.` : ' Everyone is done for today.'}</p>
+    <button class="btn tiny primary" type="button" id="gocoach">Open daily coaching</button></section>`;
+}
+
 // ---------------------------------------------------------------- team messages
 // Written for the Market Leader to copy into Teams, a group text or email. Nothing is sent from the app.
 const MSG_TYPES = [
@@ -3221,7 +3475,7 @@ const MSG_TYPES = [
 ];
 async function viewMessages() {
   const v = $('#view');
-  if (seesAll() && !S.viewEmail) S.viewEmail = leaders()[0]?.email || null;
+  if (seesAll() && !S.viewEmail) S.viewEmail = defaultView();
   const email = seesAll() ? S.viewEmail : S.user.email;
   const who = S.users.find(u => u.email === email) || (email === S.user.email ? S.user : null);
   const stores = who?.stores || [];
@@ -3608,6 +3862,8 @@ function viewSetup() {
       }).join('')}`).join('')}</div></div>
       <p class="small" style="margin:12px 0 4px"><b>Pilots</b></p>
       <label class="check" for="upfliq"><input type="checkbox" id="upfliq" ${hasFliq(u) ? 'checked' : ''}>FrontLine IQ (AI sales coach). Adds it to their visits and daily brief.</label>
+      <p class="small" style="margin:12px 0 4px"><b>Coaches Market Leaders</b></p>
+      <label class="check" for="ucoach"><input type="checkbox" id="ucoach" ${u.coach ? 'checked' : ''}>VP view of every leader, store and visit. Holds the Market Leader 1 on 1s and their daily coaching. Keeps their own stores.</label>
       <p class="small" style="margin:12px 0 4px"><b>Default days off</b> (pick 2; Tue, Wed or Thu works best. They can change any week from their own page.)</p>
       <div class="dayspick">${DAY_LONG.map((n, i) => `<label class="check" for="uo${i}"><input type="checkbox" id="uo${i}" value="${i}" ${safeOff(u.off).includes(i) ? 'checked' : ''}>${n}</label>`).join('')}</div>
       <div class="row" style="margin-top:14px"><button class="btn primary" type="submit">Save</button><button class="link" type="button" id="ucancel">Cancel</button>
@@ -3615,7 +3871,7 @@ function viewSetup() {
       <div id="delconfirm"></div>
     </form>` : ''}
     <div class="scroller"><table class="grid"><thead><tr><th>Name</th><th>Role</th><th>Stores</th><th>Default off</th><th></th></tr></thead><tbody>
-      ${users.map(x => `<tr><td class="nm">${esc(x.name || x.email)}<br><small class="muted">${esc(x.email)}</small></td><td>${esc(roleLabel(x.role))}</td>
+      ${users.map(x => `<tr><td class="nm">${esc(x.name || x.email)}<br><small class="muted">${esc(x.email)}</small></td><td>${esc(roleLabel(x.role))}${x.coach ? '<br><small class="muted">Coaches Market Leaders</small>' : ''}</td>
         <td style="white-space:normal;min-width:220px">${(x.stores || []).map(esc).join(', ') || '<span class="muted">--</span>'}</td>
         <td>${FIELD.includes(x.role) ? safeOff(x.off, x.role).map(i => DAY_NAMES[i]).join(', ') : ''}</td>
         <td><button class="btn tiny" data-eu="${esc(x.email)}">Edit</button></td></tr>`).join('')}
@@ -3645,7 +3901,7 @@ function viewSetup() {
     const role = $('#urole').value;
     if (FIELD.includes(role) && !validOff(off)) return toast('Pick exactly 2 default days off.', true);
     const prevPilots = (S.users.find(x => x.email === email)?.pilots || []).filter(p => p !== 'frontlineiq');
-    const doc = { ...(S.users.find(x => x.email === email) || {}), email, name: $('#uname').value.trim(), role, stores, off, pilots: [...prevPilots, ...($('#upfliq').checked ? ['frontlineiq'] : [])] };
+    const doc = { ...(S.users.find(x => x.email === email) || {}), email, name: $('#uname').value.trim(), role, stores, off, pilots: [...prevPilots, ...($('#upfliq').checked ? ['frontlineiq'] : [])], coach: $('#ucoach').checked };
     try {
       // A store has one Market Leader: take moved stores off any other Market Leader. Directors can overlap.
       for (const other of S.users.filter(x => role === 'leader' && x.role === 'leader' && x.email !== email && (x.stores || []).some(s => stores.includes(s)))) {
@@ -3682,9 +3938,16 @@ function viewGuide() {
     </ul>
     <h3 style="margin-top:18px">Monday: your 1 on 1</h3>
     <ul>
-      <li>Each week your VP holds a 1 on 1 with you on the week that just closed, Monday to Sunday. It covers wins and opportunities for your stores and people, who performed and who didn't, how your visits went, and the one lever your market needs to pull.</li>
+      <li>Each week Orlando or your VP holds a 1 on 1 with you on the week that just closed, Monday to Sunday. It covers wins and opportunities for your stores and people, who performed and who didn't, how your visits went, and the one lever your market needs to pull.</li>
       <li>You leave with up to 3 commitments, each from X to Y by a date, with how you'll get there. They show on your <b>Daily brief</b> all week with where each one stands, and on <b>My 1 on 1</b>.</li>
       <li>Next week's 1 on 1 starts by reviewing them.</li>
+    </ul>
+    <h3 style="margin-top:18px">Every day: a coaching call on your visits</h3>
+    <ul>
+      <li>Orlando (or your VP) calls you every day for about 15 minutes, remote, on how you ran your visits. It isn't a numbers review. It's about how you lead a visit.</li>
+      <li>The call reads your logged visits for the habits of an effective Market Leader: a lever set before you walk in, follow-up first, a win for the leader, two people coached with a role-play and a second rep, coaching through the store leader on remote visits, commitments from X to Y by a date, and the store leader leaving with their own commitment.</li>
+      <li>You pick one habit together, practice it on the call, and leave with one commitment. It shows at the top of your <b>Daily brief</b> until the next call, and the next call starts by checking it.</li>
+      <li>Log your visits the same day. A visit that isn't logged can't be coached.</li>
     </ul>
     <h3 style="margin-top:18px">During the week: pivot when the numbers move</h3>
     <ul>
